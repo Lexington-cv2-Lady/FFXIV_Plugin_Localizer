@@ -118,21 +118,8 @@ public sealed class MtTranslateService
         });
     }
 
-    /// <summary> 是否值得翻译：含 ASCII 字母、且不含中日韩字符（已是中文的不送翻）。 </summary>
-    private static bool IsTranslatable(string s)
-    {
-        var hasLetter = false;
-        foreach (var c in s)
-        {
-            if (c >= 0x4E00 && c <= 0x9FFF) return false;      // 中日韩统一表意
-            if (c >= 0x3040 && c <= 0x30FF) return false;      // 假名
-            if (c >= 0xAC00 && c <= 0xD7A3) return false;      // 谚文
-            if (c >= 0x3000 && c <= 0x303F) return false;      // 中日韩标点（。、等）
-            if (c >= 0xFF00 && c <= 0xFFEF) return false;      // 全角字符
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) hasLetter = true;
-        }
-        return hasLetter;
-    }
+    /// <summary> 是否值得翻译：含 ASCII 字母、不含中日韩字符（已是中文的不送翻）、且不是纯键位名。 </summary>
+    private static bool IsTranslatable(string s) => TextHeuristics.IsTranslatable(s);
 
     /// <summary> 批量循环：分批送翻 → 汇总 → merge 落盘。 </summary>
     private async Task TranslateAll(List<string> texts, Func<Dictionary<string, string>, int> merge)
