@@ -45,6 +45,7 @@ public sealed unsafe class ReplacementService
     private Dictionary<string, byte[]> _table = new(StringComparer.Ordinal);   // 合并查找：英文 → 中文 UTF-8
     private HashSet<ulong> _hashes = new();                                    // 英文键 FNV（热路径预筛）
     private readonly Dictionary<string, nint> _ptrs = new(StringComparer.Ordinal); // 英文 → 中文指针
+    private readonly List<nint> _graveyard = new();                            // 已弃用的中文指针（仅 Dispose 释放，避免渲染线程 use-after-free）
 
     /// <summary> 替换开关（只影响绘制替换；表的管理不受影响）。 </summary>
     public bool Enabled { get; set; }
@@ -133,12 +134,14 @@ public sealed unsafe class ReplacementService
         }
     }
 
-    /// <summary> 重建合并查找表（安装器表优先，窗口表不覆盖同键）。 </summary>
+    /// <summary> 重建合并查找表（安装器表优先，窗口表不覆盖同键）。
+    /// ⚠ 旧中文指针**不在运行时释放**：渲染线程可能正拿着某个指针绘制（后台机翻线程重建表时会并发），
+    /// 立即 Free 会造成 use-after-free 崩溃。统一塞进 _graveyard，只在 Dispose 释放；重建不频繁，内存代价可忽略。 </summary>
     private void RebuildMerged()
     {
         lock (_lock)
         {
-            foreach (var ptr in _ptrs.Values) Marshal.FreeCoTaskMem(ptr);
+            foreach (var ptr in _ptrs.Values) _graveyard.Add(ptr);
             _ptrs.Clear();
             _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             _hashes = new HashSet<ulong>();
@@ -636,5 +639,17 @@ public sealed unsafe class ReplacementService
             h *= 1099511628211UL;
         }
         return h;
+    }
+
+    /// <summary> 卸载：释放全部中文指针（含弃用区）。此处渲染线程已停，可安全释放。 </summary>
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            foreach (var ptr in _ptrs.Values) Marshal.FreeCoTaskMem(ptr);
+            foreach (var ptr in _graveyard) Marshal.FreeCoTaskMem(ptr);
+            _ptrs.Clear();
+            _graveyard.Clear();
+        }
     }
 }

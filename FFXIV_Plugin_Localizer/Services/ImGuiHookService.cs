@@ -100,8 +100,21 @@ public sealed unsafe class ImGuiHookService : IDisposable
             try
             {
                 var q = (byte*)textBegin;
-                var n = 0;
-                while (n < MaxTextLen && q[n] != 0) n++;
+                // ⚠ 必须尊重调用方的 text_end：非空表示这是一个「切片」（未必 NUL 结尾），
+                //   此时绝不能扫 NUL——曾无条件扫到 1024 字节，缓冲区较小就会读到未映射内存 → AV。
+                int n;
+                if (textEnd != 0)
+                {
+                    n = (int)(textEnd - textBegin);
+                    if (n <= 0) { _textHook!.Original(textBegin, textEnd); return; }
+                    if (n > MaxTextLen) n = MaxTextLen;
+                }
+                else
+                {
+                    n = 0;
+                    while (n < MaxTextLen && q[n] != 0) n++;
+                }
+
                 var rep = _replacement.TryReplace(q, n);
                 if (rep != 0)
                 {

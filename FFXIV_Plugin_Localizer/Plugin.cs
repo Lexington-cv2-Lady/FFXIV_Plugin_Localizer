@@ -183,6 +183,7 @@ public sealed class Plugin : IDalamudPlugin
         CommandManager.RemoveHandler(CommandName);
         WindowSystem.RemoveAllWindows();
         Hook.Dispose();
+        Replacement.Dispose();
         AppLog.Info("[插件] 插件界面汉化 已卸载");
     }
 }
