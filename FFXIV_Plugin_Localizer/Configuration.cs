@@ -21,5 +21,9 @@ public class Configuration : IPluginConfiguration
     /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
     public bool ReplacementEnabled { get; set; } = true;
 
+    /// <summary> 智谱开放平台 API Key（glm-4-flash 免费模型，OpenAI 兼容端点）。
+    /// ⚠ 每个用户自己填，只存本机 pluginConfigs 配置文件（APPDATA），严禁入库/写死在代码里。 </summary>
+    public string ZhipuApiKey { get; set; } = "";
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

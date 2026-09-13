@@ -196,48 +196,54 @@ public sealed unsafe class ReplacementService
     }
 
     /// <summary>
-    /// 扫描已安装插件的清单（Name/Description/Punchline），列出对照表还没有翻译的条目，
-    /// 写入 安装器未翻译.json（机翻 API 的输入）。返回缺失条数。
+    /// 扫描已安装插件的清单（Name/Description/Punchline），收集对照表还没有翻译的条目（机翻 API 的输入）。
+    /// </summary>
+    public SortedDictionary<string, string> CollectMissing()
+    {
+        var missing = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        var launcherDir = Path.GetDirectoryName(Path.GetDirectoryName(_configDir()));
+        var root = Path.Combine(launcherDir!, "installedPlugins");
+        if (!Directory.Exists(root)) return missing;
+        foreach (var manifestPath in Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories))
+        {
+            // 清单形如 installedPlugins\<ID>\<版本>\<ID>.json；跳过明显不是清单的文件
+            var name = Path.GetFileNameWithoutExtension(manifestPath);
+            var dir = Path.GetFileName(Path.GetDirectoryName(manifestPath));
+            if (name != dir) continue;
+            try
+            {
+                var m = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(manifestPath));
+                if (m == null) continue;
+                foreach (var field in new[] { "Description", "Punchline" })
+                {
+                    if (!m.TryGetValue(field, out var el) || el.ValueKind != JsonValueKind.String) continue;
+                    var text = el.GetString()?.Trim();
+                    if (string.IsNullOrEmpty(text) || text!.Length < 2) continue;
+                    bool hasLetter = false;
+                    foreach (var c in text)
+                    {
+                        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) { hasLetter = true; break; }
+                    }
+                    if (!hasLetter) continue;
+                    lock (_lock)
+                    {
+                        if (!_table.ContainsKey(text!)) missing[$"{name}｜{field}"] = text!;
+                    }
+                }
+            }
+            catch { /* 单个清单坏了跳过 */ }
+        }
+        return missing;
+    }
+
+    /// <summary>
+    /// 扫描已安装插件的清单，列出对照表还没有翻译的条目，写入 安装器未翻译.json。返回缺失条数。
     /// </summary>
     public int ScanInstallerMissing()
     {
-        var launcherDir = Path.GetDirectoryName(Path.GetDirectoryName(_configDir()));
-        var missing = new SortedDictionary<string, string>(StringComparer.Ordinal);
         try
         {
-            var root = Path.Combine(launcherDir!, "installedPlugins");
-            if (Directory.Exists(root))
-            {
-                foreach (var manifestPath in Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories))
-                {
-                    // 清单形如 installedPlugins\<ID>\<版本>\<ID>.json；跳过明显不是清单的文件
-                    var name = Path.GetFileNameWithoutExtension(manifestPath);
-                    var dir = Path.GetFileName(Path.GetDirectoryName(manifestPath));
-                    if (name != dir) continue;
-                    try
-                    {
-                        var m = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(manifestPath));
-                        if (m == null) continue;
-                        foreach (var field in new[] { "Description", "Punchline" })
-                        {
-                            if (!m.TryGetValue(field, out var el) || el.ValueKind != JsonValueKind.String) continue;
-                            var text = el.GetString()?.Trim();
-                            if (string.IsNullOrEmpty(text) || text!.Length < 2) continue;
-                            bool hasLetter = false;
-                            foreach (var c in text)
-                            {
-                                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) { hasLetter = true; break; }
-                            }
-                            if (!hasLetter) continue;
-                            lock (_lock)
-                            {
-                                if (!_table.ContainsKey(text!)) missing[$"{name}｜{field}"] = text!;
-                            }
-                        }
-                    }
-                    catch { /* 单个清单坏了跳过 */ }
-                }
-            }
+            var missing = CollectMissing();
             Directory.CreateDirectory(_configDir());
             var outPath = Path.Combine(_configDir(), MissingFileName);
             File.WriteAllText(outPath,
@@ -250,6 +256,30 @@ public sealed unsafe class ReplacementService
             _appLog.Error("[替换] 安装器缺失扫描失败：" + ex.Message);
             return -1;
         }
+    }
+
+    /// <summary> 把翻译结果并入对照表（内存 + 中文指针 + 哈希），并落盘。返回实际新增条数。 </summary>
+    public int MergeTranslations(Dictionary<string, string> translations)
+    {
+        var added = 0;
+        lock (_lock)
+        {
+            foreach (var (en, zh) in translations)
+            {
+                var key = en.Trim();
+                var val = (zh ?? "").Trim();
+                if (key.Length < 2 || val.Length == 0 || key == val) continue;
+                if (_table.ContainsKey(key)) continue;
+                var bytes = Encoding.UTF8.GetBytes(val);
+                var ptr = Marshal.StringToCoTaskMemUTF8(val);
+                _table[key] = bytes;
+                _ptrs[key] = ptr;
+                _hashes.Add(FnvUtf8(key));
+                added++;
+            }
+        }
+        if (added > 0) Save();
+        return added;
     }
 
     private static ulong FnvUtf8(string s)

@@ -28,6 +28,7 @@ public sealed class Plugin : IDalamudPlugin
     public ImGuiHookService Hook { get; }
     public PluginScanService Scan { get; }
     public ReplacementService Replacement { get; }
+    public MtTranslateService Mt { get; }
     public MainWindow MainWindow { get; }
     public LogWindow LogWindow { get; }
     public ScanWindow ScanWindow { get; }
@@ -42,10 +43,11 @@ public sealed class Plugin : IDalamudPlugin
         Hook = new ImGuiHookService(AppLog, Log, Interop, PluginInterface.GetPluginConfigDirectory,
             () => Configuration.HooksEnabled, () => Configuration.LabelHooks, Replacement);
         Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
+        Mt = new MtTranslateService(AppLog, Replacement, () => Configuration.ZhipuApiKey);
         MainWindow = new MainWindow(this);
         LogWindow = new LogWindow(this);
         ScanWindow = new ScanWindow(this, Scan);
-        TranslationWindow = new TranslationWindow(this, Replacement);
+        TranslationWindow = new TranslationWindow(this, Replacement, Mt);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
         WindowSystem.AddWindow(ScanWindow);
