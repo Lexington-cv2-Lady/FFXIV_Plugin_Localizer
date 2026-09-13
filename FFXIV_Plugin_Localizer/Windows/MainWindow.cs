@@ -43,41 +43,42 @@ public sealed class MainWindow : Window
 
         ImGui.Separator();
 
-        // ── 功能入口（放不下自动换行，防止窗口变窄时被裁掉） ──
+        // ── 功能入口（按使用流程排序：① 配置 → ② 提取 → ③ 翻译 → ④ 排障；放不下自动换行） ──
+        Ui.Hint("流程：① AI 设置（填 Key） → ② 文案扫描（提取英文） → ③ 窗口文字翻译（翻成中文）；安装器翻译为并行支线，日志随时可看。");
+        if (ImGui.Button("① AI 设置"))
+        {
+            _plugin.ToggleAiSettingsUi();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("第一步·前置配置：AI 供应商 / API Key / 模型 / 温度 / 批量 / 测试连接。\n填好免费智谱 Key 后，后面两步的机翻才能用。");
+        Ui.SameLineIfFits(Ui.ButtonWidth("② 文案扫描"));
+        if (ImGui.Button("② 文案扫描"))
+        {
+            _plugin.ToggleScanUi();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("第二步·提取：静态扫描已安装插件 DLL 的全部英文文案（不依赖游戏内窗口，双语汉化版自动跳过）。\n产物是第三步的原料。");
+        Ui.SameLineIfFits(Ui.ButtonWidth("③ 窗口文字翻译"));
+        if (ImGui.Button("③ 窗口文字翻译"))
+        {
+            _plugin.ToggleWindowReplaceUi();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("第三步·翻译：按插件把窗口内文字翻成中文（机翻/手动，候选来自②文案扫描），替换层即时生效。");
+        Ui.SameLineIfFits(Ui.ButtonWidth("安装器翻译"));
         if (ImGui.Button("安装器翻译"))
         {
             _plugin.ToggleTranslationUi();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("插件安装器里插件介绍的中文化：对照表 + 机翻 + 手动编辑，随插件更新自动补翻。");
-        Ui.SameLineIfFits(Ui.ButtonWidth("窗口文字翻译"));
-        if (ImGui.Button("窗口文字翻译"))
-        {
-            _plugin.ToggleWindowReplaceUi();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("按插件翻译窗口内的界面文字（候选来自文案扫描），替换层即时生效。");
-        Ui.SameLineIfFits(Ui.ButtonWidth("文案扫描"));
-        if (ImGui.Button("文案扫描"))
-        {
-            _plugin.ToggleScanUi();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("静态扫描已安装插件 DLL 的全部英文文案（不依赖游戏内窗口，双语汉化版自动跳过）。");
-        Ui.SameLineIfFits(Ui.ButtonWidth("AI 设置"));
-        if (ImGui.Button("AI 设置"))
-        {
-            _plugin.ToggleAiSettingsUi();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("AI 供应商 / API Key / 模型 / 温度 / 批量 / 测试连接（机翻功能的配置）。");
+            ImGui.SetTooltip("并行支线：插件安装器里插件介绍的中文化。\n基本自动（启动导入现成机翻表 + 自动补缺），随插件更新自动补翻。");
         Ui.SameLineIfFits(Ui.ButtonWidth("日志窗口"));
         if (ImGui.Button("日志窗口"))
         {
             _plugin.ToggleLogUi();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("操作日志 + 一键导出报错日志 zip。");
+            ImGui.SetTooltip("随时可看：操作日志 + 一键导出报错日志 zip。");
 
         ImGui.Separator();
 
