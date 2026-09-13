@@ -44,6 +44,36 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void TextUnformattedDelegate(nint textBegin, nint textEnd);
 
+    // ── 控件标签桩的委托（按 cimgui 实际签名；浮点参数必须专用委托，否则转发时寄存器错位会弄坏控件） ──
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D1(nint a);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D2(nint a, nint b);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D2b(nint a, byte b);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D2u(nint a, uint b);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D2v(nint a, ImVec2 b);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D3u(nint a, nint b, uint c);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D4bb(nint a, nint b, byte c, byte d);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D4bu(nint a, byte b, uint c, ImVec2 d);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void SliderFloatD(nint label, nint v, float min, float max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void DragFloatD(nint label, nint v, float speed, float min, float max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void SliderIntD(nint label, nint v, int min, int max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void DragIntD(nint label, nint v, int speed, int min, int max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void InputTextD(nint label, nint buf, nuint bufSize, uint flags, nint callback, nint userData);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void InputTextHintD(nint label, nint hint, nint buf, nuint bufSize, uint flags, nint callback, nint userData);
+
     // ImGuiWindowFlags 内部旗标（imgui.h，多年未变）：子窗口/提示/弹出/模态都不算「顶层窗口」
     private const uint FlagChild = 1u << 24;
     private const uint FlagTooltip = 1u << 25;
@@ -72,6 +102,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private Hook<EndDelegate>? _endHook;
     private Hook<AddTextFullDelegate>? _addTextHook;
     private Hook<TextUnformattedDelegate>? _textHook;
+    private readonly List<IDisposable> _labelHooks = new();
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MEMORY_BASIC_INFORMATION
@@ -223,6 +254,72 @@ public sealed unsafe class ImGuiHookService : IDisposable
             var mode = realBody != 0 ? "AddText 真实函数体" : _textHook != null ? "igTextUnformatted 兜底" : "AddText 导出桩";
             HookStatus = $"已挂接 {moduleName}：{mode} / igBegin / igEnd";
             _appLog.Info($"[钩子] {HookStatus}");
+
+            // ── 控件标签桩钩子：按钮/复选框/滑条/下拉框等的 label 走各自控件导出，不经过
+            //    igTextUnformatted（兜底模式漏采的根因）。按 cimgui 真实签名逐个挂桩转发
+            //    （浮点参数必须专用委托，否则寄存器错位会弄坏控件）；两种模式都装，与 AddText 去重。
+            var labelMissing = new List<string>();
+            var backend = IGameInteropProvider.HookBackend.Automatic;
+
+            var bBtn = new HookBox<D2v>();
+            InstallLabel("igButton", baseAddr, bBtn, (a, b) => { CollectArg(a); bBtn.Hook!.Original(a, b); }, backend, labelMissing);
+            var bSBtn = new HookBox<D1>();
+            InstallLabel("igSmallButton", baseAddr, bSBtn, a => { CollectArg(a); bSBtn.Hook!.Original(a); }, backend, labelMissing);
+            var bCheck = new HookBox<D2>();
+            InstallLabel("igCheckbox", baseAddr, bCheck, (a, b) => { CollectArg(a); bCheck.Hook!.Original(a, b); }, backend, labelMissing);
+            var bSel = new HookBox<D4bu>();
+            InstallLabel("igSelectable_Bool", baseAddr, bSel, (a, b, c, d) => { CollectArg(a); bSel.Hook!.Original(a, b, c, d); }, backend, labelMissing);
+            var bCol1 = new HookBox<D2>();
+            InstallLabel("igCollapsingHeader_BoolPtr", baseAddr, bCol1, (a, b) => { CollectArg(a); bCol1.Hook!.Original(a, b); }, backend, labelMissing);
+            var bCol2 = new HookBox<D3u>();
+            InstallLabel("igCollapsingHeader_TreeNodeFlags", baseAddr, bCol2, (a, b, c) => { CollectArg(a); bCol2.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bTab = new HookBox<D3u>();
+            InstallLabel("igBeginTabItem", baseAddr, bTab, (a, b, c) => { CollectArg(a); bTab.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bMenu = new HookBox<D2b>();
+            InstallLabel("igBeginMenu", baseAddr, bMenu, (a, b) => { CollectArg(a); bMenu.Hook!.Original(a, b); }, backend, labelMissing);
+            var bMItem = new HookBox<D4bb>();
+            InstallLabel("igMenuItem_Bool", baseAddr, bMItem, (a, b, c, d) => { CollectArg(a); CollectArg(b); bMItem.Hook!.Original(a, b, c, d); }, backend, labelMissing);
+            var bCombo = new HookBox<D3u>();
+            InstallLabel("igBeginCombo", baseAddr, bCombo, (a, b, c) => { CollectArg(a); CollectArg(b); bCombo.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bTree = new HookBox<D1>();
+            InstallLabel("igTreeNode_Str", baseAddr, bTree, a => { CollectArg(a); bTree.Hook!.Original(a); }, backend, labelMissing);
+            var bTreeEx = new HookBox<D2u>();
+            InstallLabel("igTreeNodeEx_Str", baseAddr, bTreeEx, (a, b) => { CollectArg(a); bTreeEx.Hook!.Original(a, b); }, backend, labelMissing);
+            var bRadio = new HookBox<D2b>();
+            InstallLabel("igRadioButton_Bool", baseAddr, bRadio, (a, b) => { CollectArg(a); bRadio.Hook!.Original(a, b); }, backend, labelMissing);
+            var bSF = new HookBox<SliderFloatD>();
+            InstallLabel("igSliderFloat", baseAddr, bSF, (a, b, c, d, e, f) => { CollectArg(a); bSF.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            var bDF = new HookBox<DragFloatD>();
+            InstallLabel("igDragFloat", baseAddr, bDF, (a, b, c, d, e, f, g) => { CollectArg(a); bDF.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            var bSI = new HookBox<SliderIntD>();
+            InstallLabel("igSliderInt", baseAddr, bSI, (a, b, c, d, e, f) => { CollectArg(a); bSI.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            var bDI = new HookBox<DragIntD>();
+            InstallLabel("igDragInt", baseAddr, bDI, (a, b, c, d, e, f, g) => { CollectArg(a); bDI.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            var bIT = new HookBox<InputTextD>();
+            InstallLabel("igInputText", baseAddr, bIT, (a, b, c, d, e, f) => { CollectArg(a); bIT.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            var bITH = new HookBox<InputTextHintD>();
+            InstallLabel("igInputTextWithHint", baseAddr, bITH, (a, b, c, d, e, f, g) => { CollectArg(a); CollectArg(b); bITH.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            var bCE3 = new HookBox<D3u>();
+            InstallLabel("igColorEdit3", baseAddr, bCE3, (a, b, c) => { CollectArg(a); bCE3.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bCE4 = new HookBox<D3u>();
+            InstallLabel("igColorEdit4", baseAddr, bCE4, (a, b, c) => { CollectArg(a); bCE4.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bText = new HookBox<D1>();
+            InstallLabel("igText", baseAddr, bText, a => { CollectArg(a); bText.Hook!.Original(a); }, backend, labelMissing);
+            var bTD = new HookBox<D1>();
+            InstallLabel("igTextDisabled", baseAddr, bTD, a => { CollectArg(a); bTD.Hook!.Original(a); }, backend, labelMissing);
+            var bTW = new HookBox<D1>();
+            InstallLabel("igTextWrapped", baseAddr, bTW, a => { CollectArg(a); bTW.Hook!.Original(a); }, backend, labelMissing);
+            var bLT = new HookBox<D2>();
+            InstallLabel("igLabelText", baseAddr, bLT, (a, b) => { CollectArg(a); bLT.Hook!.Original(a, b); }, backend, labelMissing);
+            var bBT = new HookBox<D1>();
+            InstallLabel("igBulletText", baseAddr, bBT, a => { CollectArg(a); bBT.Hook!.Original(a); }, backend, labelMissing);
+            var bTip = new HookBox<D1>();
+            InstallLabel("igSetTooltip", baseAddr, bTip, a => { CollectArg(a); bTip.Hook!.Original(a); }, backend, labelMissing);
+            var bTC = new HookBox<D2>();
+            InstallLabel("igTextColored", baseAddr, bTC, (a, b) => { CollectArg(b); bTC.Hook!.Original(a, b); }, backend, labelMissing);
+
+            _appLog.Info($"[钩子] 控件标签桩：{_labelHooks.Count} 个挂接成功" +
+                         (labelMissing.Count > 0 ? $"，缺导出 {labelMissing.Count} 个（{string.Join("、", labelMissing)}）" : ""));
         }
         catch (Exception ex)
         {
@@ -320,6 +417,26 @@ public sealed unsafe class ImGuiHookService : IDisposable
         return value != 0;
     }
 
+    /// <summary> 控件标签桩的钩子容器：detour 闭包通过它拿到自己的 Hook 实例来调 Original。 </summary>
+    private sealed class HookBox<T> where T : Delegate
+    {
+        public Hook<T>? Hook;
+    }
+
+    private void InstallLabel<T>(string export, nint baseAddr, HookBox<T> box, T detour, IGameInteropProvider.HookBackend backend, List<string> missing)
+        where T : Delegate
+    {
+        var addr = GetExport(baseAddr, export);
+        if (addr == 0)
+        {
+            missing.Add(export);
+            return;
+        }
+        box.Hook = _interop.HookFromAddress<T>(addr, detour, backend);
+        box.Hook.Enable();
+        _labelHooks.Add(box.Hook);
+    }
+
     /// <summary> 地址所属模块名（诊断日志用；找不到返回「未知模块」）。 </summary>
     private static string ModuleOf(nint addr)
     {
@@ -392,12 +509,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
         {
             try
             {
-                var shown = len; // 标题显示部分截到 ## 为止（### 之后是 ID 后缀，不是显示文字）
-                for (var i = 0; i + 1 < len; i++)
-                {
-                    if (p[i] == (byte)'#' && p[i + 1] == (byte)'#') { shown = i; break; }
-                }
-                CollectBytes(p, shown, own);
+                CollectBytes(p, DisplayLen(p, len), own);
             }
             catch { /* 钩子内异常绝不外抛 */ }
         }
@@ -453,6 +565,30 @@ public sealed unsafe class ImGuiHookService : IDisposable
             try { Collect(textBegin, textEnd); } catch { /* 钩子内异常绝不外抛 */ }
         }
         _textHook!.Original(textBegin, textEnd);
+    }
+
+    /// <summary> 控件标签参数采集（NUL 结尾字符串，## 截断到显示部分）。控件桩钩子统一走这里。 </summary>
+    private void CollectArg(nint p)
+    {
+        if (!_collecting || p == 0) return;
+        try
+        {
+            var q = (byte*)p;
+            var n = 0;
+            while (n < MaxTextLen && q[n] != 0) n++;
+            CollectBytes(q, DisplayLen(q, n), false, checkCurTop: true);
+        }
+        catch { /* 钩子内异常绝不外抛 */ }
+    }
+
+    /// <summary> 显示长度：## 之后是 ID 后缀（如 "设置##bdp"），不算显示文字，截断掉。 </summary>
+    private static int DisplayLen(byte* p, int n)
+    {
+        for (var i = 0; i + 1 < n; i++)
+        {
+            if (p[i] == (byte)'#' && p[i + 1] == (byte)'#') return i;
+        }
+        return n;
     }
 
     /// <summary> 由指针区间计算采集长度并进入采集判定。 </summary>
@@ -660,6 +796,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
         try { _textHook?.Dispose(); } catch { }
         try { _beginHook?.Dispose(); } catch { }
         try { _endHook?.Dispose(); } catch { }
+        foreach (var h in _labelHooks)
+        {
+            try { h.Dispose(); } catch { }
+        }
+        _labelHooks.Clear();
         _addTextHook = null;
         _textHook = null;
         _beginHook = null;
