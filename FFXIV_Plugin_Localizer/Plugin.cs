@@ -1,4 +1,6 @@
+using System;
 using System.IO;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Command;
@@ -40,6 +42,7 @@ public sealed class Plugin : IDalamudPlugin
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
         Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Replacement.Enabled = Configuration.ReplacementEnabled;
+        Replacement.ImportFdcn(); // FDCN 现成机翻表默认启用（幂等：已有条目自动跳过）
         Hook = new ImGuiHookService(AppLog, Log, Interop, PluginInterface.GetPluginConfigDirectory,
             () => Configuration.HooksEnabled, () => Configuration.LabelHooks, Replacement);
         Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
@@ -89,7 +92,15 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    private void OnFramework(IFramework framework) => Hook.TickSave();
+    private void OnFramework(IFramework framework)
+    {
+        Hook.TickSave();
+        if (!_startupCheckDone && DateTime.Now >= _startupCheckAt)
+        {
+            _startupCheckDone = true;
+            StartupCheck();
+        }
+    }
 
     private void OnCommand(string command, string args) => ToggleMain();
 
@@ -103,6 +114,46 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary> 打开/关闭安装器翻译窗口（主窗口「安装器翻译」按钮入口）。 </summary>
     public void ToggleTranslationUi() => TranslationWindow.Toggle();
+
+    // ── 启动自动检查：加载约 10 秒后扫一次缺口，静默/按配置翻译（插件更新后新文案也走这条） ──
+    private readonly DateTime _startupCheckAt = DateTime.Now.AddSeconds(10);
+    private bool _startupCheckDone;
+
+    private void StartupCheck()
+    {
+        try
+        {
+            var count = Replacement.CollectMissing().Values.Distinct().Count();
+            if (count == 0)
+            {
+                AppLog.Info("[自动] 启动检查：对照表已覆盖全部已装插件介绍");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(Configuration.ZhipuApiKey))
+            {
+                AppLog.Info($"[自动] 检测到 {count} 条介绍缺口，未配置 API Key，跳过（可在「安装器翻译」窗口填写）");
+                Mt.Notify($"检测到 {count} 条新文案待翻译（未填 API Key）");
+                return;
+            }
+            if (Configuration.AutoTranslate && Configuration.SilentTranslate)
+            {
+                AppLog.Info($"[自动] 检测到 {count} 条介绍缺口，后台静默翻译…");
+                Mt.Start();
+                return;
+            }
+            if (Configuration.AutoTranslate)
+            {
+                AppLog.Info($"[自动] 检测到 {count} 条介绍缺口（静默已关，等待手动开始）");
+                Mt.Notify($"检测到 {count} 条新文案待翻译，点「自动翻译缺失条目」开始");
+                return;
+            }
+            AppLog.Info($"[自动] 检测到 {count} 条介绍缺口（自动翻译已关闭）");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("[自动] 启动检查失败：" + ex.Message);
+        }
+    }
 
     public void Dispose()
     {

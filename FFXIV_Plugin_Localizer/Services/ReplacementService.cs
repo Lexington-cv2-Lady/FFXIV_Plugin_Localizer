@@ -258,6 +258,54 @@ public sealed unsafe class ReplacementService
         }
     }
 
+    /// <summary> 对照表条目（英文排序副本，手动翻译编辑器用）。 </summary>
+    public List<(string En, string Zh)> GetEntries()
+    {
+        lock (_lock)
+        {
+            return _table
+                .Select(kv => (kv.Key, Encoding.UTF8.GetString(kv.Value)))
+                .OrderBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+    }
+
+    /// <summary> 设置单条对照（中文为空 = 删除该条）。用于手动翻译编辑器。 </summary>
+    public void SetTranslation(string en, string zh)
+    {
+        en = en.Trim();
+        zh = (zh ?? "").Trim();
+        if (en.Length < 2) return;
+        lock (_lock)
+        {
+            if (zh.Length == 0)
+            {
+                RemoveTranslationNoSave(en);
+                return;
+            }
+            if (_ptrs.TryGetValue(en, out var old)) Marshal.FreeCoTaskMem(old);
+            _table[en] = Encoding.UTF8.GetBytes(zh);
+            _ptrs[en] = Marshal.StringToCoTaskMemUTF8(zh);
+            _hashes.Add(FnvUtf8(en)); // 删除时不摘哈希（防哈希碰撞误伤同哈希的其他键），多留的哈希只会多一次字典未命中
+        }
+    }
+
+    /// <summary> 删除单条对照。 </summary>
+    public void RemoveTranslation(string en)
+    {
+        lock (_lock)
+        {
+            RemoveTranslationNoSave(en);
+        }
+    }
+
+    private void RemoveTranslationNoSave(string en)
+    {
+        if (_ptrs.Remove(en, out var ptr)) Marshal.FreeCoTaskMem(ptr);
+        _table.Remove(en);
+        // 不摘 _hashes：若与另一键哈希相同，摘掉会让幸存键停止命中
+    }
+
     /// <summary> 把翻译结果并入对照表（内存 + 中文指针 + 哈希），并落盘。返回实际新增条数。 </summary>
     public int MergeTranslations(Dictionary<string, string> translations)
     {

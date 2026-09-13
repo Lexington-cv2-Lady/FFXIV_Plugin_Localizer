@@ -32,6 +32,9 @@ public sealed class MtTranslateService
     /// <summary> 进度/结果描述（窗口轮询显示）。 </summary>
     public string Status { get; private set; } = "";
 
+    /// <summary> 外部（如启动检查）写入提示，不改运行状态。 </summary>
+    public void Notify(string message) => Status = message;
+
     public MtTranslateService(AppLog appLog, ReplacementService replacement, Func<string> apiKey)
     {
         _appLog = appLog;

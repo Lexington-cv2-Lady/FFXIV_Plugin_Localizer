@@ -25,5 +25,11 @@ public class Configuration : IPluginConfiguration
     /// ⚠ 每个用户自己填，只存本机 pluginConfigs 配置文件（APPDATA），严禁入库/写死在代码里。 </summary>
     public string ZhipuApiKey { get; set; } = "";
 
+    /// <summary> 启动时自动扫描缺口并翻译（需已填 Key）。默认开。 </summary>
+    public bool AutoTranslate { get; set; } = true;
+
+    /// <summary> 后台静默执行：有新缺口直接后台翻译不问人；关闭则只提示等手动点。默认开。 </summary>
+    public bool SilentTranslate { get; set; } = true;
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }
