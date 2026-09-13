@@ -39,7 +39,7 @@ public sealed class ScanWindow : Window
 
         Ui.Hint("扫描本机已安装插件（installedPlugins + devPlugins）的 DLL 字符串堆，静态提取英文界面文案候选。" +
                 "结果写入 数据目录\\文案扫描\\<插件名>_未翻译.json，供翻译管线使用。" +
-                "已内置中文（如 Artisan 汉化版）或自带语言文件（如 DailyRoutines）的插件自动跳过。");
+                "已内置近乎完整中文双语（如 Artisan，按中/英文条数占比判定）或自带语言文件（如 DailyRoutines）的插件自动跳过。");
 
         if (ImGui.Button("扫描全部插件"))
         {
@@ -92,7 +92,7 @@ public sealed class ScanWindow : Window
     private string MakeLabel(PluginScanService.InstalledPlugin p)
     {
         if (!_results.TryGetValue(p.Name, out var r)) return $"{p.Name}（未扫描）";
-        if (r.SkipBilingualZh) return $"{p.Name}（已内置中文 {r.ChineseCount} 条，跳过）✔";
+        if (r.SkipBilingualZh) return $"{p.Name}（已内置中文 {r.ChineseCount} 条，中/英约 {r.ChineseRatioPercent}%，跳过）✔";
         if (r.SkipLangFiles) return $"{p.Name}（自带语言文件，跳过）✔";
         return $"{p.Name}（{r.Strings.Count} 条）";
     }

@@ -38,13 +38,21 @@ public sealed class PluginScanService
     public sealed record InstalledPlugin(string Name, List<string> DllPaths, List<string> Versions);
 
     /// <summary> 单插件扫描结果。已内置中文/自带语言文件的插件视为已汉化，跳过并清理旧结果。 </summary>
-    public sealed record ScanOutcome(bool SkipBilingualZh, bool SkipLangFiles, int ChineseCount, List<string> Strings)
+    public sealed record ScanOutcome(bool SkipBilingualZh, bool SkipLangFiles, int ChineseCount, int CandidateCount, List<string> Strings)
     {
+        /// <summary> 中文字符串相对英文候选量的占比（英文候选为 0 时记 100%）。 </summary>
+        public int ChineseRatioPercent => CandidateCount > 0 ? (int)Math.Round(ChineseCount * 100.0 / CandidateCount) : 100;
+
         public bool Skipped => SkipBilingualZh || SkipLangFiles;
     }
 
-    /// <summary> DLL 含中文字符串达到该数量即判定「已内置中文」（如 Artisan 双语汉化版有 1455 条）。 </summary>
-    private const int BilingualZhThreshold = 10;
+    /// <summary>
+    /// 「近乎完整中英双语」判定（如 Artisan：1455 中文 / 2569 英文候选 ≈ 57%）：
+    /// 中文条数 ≥ BilingualZhFloor 直接判双语；否则需 ≥ BilingualZhMin 条且占比 ≥ 1/BilingualZhRatioDiv（防少量中文误判）。
+    /// </summary>
+    private const int BilingualZhFloor = 100;
+    private const int BilingualZhMin = 20;
+    private const int BilingualZhRatioDiv = 4;
 
     /// <summary> 输出目录：数据目录\文案扫描\。 </summary>
     public string OutputDir => Path.Combine(_configDir(), OutputDirName);
@@ -116,7 +124,8 @@ public sealed class PluginScanService
             }
         }
 
-        var skipZh = zhCount >= BilingualZhThreshold;
+        var skipZh = zhCount >= BilingualZhFloor
+                     || (zhCount >= BilingualZhMin && (long)zhCount * BilingualZhRatioDiv >= strings.Count);
         var skipLang = HasLangFiles(plugin);
         var path = Path.Combine(OutputDir, $"{plugin.Name}_未翻译.json");
         if (skipZh || skipLang)
@@ -126,11 +135,11 @@ public sealed class PluginScanService
                 if (File.Exists(path))
                 {
                     File.Delete(path);
-                    _appLog.Info($"[扫描] {plugin.Name} 已汉化（{(skipZh ? $"内置中文 {zhCount} 条" : "自带语言文件")}），删除旧英文清单");
+                    _appLog.Info($"[扫描] {plugin.Name} 已汉化（{(skipZh ? $"内置中文 {zhCount} 条 / 英文候选 {strings.Count} 条" : "自带语言文件")}），删除旧英文清单");
                 }
             }
             catch { /* 删不掉旧文件不影响结论 */ }
-            return new ScanOutcome(skipZh, skipLang, zhCount, new List<string>());
+            return new ScanOutcome(skipZh, skipLang, zhCount, strings.Count, new List<string>());
         }
 
         try
@@ -144,7 +153,7 @@ public sealed class PluginScanService
         {
             _appLog.Error($"[扫描] {plugin.Name} 写结果失败：{ex.Message}");
         }
-        return new ScanOutcome(false, false, zhCount, new List<string>(strings));
+        return new ScanOutcome(false, false, zhCount, strings.Count, new List<string>(strings));
     }
 
     /// <summary> 版本目录（含其一级子目录，如 Assets\Langs）里是否存在语言文件目录。 </summary>
