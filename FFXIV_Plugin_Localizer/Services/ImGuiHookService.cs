@@ -132,13 +132,21 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 return;
             }
 
-            var addTextAddr = GetExport(baseAddr, "ImDrawList_AddText");
+            // cimgui 对 AddText 两个重载用后缀命名：全参重载（ImGui::RenderText 的必经之路）= _FontPtr；
+            // 裸名 ImDrawList_AddText 不存在（早前二进制 grep 被后缀名子串误报，实测 26-09-11-01 与 dev 一致）
+            var addTextName = "ImDrawList_AddText_FontPtr";
+            var addTextAddr = GetExport(baseAddr, addTextName);
+            if (addTextAddr == 0)
+            {
+                addTextName = "ImDrawList_AddText"; // 未来 cimgui 改名的兜底
+                addTextAddr = GetExport(baseAddr, addTextName);
+            }
             var beginAddr = GetExport(baseAddr, "igBegin");
             var endAddr = GetExport(baseAddr, "igEnd");
             if (addTextAddr == 0 || beginAddr == 0 || endAddr == 0)
             {
                 HookStatus = $"cimgui（{moduleName}）缺少导出函数，钩子未挂接";
-                _appLog.Error($"[钩子] {HookStatus}：ImDrawList_AddText={addTextAddr:x} igBegin={beginAddr:x} igEnd={endAddr:x}");
+                _appLog.Error($"[钩子] {HookStatus}：{addTextName}={addTextAddr:x} igBegin={beginAddr:x} igEnd={endAddr:x}");
                 return;
             }
 
@@ -150,7 +158,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
             _endHook.Enable();
 
             Hooked = true;
-            HookStatus = $"已挂接 {moduleName}：ImDrawList_AddText / igBegin / igEnd";
+            HookStatus = $"已挂接 {moduleName}：{addTextName} / igBegin / igEnd";
             _appLog.Info($"[钩子] {HookStatus}");
         }
         catch (Exception ex)
