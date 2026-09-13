@@ -43,28 +43,35 @@ public sealed class MainWindow : Window
 
         ImGui.Separator();
 
-        // ── 功能入口 ──
+        // ── 功能入口（放不下自动换行，防止窗口变窄时被裁掉） ──
         if (ImGui.Button("安装器翻译"))
         {
             _plugin.ToggleTranslationUi();
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("插件安装器里插件介绍的中文化：对照表 + 机翻 + 手动编辑，随插件更新自动补翻。");
-        ImGui.SameLine();
+        Ui.SameLineIfFits(Ui.ButtonWidth("窗口文字翻译"));
         if (ImGui.Button("窗口文字翻译"))
         {
             _plugin.ToggleWindowReplaceUi();
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("按插件翻译窗口内的界面文字（候选来自文案扫描），替换层即时生效。");
-        ImGui.SameLine();
+        Ui.SameLineIfFits(Ui.ButtonWidth("文案扫描"));
         if (ImGui.Button("文案扫描"))
         {
             _plugin.ToggleScanUi();
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("静态扫描已安装插件 DLL 的全部英文文案（不依赖游戏内窗口，双语汉化版自动跳过）。");
-        ImGui.SameLine();
+        Ui.SameLineIfFits(Ui.ButtonWidth("AI 设置"));
+        if (ImGui.Button("AI 设置"))
+        {
+            _plugin.ToggleAiSettingsUi();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("AI 供应商 / API Key / 模型 / 温度 / 批量 / 测试连接（机翻功能的配置）。");
+        Ui.SameLineIfFits(Ui.ButtonWidth("日志窗口"));
         if (ImGui.Button("日志窗口"))
         {
             _plugin.ToggleLogUi();
