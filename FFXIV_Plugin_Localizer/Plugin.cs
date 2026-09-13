@@ -41,6 +41,7 @@ public sealed class Plugin : IDalamudPlugin
 
         PluginInterface.UiBuilder.Draw += DrawAll;
         PluginInterface.UiBuilder.OpenMainUi += ToggleMain;
+        PluginInterface.UiBuilder.OpenConfigUi += ToggleMain; // 插件安装器的设置按钮：本插件暂无独立设置窗，打开主窗（官方模板同款回调，缺失会在安装器报校验警告）
         Framework.Update += OnFramework;
 
         AppLog.Info("[插件] 插件界面汉化 已加载（MVP：只读采集模式）");
@@ -80,6 +81,7 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update -= OnFramework;
         PluginInterface.UiBuilder.Draw -= DrawAll;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMain;
+        PluginInterface.UiBuilder.OpenConfigUi -= ToggleMain;
         CommandManager.RemoveHandler(CommandName);
         WindowSystem.RemoveAllWindows();
         Hook.Dispose();
