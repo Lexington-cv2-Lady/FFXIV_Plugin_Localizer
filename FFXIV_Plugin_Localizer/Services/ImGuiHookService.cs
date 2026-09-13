@@ -300,11 +300,9 @@ public sealed unsafe class ImGuiHookService : IDisposable
             if (target == 0) return 0;
             if (moduleSize > 0 && target >= moduleBase && target < moduleBase + moduleSize)
                 return target; // 目标在本模块内，最可信
-            if (target > 0x10000 && (target >> 47) == 0)
-            {
-                how += "（模块外，按有效用户态代码指针接受）";
-                return target;
-            }
+            // 目标在模块外：实测（2026-09-14 日志）FontPtr 桩的 abs32 槽给出的地址在别的模块里，
+            // 挂上去永远拦不到调用 → 一律视为解析失败走兜底；顺带记下目标属于哪个模块，帮定位这个槽的真身
+            how += $"（目标在模块外：{ModuleOf(target)}，弃用）";
             return 0;
         }
         catch
@@ -320,6 +318,23 @@ public sealed unsafe class ImGuiHookService : IDisposable
         if (!IsReadableMemory(slot)) return false;
         value = *(nint*)slot;
         return value != 0;
+    }
+
+    /// <summary> 地址所属模块名（诊断日志用；找不到返回「未知模块」）。 </summary>
+    private static string ModuleOf(nint addr)
+    {
+        try
+        {
+            var self = Process.GetCurrentProcess();
+            self.Refresh();
+            foreach (ProcessModule m in self.Modules)
+            {
+                if (addr >= m.BaseAddress && addr < m.BaseAddress + m.ModuleMemorySize)
+                    return m.ModuleName;
+            }
+        }
+        catch { /* 枚举失败不影响主流程 */ }
+        return "未知模块";
     }
 
     /// <summary> 导出桩前若干字节的十六进制（诊断日志用）。 </summary>
