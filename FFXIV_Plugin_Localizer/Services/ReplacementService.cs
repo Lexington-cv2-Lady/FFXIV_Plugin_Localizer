@@ -11,8 +11,9 @@ namespace FFXIVPluginLocalizer.Services;
 
 /// <summary>
 /// 替换层（精确匹配）：对照表 英文 → 中文，钩子在绘制转发前查表换字符串指针。
+/// 表分两路合并成一张查找表：①安装器介绍表（安装器对照表.json）②窗口文字表（窗口翻译\&lt;插件名&gt;.json，每插件一份）。
 /// 热路径（每帧每条文字都调）用 FNV 哈希集合预筛，零分配；只有哈希命中才解码字符串做精确比对。
-/// 中文指针按条目缓存（HGlobal、NUL 结尾），重载表时统一释放重建。
+/// 中文指针按条目缓存（CoTaskMem、NUL 结尾），表重建时统一释放。
 /// </summary>
 public sealed unsafe class ReplacementService
 {
@@ -20,6 +21,10 @@ public sealed unsafe class ReplacementService
     public const string TableFileName = "安装器对照表.json";
     /// <summary> 安装器已装插件还缺翻译的文案清单（机翻 API 的输入）。 </summary>
     public const string MissingFileName = "安装器未翻译.json";
+    /// <summary> 窗口文字表目录（每插件一份 &lt;插件名&gt;.json）。 </summary>
+    public const string WindowTableDirName = "窗口翻译";
+    /// <summary> 窗口文字的未翻译候选来源目录（文案扫描输出）。 </summary>
+    public const string ScanDirName = "文案扫描";
 
     private static readonly JsonSerializerOptions Indented = new()
     {
@@ -31,9 +36,11 @@ public sealed unsafe class ReplacementService
     private readonly Func<string> _configDir;
     private readonly object _lock = new();
 
-    private Dictionary<string, byte[]> _table = new();   // 英文 → 中文 UTF-8
-    private HashSet<ulong> _hashes = new();              // 英文键 FNV（热路径预筛）
-    private readonly Dictionary<string, nint> _ptrs = new(); // 英文 → 中文指针
+    private Dictionary<string, string> _installerSource = new(StringComparer.Ordinal);              // 安装器表
+    private readonly Dictionary<string, Dictionary<string, string>> _windowSources = new(StringComparer.Ordinal); // 插件名 → 窗口表
+    private Dictionary<string, byte[]> _table = new(StringComparer.Ordinal);   // 合并查找：英文 → 中文 UTF-8
+    private HashSet<ulong> _hashes = new();                                    // 英文键 FNV（热路径预筛）
+    private readonly Dictionary<string, nint> _ptrs = new(StringComparer.Ordinal); // 英文 → 中文指针
 
     /// <summary> 替换开关（只影响绘制替换；表的管理不受影响）。 </summary>
     public bool Enabled { get; set; }
@@ -45,12 +52,16 @@ public sealed unsafe class ReplacementService
         _appLog = appLog;
         _configDir = configDir;
         Load();
+        LoadWindowTables();
     }
 
     /// <summary> 对照表文件路径。 </summary>
     public string TablePath => Path.Combine(_configDir(), TableFileName);
 
-    /// <summary> 启动载入对照表（文件不存在则空表）。 </summary>
+    /// <summary> 窗口文字表目录。 </summary>
+    public string WindowTableDir => Path.Combine(_configDir(), WindowTableDirName);
+
+    /// <summary> 启动载入安装器对照表。 </summary>
     public void Load()
     {
         try
@@ -59,8 +70,9 @@ public sealed unsafe class ReplacementService
             if (!File.Exists(path)) return;
             var data = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
             if (data == null) return;
-            SetTable(data);
-            _appLog.Info($"[替换] 已载入对照表：{_table.Count} 条（{TableFileName}）");
+            _installerSource = Normalize(data);
+            RebuildMerged();
+            _appLog.Info($"[替换] 已载入安装器对照表：{_installerSource.Count} 条（{TableFileName}）");
         }
         catch (Exception ex)
         {
@@ -68,13 +80,13 @@ public sealed unsafe class ReplacementService
         }
     }
 
-    /// <summary> 保存对照表。 </summary>
+    /// <summary> 保存安装器对照表。 </summary>
     public void Save()
     {
         Dictionary<string, string> copy;
         lock (_lock)
         {
-            copy = _table.ToDictionary(kv => kv.Key, kv => Encoding.UTF8.GetString(kv.Value), StringComparer.Ordinal);
+            copy = new Dictionary<string, string>(_installerSource, StringComparer.Ordinal);
         }
         try
         {
@@ -87,8 +99,38 @@ public sealed unsafe class ReplacementService
         }
     }
 
-    /// <summary> 重建表（含哈希集合与中文指针；旧指针统一释放）。 </summary>
-    public void SetTable(Dictionary<string, string> table)
+    /// <summary> 载入窗口翻译目录下的全部插件表（启动时；之后由编辑/机翻增量维护）。 </summary>
+    public void LoadWindowTables()
+    {
+        try
+        {
+            var dir = WindowTableDir;
+            if (!Directory.Exists(dir)) return;
+            lock (_lock)
+            {
+                _windowSources.Clear();
+                foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
+                {
+                    try
+                    {
+                        var data = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(file));
+                        if (data == null) continue;
+                        _windowSources[Path.GetFileNameWithoutExtension(file)] = Normalize(data);
+                    }
+                    catch { /* 单个文件坏了跳过 */ }
+                }
+            }
+            RebuildMerged();
+            _appLog.Info($"[替换] 已载入窗口文字表：{_windowSources.Count} 个插件");
+        }
+        catch (Exception ex)
+        {
+            _appLog.Error("[替换] 窗口文字表载入失败：" + ex.Message);
+        }
+    }
+
+    /// <summary> 重建合并查找表（安装器表优先，窗口表不覆盖同键）。 </summary>
+    private void RebuildMerged()
     {
         lock (_lock)
         {
@@ -96,19 +138,38 @@ public sealed unsafe class ReplacementService
             _ptrs.Clear();
             _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             _hashes = new HashSet<ulong>();
-            foreach (var (en, zh) in table)
+            foreach (var (en, zh) in _installerSource) AddMerged(en, zh);
+            foreach (var table in _windowSources.Values)
             {
-                var key = en.Trim();
-                var val = (zh ?? "").Trim();
-                if (key.Length < 2 || val.Length == 0 || key == val) continue;
-                if (_table.ContainsKey(key)) continue;
-                var bytes = Encoding.UTF8.GetBytes(val);
-                var ptr = Marshal.StringToCoTaskMemUTF8(val);
-                _table[key] = bytes;
-                _ptrs[key] = ptr;
-                _hashes.Add(FnvUtf8(key));
+                foreach (var (en, zh) in table)
+                {
+                    if (_table.ContainsKey(en)) continue; // 安装器表优先
+                    AddMerged(en, zh);
+                }
             }
         }
+    }
+
+    private void AddMerged(string en, string zh)
+    {
+        if (_table.ContainsKey(en)) return;
+        _table[en] = Encoding.UTF8.GetBytes(zh);
+        _ptrs[en] = Marshal.StringToCoTaskMemUTF8(zh);
+        _hashes.Add(FnvUtf8(en));
+    }
+
+    /// <summary> 清洗：去空白、去空值、去同文。 </summary>
+    private static Dictionary<string, string> Normalize(Dictionary<string, string> data)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (en, zh) in data)
+        {
+            var k = en.Trim();
+            var v = (zh ?? "").Trim();
+            if (k.Length < 2 || v.Length == 0 || k == v) continue;
+            result[k] = v;
+        }
+        return result;
     }
 
     /// <summary>
@@ -146,9 +207,9 @@ public sealed unsafe class ReplacementService
         {
             var raw = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, JsonElement>>>(File.ReadAllText(path));
             if (raw == null) return -1;
+            var added = 0;
             lock (_lock)
             {
-                var added = 0;
                 foreach (var fields in raw.Values)
                 {
                     foreach (var f in fields.Values)
@@ -156,18 +217,15 @@ public sealed unsafe class ReplacementService
                         var en = f.TryGetProperty("Original", out var o) ? o.GetString()?.Trim() : null;
                         var zh = f.TryGetProperty("Translated", out var t) ? t.GetString()?.Trim() : null;
                         if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh) || en == zh) continue;
-                        if (_table.ContainsKey(en!)) continue;
-                        var bytes = Encoding.UTF8.GetBytes(zh!);
-                        var ptr = Marshal.StringToCoTaskMemUTF8(zh!);
-                        _table[en!] = bytes;
-                        _ptrs[en!] = ptr;
-                        _hashes.Add(FnvUtf8(en!));
+                        if (_installerSource.ContainsKey(en!)) continue;
+                        _installerSource[en!] = zh!;
                         added++;
                     }
                 }
-                _appLog.Info($"[替换] 已从 FuckDalamudCN 机翻表导入 {added} 条（来源 {Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(path)))}）");
-                return added;
             }
+            if (added > 0) RebuildMerged();
+            _appLog.Info($"[替换] 已从 FuckDalamudCN 机翻表导入 {added} 条（当前安装器表 {_installerSource.Count} 条）");
+            return added;
         }
         catch (Exception ex)
         {
@@ -184,10 +242,9 @@ public sealed unsafe class ReplacementService
         if (!Directory.Exists(root)) return null;
         try
         {
-            var file = Directory.EnumerateFiles(root, "translations.json", SearchOption.AllDirectories)
+            return Directory.EnumerateFiles(root, "translations.json", SearchOption.AllDirectories)
                 .OrderByDescending(p => p, StringComparer.Ordinal)
                 .FirstOrDefault();
-            return file;
         }
         catch
         {
@@ -258,55 +315,7 @@ public sealed unsafe class ReplacementService
         }
     }
 
-    /// <summary> 对照表条目（英文排序副本，手动翻译编辑器用）。 </summary>
-    public List<(string En, string Zh)> GetEntries()
-    {
-        lock (_lock)
-        {
-            return _table
-                .Select(kv => (kv.Key, Encoding.UTF8.GetString(kv.Value)))
-                .OrderBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-    }
-
-    /// <summary> 设置单条对照（中文为空 = 删除该条）。用于手动翻译编辑器。 </summary>
-    public void SetTranslation(string en, string zh)
-    {
-        en = en.Trim();
-        zh = (zh ?? "").Trim();
-        if (en.Length < 2) return;
-        lock (_lock)
-        {
-            if (zh.Length == 0)
-            {
-                RemoveTranslationNoSave(en);
-                return;
-            }
-            if (_ptrs.TryGetValue(en, out var old)) Marshal.FreeCoTaskMem(old);
-            _table[en] = Encoding.UTF8.GetBytes(zh);
-            _ptrs[en] = Marshal.StringToCoTaskMemUTF8(zh);
-            _hashes.Add(FnvUtf8(en)); // 删除时不摘哈希（防哈希碰撞误伤同哈希的其他键），多留的哈希只会多一次字典未命中
-        }
-    }
-
-    /// <summary> 删除单条对照。 </summary>
-    public void RemoveTranslation(string en)
-    {
-        lock (_lock)
-        {
-            RemoveTranslationNoSave(en);
-        }
-    }
-
-    private void RemoveTranslationNoSave(string en)
-    {
-        if (_ptrs.Remove(en, out var ptr)) Marshal.FreeCoTaskMem(ptr);
-        _table.Remove(en);
-        // 不摘 _hashes：若与另一键哈希相同，摘掉会让幸存键停止命中
-    }
-
-    /// <summary> 把翻译结果并入对照表（内存 + 中文指针 + 哈希），并落盘。返回实际新增条数。 </summary>
+    /// <summary> 把翻译结果并入安装器对照表（内存 + 中文指针 + 哈希），并落盘。返回实际新增条数。 </summary>
     public int MergeTranslations(Dictionary<string, string> translations)
     {
         var added = 0;
@@ -317,18 +326,197 @@ public sealed unsafe class ReplacementService
                 var key = en.Trim();
                 var val = (zh ?? "").Trim();
                 if (key.Length < 2 || val.Length == 0 || key == val) continue;
-                if (_table.ContainsKey(key)) continue;
-                var bytes = Encoding.UTF8.GetBytes(val);
-                var ptr = Marshal.StringToCoTaskMemUTF8(val);
-                _table[key] = bytes;
-                _ptrs[key] = ptr;
-                _hashes.Add(FnvUtf8(key));
+                if (_installerSource.ContainsKey(key)) continue;
+                _installerSource[key] = val;
                 added++;
             }
         }
-        if (added > 0) Save();
+        if (added > 0)
+        {
+            RebuildMerged();
+            Save();
+        }
         return added;
     }
+
+    // ═══════════════════════ 窗口文字表（每插件一份） ═══════════════════════
+
+    /// <summary> 窗口表清单：插件名 →（候选总数, 已翻译数）。候选来自文案扫描输出，已翻译来自窗口表。 </summary>
+    public List<(string Plugin, int Total, int Translated)> GetWindowPlugins()
+    {
+        var result = new List<(string Plugin, int Total, int Translated)>();
+        var scanDir = Path.Combine(_configDir(), ScanDirName);
+        var names = new SortedSet<string>(StringComparer.Ordinal);
+        try
+        {
+            if (Directory.Exists(scanDir))
+            {
+                foreach (var f in Directory.EnumerateFiles(scanDir, "*_未翻译.json"))
+                    names.Add(Path.GetFileNameWithoutExtension(f)[..^"_未翻译".Length]);
+            }
+        }
+        catch { /* 枚举失败忽略 */ }
+        lock (_lock)
+        {
+            foreach (var n in _windowSources.Keys) names.Add(n);
+        }
+        foreach (var name in names)
+        {
+            var candidates = ReadJsonDict(Path.Combine(scanDir, $"{name}_未翻译.json"));
+            int translated;
+            lock (_lock)
+            {
+                translated = _windowSources.TryGetValue(name, out var t) ? t.Count : 0;
+            }
+            var total = Math.Max(candidates.Count, translated);
+            result.Add((name, total, translated));
+        }
+        return result;
+    }
+
+    /// <summary> 某插件的窗口条目：返回（已翻译列表，未翻译英文列表）。每帧 UI 勿直接调，先缓存。 </summary>
+    public (List<(string En, string Zh)> Translated, List<string> Untranslated) GetWindowEntries(string plugin)
+    {
+        var candidates = ReadJsonDict(Path.Combine(_configDir(), ScanDirName, $"{plugin}_未翻译.json"));
+        List<(string, string)> translated;
+        List<string> untranslated;
+        lock (_lock)
+        {
+            var win = _windowSources.TryGetValue(plugin, out var t) ? t : new Dictionary<string, string>();
+            translated = win.Select(kv => (kv.Key, kv.Value)).OrderBy(t => t.Item1, StringComparer.Ordinal).ToList();
+            untranslated = candidates.Keys.Where(k => !win.ContainsKey(k)).OrderBy(x => x, StringComparer.Ordinal).ToList();
+        }
+        return (translated, untranslated);
+    }
+
+    /// <summary> 把机翻/手动结果并入某插件的窗口表（写文件 + 重建合并表）。返回实际新增条数。 </summary>
+    public int MergeWindowEntries(string plugin, Dictionary<string, string> translations)
+    {
+        var added = 0;
+        lock (_lock)
+        {
+            if (!_windowSources.TryGetValue(plugin, out var table))
+                _windowSources[plugin] = table = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (en, zh) in translations)
+            {
+                var key = en.Trim();
+                var val = (zh ?? "").Trim();
+                if (key.Length < 2 || val.Length == 0 || key == val) continue;
+                table[key] = val;
+                added++;
+            }
+            if (added > 0) WriteWindowFile(plugin, table);
+        }
+        if (added > 0) RebuildMerged();
+        return added;
+    }
+
+    /// <summary> 设置/删除（中文空 = 删）某插件窗口表的单条，写文件 + 重建。 </summary>
+    public void SetWindowEntry(string plugin, string en, string zh)
+    {
+        en = en.Trim();
+        zh = (zh ?? "").Trim();
+        if (en.Length < 2) return;
+        lock (_lock)
+        {
+            if (!_windowSources.TryGetValue(plugin, out var table))
+                _windowSources[plugin] = table = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (zh.Length == 0)
+                table.Remove(en);
+            else
+                table[en] = zh;
+            WriteWindowFile(plugin, table);
+        }
+        RebuildMerged();
+    }
+
+    /// <summary> 删除某插件窗口表的单条。 </summary>
+    public void RemoveWindowEntry(string plugin, string en)
+    {
+        lock (_lock)
+        {
+            if (_windowSources.TryGetValue(plugin, out var table) && table.Remove(en))
+                WriteWindowFile(plugin, table);
+        }
+        RebuildMerged();
+    }
+
+    private void WriteWindowFile(string plugin, Dictionary<string, string> table)
+    {
+        try
+        {
+            Directory.CreateDirectory(WindowTableDir);
+            var copy = new Dictionary<string, string>(table, StringComparer.Ordinal);
+            File.WriteAllText(Path.Combine(WindowTableDir, $"{plugin}.json"),
+                JsonSerializer.Serialize(copy, Indented), Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            _appLog.Error($"[替换] 窗口表保存失败（{plugin}）：" + ex.Message);
+        }
+    }
+
+    private static Dictionary<string, string> ReadJsonDict(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return new Dictionary<string, string>();
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path))
+                   ?? new Dictionary<string, string>();
+        }
+        catch
+        {
+            return new Dictionary<string, string>();
+        }
+    }
+
+    // ═══════════════════════ 手动编辑（安装器表） ═══════════════════════
+
+    /// <summary> 安装器对照表条目（英文排序副本，手动翻译编辑器用）。 </summary>
+    public List<(string En, string Zh)> GetEntries()
+    {
+        lock (_lock)
+        {
+            return _installerSource
+                .Select(kv => (kv.Key, kv.Value))
+                .OrderBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+    }
+
+    /// <summary> 设置单条安装器对照（中文为空 = 删除该条）。用于手动翻译编辑器。 </summary>
+    public void SetTranslation(string en, string zh)
+    {
+        en = en.Trim();
+        zh = (zh ?? "").Trim();
+        if (en.Length < 2) return;
+        lock (_lock)
+        {
+            if (zh.Length == 0)
+            {
+                _installerSource.Remove(en);
+            }
+            else
+            {
+                _installerSource[en] = zh;
+            }
+        }
+        RebuildMerged();
+        Save();
+    }
+
+    /// <summary> 删除单条安装器对照。 </summary>
+    public void RemoveTranslation(string en)
+    {
+        lock (_lock)
+        {
+            _installerSource.Remove(en);
+        }
+        RebuildMerged();
+        Save();
+    }
+
+    // ═══════════════════════ 哈希 ═══════════════════════
 
     private static ulong FnvUtf8(string s)
     {

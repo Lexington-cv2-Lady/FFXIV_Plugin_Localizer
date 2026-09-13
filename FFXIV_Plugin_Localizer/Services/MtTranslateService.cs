@@ -56,7 +56,7 @@ public sealed class MtTranslateService
         _cfg = cfg;
     }
 
-    /// <summary> 启动后台翻译任务（同一时间只允许一个）。 </summary>
+    /// <summary> 启动后台翻译任务：安装器介绍缺口（同一时间只允许一个翻译任务）。 </summary>
     public void Start()
     {
         if (Running) return;
@@ -71,7 +71,9 @@ public sealed class MtTranslateService
         {
             try
             {
-                await RunAsync();
+                var missing = _replacement.CollectMissing();
+                var texts = missing.Values.Distinct().Where(t => t.Length <= MaxTextLen).ToList();
+                await TranslateAll(texts, t => _replacement.MergeTranslations(t));
             }
             catch (Exception ex)
             {
@@ -85,17 +87,46 @@ public sealed class MtTranslateService
         });
     }
 
-    private async Task RunAsync()
+    /// <summary> 后台翻译某插件的窗口文字缺口（结果并入该插件窗口表）。 </summary>
+    public void StartWindowPlugin(string plugin)
     {
-        var missing = _replacement.CollectMissing();
-        var texts = missing.Values.Distinct().Where(t => t.Length <= MaxTextLen).ToList();
+        if (Running) return;
+        if (string.IsNullOrWhiteSpace(GetApiKey(_cfg)))
+        {
+            Status = "请先在「AI 设置」填写当前服务商的 API Key";
+            return;
+        }
+        Running = true;
+        Status = $"[{plugin}] 正在读取缺口…";
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var (_, untranslated) = _replacement.GetWindowEntries(plugin);
+                var texts = untranslated.Where(t => t.Length <= MaxTextLen).ToList();
+                await TranslateAll(texts, t => _replacement.MergeWindowEntries(plugin, t));
+            }
+            catch (Exception ex)
+            {
+                Status = "翻译失败：" + ex.Message;
+                _appLog.Error("[机翻] " + Status);
+            }
+            finally
+            {
+                Running = false;
+            }
+        });
+    }
+
+    /// <summary> 批量循环：分批送翻 → 汇总 → merge 落盘。 </summary>
+    private async Task TranslateAll(List<string> texts, Func<Dictionary<string, string>, int> merge)
+    {
         if (texts.Count == 0)
         {
-            Status = "没有缺失的翻译（对照表已覆盖全部已装插件介绍）";
+            Status = "没有缺失的翻译（已全部覆盖）";
             _appLog.Info("[机翻] 没有缺失条目");
             return;
         }
-
         var batchSize = Math.Clamp(_cfg.AiBatchSize, 1, 200);
         var translated = new Dictionary<string, string>(StringComparer.Ordinal);
         var failed = 0;
@@ -120,8 +151,8 @@ public sealed class MtTranslateService
             await Task.Delay(400); // 免费/低配额档限速，留出间隔
         }
 
-        var added = _replacement.MergeTranslations(translated);
-        Status = $"完成：新增 {added} 条中文（失败 {failed} 条，对照表共 {_replacement.Count} 条），已保存";
+        var added = merge(translated);
+        Status = $"完成：新增 {added} 条中文（失败 {failed} 条），已保存";
         _appLog.Info($"[机翻] {Status}");
     }
 

@@ -36,6 +36,7 @@ public sealed class Plugin : IDalamudPlugin
     public ScanWindow ScanWindow { get; }
     public TranslationWindow TranslationWindow { get; }
     public AiSettingsWindow AiSettingsWindow { get; }
+    public WindowReplaceWindow WindowReplaceWindow { get; }
 
     public Plugin()
     {
@@ -53,7 +54,8 @@ public sealed class Plugin : IDalamudPlugin
         Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Replacement.Enabled = Configuration.ReplacementEnabled;
         Replacement.ImportFdcn(); // FDCN 现成机翻表默认启用（幂等：已有条目自动跳过）
-        Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled, Replacement);
+        Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
+            () => Configuration.WindowReplaceEnabled, Replacement);
         Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         MainWindow = new MainWindow(this);
@@ -61,11 +63,13 @@ public sealed class Plugin : IDalamudPlugin
         ScanWindow = new ScanWindow(this, Scan);
         TranslationWindow = new TranslationWindow(this, Replacement, Mt);
         AiSettingsWindow = new AiSettingsWindow(this, Mt);
+        WindowReplaceWindow = new WindowReplaceWindow(this, Replacement, Mt);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
         WindowSystem.AddWindow(ScanWindow);
         WindowSystem.AddWindow(TranslationWindow);
         WindowSystem.AddWindow(AiSettingsWindow);
+        WindowSystem.AddWindow(WindowReplaceWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -127,6 +131,9 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary> 打开/关闭 AI 设置窗口（安装器翻译窗口「AI 设置」按钮入口）。 </summary>
     public void ToggleAiSettingsUi() => AiSettingsWindow.Toggle();
+
+    /// <summary> 打开/关闭窗口文字翻译窗口（主窗口「窗口文字翻译」按钮入口）。 </summary>
+    public void ToggleWindowReplaceUi() => WindowReplaceWindow.Toggle();
 
     // ── 启动自动检查：加载约 10 秒后扫一次缺口，静默/按配置翻译（插件更新后新文案也走这条） ──
     private readonly DateTime _startupCheckAt = DateTime.Now.AddSeconds(10);

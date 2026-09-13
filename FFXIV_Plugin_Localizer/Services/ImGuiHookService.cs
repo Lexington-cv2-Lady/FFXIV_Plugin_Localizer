@@ -27,6 +27,13 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void TextUnformattedDelegate(nint textBegin, nint textEnd);
 
+    // ── 窗口替换扩展桩（纯指针参数的 void 文本族）。⚠ 只敢用纯指针委托：igButton 崩溃的疑似机理是
+    //    带按值结构体（ImVec2）参数的委托反向封送不可靠；纯指针委托与 igBegin/igTextUnformatted 同型，长期稳定。──
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D1(nint a);          // igText / igTextDisabled / igTextWrapped / igBulletText / igSetTooltip
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void D2(nint a, nint b);  // igLabelText(label, fmt) / igTextColored(col, fmt)
+
     [StructLayout(LayoutKind.Sequential)]
     private struct ImVec2
     {
@@ -41,9 +48,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly IGameInteropProvider _interop;
     private readonly ReplacementService _replacement;
     private readonly Func<bool> _hooksEnabled;
+    private readonly Func<bool> _windowReplaceEnabled;
 
     private Hook<AddTextFullDelegate>? _addTextHook;
     private Hook<TextUnformattedDelegate>? _textHook;
+    private readonly List<IDisposable> _windowHooks = new();
 
     /// <summary> 钩子是否挂接成功（替换可用的前提）。 </summary>
     public bool Hooked { get; private set; }
@@ -52,12 +61,13 @@ public sealed unsafe class ImGuiHookService : IDisposable
     public string HookStatus { get; private set; } = "未初始化";
 
     public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop,
-        Func<bool> hooksEnabled, ReplacementService replacement)
+        Func<bool> hooksEnabled, Func<bool> windowReplaceEnabled, ReplacementService replacement)
     {
         _appLog = appLog;
         _log = log;
         _interop = interop;
         _hooksEnabled = hooksEnabled;
+        _windowReplaceEnabled = windowReplaceEnabled;
         _replacement = replacement;
         InstallHooks();
     }
@@ -130,6 +140,41 @@ public sealed unsafe class ImGuiHookService : IDisposable
             var mode = realBody != 0 ? "AddText 真实函数体" : _textHook != null ? "igTextUnformatted 兜底" : "AddText 导出桩";
             HookStatus = $"已挂接 {moduleName}：{mode}";
             _appLog.Info($"[钩子] {HookStatus}");
+
+            // ── 窗口替换扩展桩：igText 等变体（纯指针 void 委托）。igTextUnformatted 桩只覆盖
+            //    TextUnformatted 一条路；变体调用（Text/TextWrapped/LabelText 等）走各自导出。
+            //    带结构体/bool 控件桩已证实危险（教训⑥），纯指针 void 桩与稳定钩子同型。 ──
+            if (!_windowReplaceEnabled())
+            {
+                _appLog.Info("[钩子] 窗口替换扩展桩已按配置关闭");
+            }
+            else
+            {
+                var missing = new List<string>();
+                Hook<D1> hText = null!;
+                void TextD(nint a) { hText!.Original(RepArg(a)); }
+                InstallWindowHook("igText", baseAddr, hText, TextD, missing);
+                Hook<D1> hTd = null!;
+                void TdD(nint a) { hTd!.Original(RepArg(a)); }
+                InstallWindowHook("igTextDisabled", baseAddr, hTd, TdD, missing);
+                Hook<D1> hTw = null!;
+                void TwD(nint a) { hTw!.Original(RepArg(a)); }
+                InstallWindowHook("igTextWrapped", baseAddr, hTw, TwD, missing);
+                Hook<D1> hBt = null!;
+                void BtD(nint a) { hBt!.Original(RepArg(a)); }
+                InstallWindowHook("igBulletText", baseAddr, hBt, BtD, missing);
+                Hook<D1> hTip = null!;
+                void TipD(nint a) { hTip!.Original(RepArg(a)); }
+                InstallWindowHook("igSetTooltip", baseAddr, hTip, TipD, missing);
+                Hook<D2> hLt = null!;
+                void LtD(nint a, nint b) { hLt!.Original(RepArg(a), b); }
+                InstallWindowHook("igLabelText", baseAddr, hLt, LtD, missing);
+                Hook<D2> hTc = null!;
+                void TcD(nint a, nint b) { hTc!.Original(a, RepArg(b)); }
+                InstallWindowHook("igTextColored", baseAddr, hTc, TcD, missing);
+                _appLog.Info($"[钩子] 窗口替换扩展桩：{_windowHooks.Count}/7 挂接成功" +
+                             (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : ""));
+            }
         }
         catch (Exception ex)
         {
@@ -181,6 +226,37 @@ public sealed unsafe class ImGuiHookService : IDisposable
             catch { /* 钩子内异常绝不外抛 */ }
         }
         _textHook!.Original(textBegin, textEnd);
+    }
+
+    private void InstallWindowHook<T>(string export, nint baseAddr, Hook<T> hook, T detour, List<string> missing)
+        where T : Delegate
+    {
+        var addr = GetExport(baseAddr, export);
+        if (addr == 0)
+        {
+            missing.Add(export);
+            return;
+        }
+        hook = _interop.HookFromAddress<T>(addr, detour, IGameInteropProvider.HookBackend.Automatic);
+        hook.Enable();
+        _windowHooks.Add(hook);
+    }
+
+    /// <summary> 替换查表：命中返回 NUL 结尾中文指针（转发时按 NUL 结尾传），未命中返回原指针。 </summary>
+    private nint RepArg(nint p)
+    {
+        if (!_replacement.Enabled || p == 0) return p;
+        try
+        {
+            var q = (byte*)p;
+            var n = 0;
+            while (n < 1024 && q[n] != 0) n++;
+            return _replacement.TryReplace(q, n);
+        }
+        catch
+        {
+            return p;
+        }
     }
 
     // ═══════════════════════ cimgui 定位 / 桩解析 ═══════════════════════
@@ -344,6 +420,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         try { _addTextHook?.Dispose(); } catch { }
         try { _textHook?.Dispose(); } catch { }
+        foreach (var h in _windowHooks)
+        {
+            try { h.Dispose(); } catch { }
+        }
+        _windowHooks.Clear();
         _addTextHook = null;
         _textHook = null;
         Hooked = false;

@@ -51,6 +51,13 @@ public sealed class MainWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("插件安装器里插件介绍的中文化：对照表 + 机翻 + 手动编辑，随插件更新自动补翻。");
         ImGui.SameLine();
+        if (ImGui.Button("窗口文字翻译"))
+        {
+            _plugin.ToggleWindowReplaceUi();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("按插件翻译窗口内的界面文字（候选来自文案扫描），替换层即时生效。");
+        ImGui.SameLine();
         if (ImGui.Button("文案扫描"))
         {
             _plugin.ToggleScanUi();
