@@ -124,7 +124,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         try
         {
-            if (!TryFindCimgui(out var baseAddr, out var moduleName))
+            if (!TryFindCimgui(out var baseAddr, out var moduleName, out var moduleSize))
             {
                 HookStatus = "未找到 cimgui 模块（ImGui 原生库），钩子未挂接";
                 var modules = string.Join(", ", SafeModuleNames().Take(60));
@@ -150,7 +150,23 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 return;
             }
 
-            _addTextHook = _interop.HookFromAddress<AddTextFullDelegate>(addTextAddr, AddTextDetour, IGameInteropProvider.HookBackend.Automatic);
+            // 关键：cimgui 的导出全是极小的转发桩（实测 igBegin/igEnd 相邻仅 16 字节），ImGui 内部 C++
+            // 渲染文字时直调真实函数体、不经过导出桩——直接挂桩只能拦到极少数直接 P/Invoke 该导出的调用
+            //（v0.1.x 曾因此采到 0 条）。必须顺着桩首的 E9 jmp rel32 解析出真实 C++ 函数体再挂钩。
+            var addTextHookAddr = addTextAddr;
+            var realBody = TryResolveJumpTarget(addTextAddr, baseAddr, moduleSize);
+            if (realBody != 0)
+            {
+                addTextHookAddr = realBody;
+                _appLog.Info($"[钩子] {addTextName} 导出桩 {addTextAddr:x} 已解析出真实函数体 {realBody:x}（jmp 转发）");
+            }
+            else
+            {
+                var bytes = string.Join(" ", Enumerable.Range(0, 8).Select(i => ((byte*)addTextAddr)[i].ToString("X2")));
+                _appLog.Warn($"[钩子] {addTextName} 导出桩未识别为 jmp 转发（前 8 字节：{bytes}），退回直接挂导出桩（内部渲染文字可能拦不到）");
+            }
+
+            _addTextHook = _interop.HookFromAddress<AddTextFullDelegate>(addTextHookAddr, AddTextDetour, IGameInteropProvider.HookBackend.Automatic);
             _beginHook = _interop.HookFromAddress<BeginDelegate>(beginAddr, BeginDetour, IGameInteropProvider.HookBackend.Automatic);
             _endHook = _interop.HookFromAddress<EndDelegate>(endAddr, EndDetour, IGameInteropProvider.HookBackend.Automatic);
             _addTextHook.Enable();
@@ -158,7 +174,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
             _endHook.Enable();
 
             Hooked = true;
-            HookStatus = $"已挂接 {moduleName}：{addTextName} / igBegin / igEnd";
+            var where = realBody != 0 ? "真实函数体(jmp解析)" : "导出桩";
+            HookStatus = $"已挂接 {moduleName}：AddText({where}) / igBegin / igEnd";
             _appLog.Info($"[钩子] {HookStatus}");
         }
         catch (Exception ex)
@@ -168,7 +185,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
         }
     }
 
-    private static bool TryFindCimgui(out nint baseAddr, out string moduleName)
+    private static bool TryFindCimgui(out nint baseAddr, out string moduleName, out int moduleSize)
     {
         try
         {
@@ -180,6 +197,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 {
                     baseAddr = m.BaseAddress;
                     moduleName = m.ModuleName;
+                    moduleSize = m.ModuleMemorySize;
                     return true;
                 }
             }
@@ -192,11 +210,37 @@ public sealed unsafe class ImGuiHookService : IDisposable
         {
             baseAddr = handle;
             moduleName = "cimgui.dll";
+            moduleSize = 0; // 拿不到大小时跳过越界校验
             return true;
         }
         baseAddr = 0;
         moduleName = "";
+        moduleSize = 0;
         return false;
+    }
+
+    /// <summary>
+    /// cimgui 导出桩的首指令是 E9 jmp rel32（同签名尾调用转发），解析出真实 C++ 函数体地址。
+    /// 目标必须仍在本模块地址范围内才算有效；识别失败返回 0。
+    /// </summary>
+    private static nint TryResolveJumpTarget(nint stub, nint moduleBase, int moduleSize)
+    {
+        try
+        {
+            var p = (byte*)stub;
+            if (p[0] == 0xE9)
+            {
+                var rel = *(int*)(p + 1);
+                var target = stub + 5 + rel;
+                if (moduleSize <= 0 || (target >= moduleBase && target < moduleBase + moduleSize))
+                    return target;
+            }
+        }
+        catch
+        {
+            /* 解析失败按 0 处理 */
+        }
+        return 0;
     }
 
     private static nint GetExport(nint baseAddr, string name)
