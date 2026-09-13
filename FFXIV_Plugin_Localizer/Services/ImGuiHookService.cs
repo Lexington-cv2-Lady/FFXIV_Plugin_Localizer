@@ -44,35 +44,40 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void TextUnformattedDelegate(nint textBegin, nint textEnd);
 
-    // ── 控件标签桩的委托（按 cimgui 实际签名；浮点参数必须专用委托，否则转发时寄存器错位会弄坏控件） ──
+    // ── 控件标签桩的委托（按 cimgui 实际签名）。⚠ ImGui 控件函数全部返回 bool（是否被激活/展开），
+    //    C++ bool 是 1 字节 → 用 byte 接并原样返回；声明成 void 会丢返回值，控件全部失灵（踩过）。──
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void D1(nint a);
+    private delegate void D1(nint a);                            // void 文本族：igText/TextDisabled/TextWrapped/BulletText/SetTooltip
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void D2(nint a, nint b);
+    private delegate void D2(nint a, nint b);                    // void：igLabelText / igTextColored
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void D2b(nint a, byte b);
+    private delegate byte BD1(nint a);                           // igSmallButton / igTreeNode_Str
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void D2u(nint a, uint b);
+    private delegate byte BD2(nint a, nint b);                   // igCheckbox / igCollapsingHeader_BoolPtr
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void D2v(nint a, ImVec2 b);
+    private delegate byte BD2b(nint a, byte b);                  // igBeginMenu / igRadioButton_Bool
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void D3u(nint a, nint b, uint c);
+    private delegate byte BD2u(nint a, uint b);                  // igTreeNodeEx_Str
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void D4bb(nint a, nint b, byte c, byte d);
+    private delegate byte BD2v(nint a, ImVec2 b);                // igButton
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void D4bu(nint a, byte b, uint c, ImVec2 d);
+    private delegate byte BD3u(nint a, nint b, uint c);          // igBeginCombo / igBeginTabItem / igCollapsingHeader_TreeNodeFlags / igColorEdit3/4
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void SliderFloatD(nint label, nint v, float min, float max, nint fmt, uint flags);
+    private delegate byte BD4bb(nint a, nint b, byte c, byte d); // igMenuItem_Bool
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void DragFloatD(nint label, nint v, float speed, float min, float max, nint fmt, uint flags);
+    private delegate byte BD4bu(nint a, byte b, uint c, ImVec2 d); // igSelectable_Bool
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void SliderIntD(nint label, nint v, int min, int max, nint fmt, uint flags);
+    private delegate byte BSliderFloatD(nint label, nint v, float min, float max, nint fmt, uint flags);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void DragIntD(nint label, nint v, int speed, int min, int max, nint fmt, uint flags);
+    private delegate byte BDragFloatD(nint label, nint v, float speed, float min, float max, nint fmt, uint flags);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void InputTextD(nint label, nint buf, nuint bufSize, uint flags, nint callback, nint userData);
+    private delegate byte BSliderIntD(nint label, nint v, int min, int max, nint fmt, uint flags);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void InputTextHintD(nint label, nint hint, nint buf, nuint bufSize, uint flags, nint callback, nint userData);
+    private delegate byte BDragIntD(nint label, nint v, int speed, int min, int max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte BInputTextD(nint label, nint buf, nuint bufSize, uint flags, nint callback, nint userData);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte BInputTextHintD(nint label, nint hint, nint buf, nuint bufSize, uint flags, nint callback, nint userData);
 
     // ImGuiWindowFlags 内部旗标（imgui.h，多年未变）：子窗口/提示/弹出/模态都不算「顶层窗口」
     private const uint FlagChild = 1u << 24;
@@ -261,48 +266,48 @@ public sealed unsafe class ImGuiHookService : IDisposable
             var labelMissing = new List<string>();
             var backend = IGameInteropProvider.HookBackend.Automatic;
 
-            var bBtn = new HookBox<D2v>();
-            InstallLabel("igButton", baseAddr, bBtn, (a, b) => { CollectArg(a); bBtn.Hook!.Original(a, b); }, backend, labelMissing);
-            var bSBtn = new HookBox<D1>();
-            InstallLabel("igSmallButton", baseAddr, bSBtn, a => { CollectArg(a); bSBtn.Hook!.Original(a); }, backend, labelMissing);
-            var bCheck = new HookBox<D2>();
-            InstallLabel("igCheckbox", baseAddr, bCheck, (a, b) => { CollectArg(a); bCheck.Hook!.Original(a, b); }, backend, labelMissing);
-            var bSel = new HookBox<D4bu>();
-            InstallLabel("igSelectable_Bool", baseAddr, bSel, (a, b, c, d) => { CollectArg(a); bSel.Hook!.Original(a, b, c, d); }, backend, labelMissing);
-            var bCol1 = new HookBox<D2>();
-            InstallLabel("igCollapsingHeader_BoolPtr", baseAddr, bCol1, (a, b) => { CollectArg(a); bCol1.Hook!.Original(a, b); }, backend, labelMissing);
-            var bCol2 = new HookBox<D3u>();
-            InstallLabel("igCollapsingHeader_TreeNodeFlags", baseAddr, bCol2, (a, b, c) => { CollectArg(a); bCol2.Hook!.Original(a, b, c); }, backend, labelMissing);
-            var bTab = new HookBox<D3u>();
-            InstallLabel("igBeginTabItem", baseAddr, bTab, (a, b, c) => { CollectArg(a); bTab.Hook!.Original(a, b, c); }, backend, labelMissing);
-            var bMenu = new HookBox<D2b>();
-            InstallLabel("igBeginMenu", baseAddr, bMenu, (a, b) => { CollectArg(a); bMenu.Hook!.Original(a, b); }, backend, labelMissing);
-            var bMItem = new HookBox<D4bb>();
-            InstallLabel("igMenuItem_Bool", baseAddr, bMItem, (a, b, c, d) => { CollectArg(a); CollectArg(b); bMItem.Hook!.Original(a, b, c, d); }, backend, labelMissing);
-            var bCombo = new HookBox<D3u>();
-            InstallLabel("igBeginCombo", baseAddr, bCombo, (a, b, c) => { CollectArg(a); CollectArg(b); bCombo.Hook!.Original(a, b, c); }, backend, labelMissing);
-            var bTree = new HookBox<D1>();
-            InstallLabel("igTreeNode_Str", baseAddr, bTree, a => { CollectArg(a); bTree.Hook!.Original(a); }, backend, labelMissing);
-            var bTreeEx = new HookBox<D2u>();
-            InstallLabel("igTreeNodeEx_Str", baseAddr, bTreeEx, (a, b) => { CollectArg(a); bTreeEx.Hook!.Original(a, b); }, backend, labelMissing);
-            var bRadio = new HookBox<D2b>();
-            InstallLabel("igRadioButton_Bool", baseAddr, bRadio, (a, b) => { CollectArg(a); bRadio.Hook!.Original(a, b); }, backend, labelMissing);
-            var bSF = new HookBox<SliderFloatD>();
-            InstallLabel("igSliderFloat", baseAddr, bSF, (a, b, c, d, e, f) => { CollectArg(a); bSF.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
-            var bDF = new HookBox<DragFloatD>();
-            InstallLabel("igDragFloat", baseAddr, bDF, (a, b, c, d, e, f, g) => { CollectArg(a); bDF.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
-            var bSI = new HookBox<SliderIntD>();
-            InstallLabel("igSliderInt", baseAddr, bSI, (a, b, c, d, e, f) => { CollectArg(a); bSI.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
-            var bDI = new HookBox<DragIntD>();
-            InstallLabel("igDragInt", baseAddr, bDI, (a, b, c, d, e, f, g) => { CollectArg(a); bDI.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
-            var bIT = new HookBox<InputTextD>();
-            InstallLabel("igInputText", baseAddr, bIT, (a, b, c, d, e, f) => { CollectArg(a); bIT.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
-            var bITH = new HookBox<InputTextHintD>();
-            InstallLabel("igInputTextWithHint", baseAddr, bITH, (a, b, c, d, e, f, g) => { CollectArg(a); CollectArg(b); bITH.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
-            var bCE3 = new HookBox<D3u>();
-            InstallLabel("igColorEdit3", baseAddr, bCE3, (a, b, c) => { CollectArg(a); bCE3.Hook!.Original(a, b, c); }, backend, labelMissing);
-            var bCE4 = new HookBox<D3u>();
-            InstallLabel("igColorEdit4", baseAddr, bCE4, (a, b, c) => { CollectArg(a); bCE4.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bBtn = new HookBox<BD2v>();
+            InstallLabel("igButton", baseAddr, bBtn, (a, b) => { CollectArg(a); return bBtn.Hook!.Original(a, b); }, backend, labelMissing);
+            var bSBtn = new HookBox<BD1>();
+            InstallLabel("igSmallButton", baseAddr, bSBtn, a => { CollectArg(a); return bSBtn.Hook!.Original(a); }, backend, labelMissing);
+            var bCheck = new HookBox<BD2>();
+            InstallLabel("igCheckbox", baseAddr, bCheck, (a, b) => { CollectArg(a); return bCheck.Hook!.Original(a, b); }, backend, labelMissing);
+            var bSel = new HookBox<BD4bu>();
+            InstallLabel("igSelectable_Bool", baseAddr, bSel, (a, b, c, d) => { CollectArg(a); return bSel.Hook!.Original(a, b, c, d); }, backend, labelMissing);
+            var bCol1 = new HookBox<BD2>();
+            InstallLabel("igCollapsingHeader_BoolPtr", baseAddr, bCol1, (a, b) => { CollectArg(a); return bCol1.Hook!.Original(a, b); }, backend, labelMissing);
+            var bCol2 = new HookBox<BD3u>();
+            InstallLabel("igCollapsingHeader_TreeNodeFlags", baseAddr, bCol2, (a, b, c) => { CollectArg(a); return bCol2.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bTab = new HookBox<BD3u>();
+            InstallLabel("igBeginTabItem", baseAddr, bTab, (a, b, c) => { CollectArg(a); return bTab.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bMenu = new HookBox<BD2b>();
+            InstallLabel("igBeginMenu", baseAddr, bMenu, (a, b) => { CollectArg(a); return bMenu.Hook!.Original(a, b); }, backend, labelMissing);
+            var bMItem = new HookBox<BD4bb>();
+            InstallLabel("igMenuItem_Bool", baseAddr, bMItem, (a, b, c, d) => { CollectArg(a); CollectArg(b); return bMItem.Hook!.Original(a, b, c, d); }, backend, labelMissing);
+            var bCombo = new HookBox<BD3u>();
+            InstallLabel("igBeginCombo", baseAddr, bCombo, (a, b, c) => { CollectArg(a); CollectArg(b); return bCombo.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bTree = new HookBox<BD1>();
+            InstallLabel("igTreeNode_Str", baseAddr, bTree, a => { CollectArg(a); return bTree.Hook!.Original(a); }, backend, labelMissing);
+            var bTreeEx = new HookBox<BD2u>();
+            InstallLabel("igTreeNodeEx_Str", baseAddr, bTreeEx, (a, b) => { CollectArg(a); return bTreeEx.Hook!.Original(a, b); }, backend, labelMissing);
+            var bRadio = new HookBox<BD2b>();
+            InstallLabel("igRadioButton_Bool", baseAddr, bRadio, (a, b) => { CollectArg(a); return bRadio.Hook!.Original(a, b); }, backend, labelMissing);
+            var bSF = new HookBox<BSliderFloatD>();
+            InstallLabel("igSliderFloat", baseAddr, bSF, (a, b, c, d, e, f) => { CollectArg(a); return bSF.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            var bDF = new HookBox<BDragFloatD>();
+            InstallLabel("igDragFloat", baseAddr, bDF, (a, b, c, d, e, f, g) => { CollectArg(a); return bDF.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            var bSI = new HookBox<BSliderIntD>();
+            InstallLabel("igSliderInt", baseAddr, bSI, (a, b, c, d, e, f) => { CollectArg(a); return bSI.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            var bDI = new HookBox<BDragIntD>();
+            InstallLabel("igDragInt", baseAddr, bDI, (a, b, c, d, e, f, g) => { CollectArg(a); return bDI.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            var bIT = new HookBox<BInputTextD>();
+            InstallLabel("igInputText", baseAddr, bIT, (a, b, c, d, e, f) => { CollectArg(a); return bIT.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            var bITH = new HookBox<BInputTextHintD>();
+            InstallLabel("igInputTextWithHint", baseAddr, bITH, (a, b, c, d, e, f, g) => { CollectArg(a); CollectArg(b); return bITH.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            var bCE3 = new HookBox<BD3u>();
+            InstallLabel("igColorEdit3", baseAddr, bCE3, (a, b, c) => { CollectArg(a); return bCE3.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bCE4 = new HookBox<BD3u>();
+            InstallLabel("igColorEdit4", baseAddr, bCE4, (a, b, c) => { CollectArg(a); return bCE4.Hook!.Original(a, b, c); }, backend, labelMissing);
             var bText = new HookBox<D1>();
             InstallLabel("igText", baseAddr, bText, a => { CollectArg(a); bText.Hook!.Original(a); }, backend, labelMissing);
             var bTD = new HookBox<D1>();
