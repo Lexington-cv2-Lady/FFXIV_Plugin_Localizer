@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <!-- 钩子服务读原生内存字符串指针，需允许 unsafe -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 插件 ID（InternalName）= 程序集名，必须为 ASCII；显示名（Name）用中文。 -->
+    <AssemblyName>FFXIV_Plugin_Localizer</AssemblyName>
+    <!-- 不从 NuGet 包复制 pdb 调试符号（保持输出目录整洁） -->
+    <CopyDebugSymbolFilesFromPackages>false</CopyDebugSymbolFilesFromPackages>
+    <!-- Manifest 字段：必填 Name / Author / Description / Punchline；InternalName/AssemblyVersion/DalamudApiLevel 由打包器自动填。 -->
+    <Author>Lexington-cv2-Lady</Author>
+    <Name>插件界面汉化</Name>
+    <Punchline>运行时把其他 Dalamud 插件的英文界面文字替换为简体中文。</Punchline>
+    <Description>给其他 Dalamud 插件的界面做运行时汉化：在 ImGui 文字绘制层把插件渲染的英文按对照表换成中文显示，不改对方插件文件，自用/发布皆可。
+采集模式（只读）把屏幕上实际渲染的英文收集为待翻译清单；翻译管线沿用 _未翻译.json → _已翻译.json 的既有流程；仓库链接扫描辅助归属。
+本版本为 MVP：仅只读采集与清单导出。</Description>
+    <RepoUrl>https://github.com/Lexington-cv2-Lady/FFXIV_Plugin_Localizer</RepoUrl>
+    <Tags>汉化;翻译;ui;chinese;localization;中文;dalamud</Tags>
+    <CategoryTags>utility</CategoryTags>
+    <!-- dev 插件部署目录（构建后自动复制）。用 $(APPDATA) 环境变量，避免写死个人用户名路径；
+         本机若用非默认启动器目录，可在 gitignore 的 local.props 里覆盖 DevPluginDir。 -->
+    <DevPluginDir Condition="'$(DevPluginDir)' == ''">$(APPDATA)\XIVLauncherCN\devPlugins\FFXIV_Plugin_Localizer</DevPluginDir>
+  </PropertyGroup>
+
+  <!-- 本机私有覆盖（不入库）：可在此设置 DevPluginDir 等机器相关属性 -->
+  <Import Project="local.props" Condition="Exists('local.props')" />
+
+  <!-- DependsOn 打包器：DalamudPackager 的 targets 在 SDK 末尾导入、晚于本文件执行；
+       不加依赖时 DeployToDev 会先复制上一次生成的旧 manifest。 -->
+  <Target Name="DeployToDev" AfterTargets="Build" DependsOnTargets="DefaultDalamudPackagerDebug;DefaultDalamudPackagerRelease">
+    <ItemGroup>
+      <!-- 排除 pdb 与 DalamudPackager 打包输出目录（<程序集名>\latest.zip），后者不是运行所需 -->
+      <_DeployFiles Include="$(TargetDir)*" Exclude="$(TargetDir)*.pdb;$(TargetDir)$(AssemblyName)\**" />
+      <_DeployFiles Include="$(TargetDir)*\*" Exclude="$(TargetDir)$(AssemblyName)\**" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeployFiles)" DestinationFiles="@(_DeployFiles->'$(DevPluginDir)\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
