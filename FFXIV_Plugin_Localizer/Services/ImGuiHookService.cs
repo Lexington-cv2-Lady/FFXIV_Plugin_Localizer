@@ -152,26 +152,26 @@ public sealed unsafe class ImGuiHookService : IDisposable
             {
                 var missing = new List<string>();
                 Hook<D1> hText = null!;
-                void TextD(nint a) { hText!.Original(RepArg(a)); }
-                InstallWindowHook("igText", baseAddr, hText, TextD, missing);
+                void TextD(nint a) { try { hText!.Original(RepArg(a)); } catch { /* detour 内异常绝不外抛（曾因 hook 未赋值抛 NRE 导致 UI 静默失效） */ } }
+                InstallWindowHook("igText", baseAddr, ref hText, TextD, missing);
                 Hook<D1> hTd = null!;
-                void TdD(nint a) { hTd!.Original(RepArg(a)); }
-                InstallWindowHook("igTextDisabled", baseAddr, hTd, TdD, missing);
+                void TdD(nint a) { try { hTd!.Original(RepArg(a)); } catch { } }
+                InstallWindowHook("igTextDisabled", baseAddr, ref hTd, TdD, missing);
                 Hook<D1> hTw = null!;
-                void TwD(nint a) { hTw!.Original(RepArg(a)); }
-                InstallWindowHook("igTextWrapped", baseAddr, hTw, TwD, missing);
+                void TwD(nint a) { try { hTw!.Original(RepArg(a)); } catch { } }
+                InstallWindowHook("igTextWrapped", baseAddr, ref hTw, TwD, missing);
                 Hook<D1> hBt = null!;
-                void BtD(nint a) { hBt!.Original(RepArg(a)); }
-                InstallWindowHook("igBulletText", baseAddr, hBt, BtD, missing);
+                void BtD(nint a) { try { hBt!.Original(RepArg(a)); } catch { } }
+                InstallWindowHook("igBulletText", baseAddr, ref hBt, BtD, missing);
                 Hook<D1> hTip = null!;
-                void TipD(nint a) { hTip!.Original(RepArg(a)); }
-                InstallWindowHook("igSetTooltip", baseAddr, hTip, TipD, missing);
+                void TipD(nint a) { try { hTip!.Original(RepArg(a)); } catch { } }
+                InstallWindowHook("igSetTooltip", baseAddr, ref hTip, TipD, missing);
                 Hook<D2> hLt = null!;
-                void LtD(nint a, nint b) { hLt!.Original(RepArg(a), b); }
-                InstallWindowHook("igLabelText", baseAddr, hLt, LtD, missing);
+                void LtD(nint a, nint b) { try { hLt!.Original(RepArg(a), b); } catch { } }
+                InstallWindowHook("igLabelText", baseAddr, ref hLt, LtD, missing);
                 Hook<D2> hTc = null!;
-                void TcD(nint a, nint b) { hTc!.Original(a, RepArg(b)); }
-                InstallWindowHook("igTextColored", baseAddr, hTc, TcD, missing);
+                void TcD(nint a, nint b) { try { hTc!.Original(a, RepArg(b)); } catch { } }
+                InstallWindowHook("igTextColored", baseAddr, ref hTc, TcD, missing);
                 _appLog.Info($"[钩子] 窗口替换扩展桩：{_windowHooks.Count}/7 挂接成功" +
                              (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : ""));
             }
@@ -228,7 +228,9 @@ public sealed unsafe class ImGuiHookService : IDisposable
         _textHook!.Original(textBegin, textEnd);
     }
 
-    private void InstallWindowHook<T>(string export, nint baseAddr, Hook<T> hook, T detour, List<string> missing)
+    /// <summary> 挂窗口替换扩展桩。hook 必须 ref 传回调用方——detour 闭包捕获的是调用方变量，
+    /// 按值传参会让调用方变量永远为 null，detour 一触发就 NRE，UI 静默失效（踩过）。 </summary>
+    private void InstallWindowHook<T>(string export, nint baseAddr, ref Hook<T>? hook, T detour, List<string> missing)
         where T : Delegate
     {
         var addr = GetExport(baseAddr, export);
