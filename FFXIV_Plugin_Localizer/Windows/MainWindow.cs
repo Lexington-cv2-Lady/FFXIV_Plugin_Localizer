@@ -84,6 +84,11 @@ public sealed class MainWindow : Window
                 _confirmClearUntil = DateTime.Now.AddSeconds(3);
             }
         }
+        Ui.SameLineIfFits(110f);
+        if (ImGui.Button("日志窗口"))
+        {
+            _plugin.ToggleLogUi(); // 独立日志窗口（环形日志 + 导出报错日志）
+        }
 
         // ── 清单（按窗口分组，占主区可滚动） ──
         var avail = ImGui.GetContentRegionAvail();

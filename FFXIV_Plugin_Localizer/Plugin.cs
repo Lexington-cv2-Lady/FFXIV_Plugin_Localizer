@@ -23,16 +23,21 @@ public sealed class Plugin : IDalamudPlugin
     private const string CommandName = "/plocalizer";
 
     public readonly WindowSystem WindowSystem = new("FFXIVPluginLocalizer");
+    public Configuration Configuration { get; init; }
     public AppLog AppLog { get; }
     public ImGuiHookService Hook { get; }
     public MainWindow MainWindow { get; }
+    public LogWindow LogWindow { get; }
 
     public Plugin()
     {
+        Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
         Hook = new ImGuiHookService(AppLog, Log, Interop, PluginInterface.GetPluginConfigDirectory);
         MainWindow = new MainWindow(this);
+        LogWindow = new LogWindow(this);
         WindowSystem.AddWindow(MainWindow);
+        WindowSystem.AddWindow(LogWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -75,6 +80,9 @@ public sealed class Plugin : IDalamudPlugin
     private void OnCommand(string command, string args) => ToggleMain();
 
     private void ToggleMain() => MainWindow.Toggle();
+
+    /// <summary> 打开/关闭日志窗口（主窗口「日志窗口」按钮入口）。 </summary>
+    public void ToggleLogUi() => LogWindow.Toggle();
 
     public void Dispose()
     {
