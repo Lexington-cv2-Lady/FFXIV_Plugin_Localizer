@@ -17,5 +17,8 @@ public class Configuration : IPluginConfiguration
     /// <summary> 控件标签桩钩子（采集按钮/滑条/复选框等标签；界面异常时先关它再重载）。重载插件后生效。 </summary>
     public bool LabelHooks { get; set; } = true;
 
+    /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
+    public bool ReplacementEnabled { get; set; } = true;
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

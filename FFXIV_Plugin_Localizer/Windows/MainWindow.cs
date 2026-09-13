@@ -113,6 +113,11 @@ public sealed class MainWindow : Window
         {
             _plugin.ToggleScanUi(); // 静态扫描已安装插件 DLL 字符串堆（不依赖游戏内窗口）
         }
+        Ui.SameLineIfFits(110f);
+        if (ImGui.Button("安装器翻译"))
+        {
+            _plugin.ToggleTranslationUi(); // 安装器插件介绍中文化（替换层 + 机翻表）
+        }
 
         // ── 清单（按窗口分组，占主区可滚动） ──
         var avail = ImGui.GetContentRegionAvail();

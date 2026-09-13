@@ -102,6 +102,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly IPluginLog _log;
     private readonly IGameInteropProvider _interop;
     private readonly Func<string> _configDir;
+    private readonly ReplacementService _replacement;
     private readonly Func<bool> _hooksEnabled;
     private readonly Func<bool> _labelHooksEnabled;
 
@@ -181,7 +182,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     public long SessionNewCount { get { lock (_lock) return _sessionNew; } }
 
     public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop, Func<string> configDir,
-        Func<bool> hooksEnabled, Func<bool> labelHooksEnabled)
+        Func<bool> hooksEnabled, Func<bool> labelHooksEnabled, ReplacementService replacement)
     {
         _appLog = appLog;
         _log = log;
@@ -189,6 +190,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
         _configDir = configDir;
         _hooksEnabled = hooksEnabled;
         _labelHooksEnabled = labelHooksEnabled;
+        _replacement = replacement;
         Load();
         InstallHooks();
     }
@@ -285,62 +287,62 @@ public sealed unsafe class ImGuiHookService : IDisposable
             var backend = IGameInteropProvider.HookBackend.Automatic;
 
             var bBtn = new HookBox<BD2v>();
-            InstallLabel("igButton", baseAddr, bBtn, (a, b) => { CollectArg(a); return bBtn.Hook!.Original(a, b); }, backend, labelMissing);
+            InstallLabel("igButton", baseAddr, bBtn, (a, b) => { CollectArg(a); a = RepArg(a); return bBtn.Hook!.Original(a, b); }, backend, labelMissing);
             var bSBtn = new HookBox<BD1>();
-            InstallLabel("igSmallButton", baseAddr, bSBtn, a => { CollectArg(a); return bSBtn.Hook!.Original(a); }, backend, labelMissing);
+            InstallLabel("igSmallButton", baseAddr, bSBtn, a => { CollectArg(a); a = RepArg(a); return bSBtn.Hook!.Original(a); }, backend, labelMissing);
             var bCheck = new HookBox<BD2>();
-            InstallLabel("igCheckbox", baseAddr, bCheck, (a, b) => { CollectArg(a); return bCheck.Hook!.Original(a, b); }, backend, labelMissing);
+            InstallLabel("igCheckbox", baseAddr, bCheck, (a, b) => { CollectArg(a); a = RepArg(a); return bCheck.Hook!.Original(a, b); }, backend, labelMissing);
             var bSel = new HookBox<BD4bu>();
-            InstallLabel("igSelectable_Bool", baseAddr, bSel, (a, b, c, d) => { CollectArg(a); return bSel.Hook!.Original(a, b, c, d); }, backend, labelMissing);
+            InstallLabel("igSelectable_Bool", baseAddr, bSel, (a, b, c, d) => { CollectArg(a); a = RepArg(a); return bSel.Hook!.Original(a, b, c, d); }, backend, labelMissing);
             var bCol1 = new HookBox<BD3u>();
             // ⚠ igCollapsingHeader_BoolPtr 是 3 参（label, p_visible, flags）——少转发一个，flags 读到垃圾，折叠头就废了
-            InstallLabel("igCollapsingHeader_BoolPtr", baseAddr, bCol1, (a, b, c) => { CollectArg(a); return bCol1.Hook!.Original(a, b, c); }, backend, labelMissing);
+            InstallLabel("igCollapsingHeader_BoolPtr", baseAddr, bCol1, (a, b, c) => { CollectArg(a); a = RepArg(a); return bCol1.Hook!.Original(a, b, c); }, backend, labelMissing);
             var bCol2 = new HookBox<BD2u>();
-            InstallLabel("igCollapsingHeader_TreeNodeFlags", baseAddr, bCol2, (a, b) => { CollectArg(a); return bCol2.Hook!.Original(a, b); }, backend, labelMissing);
+            InstallLabel("igCollapsingHeader_TreeNodeFlags", baseAddr, bCol2, (a, b) => { CollectArg(a); a = RepArg(a); return bCol2.Hook!.Original(a, b); }, backend, labelMissing);
             var bTab = new HookBox<BD3u>();
-            InstallLabel("igBeginTabItem", baseAddr, bTab, (a, b, c) => { CollectArg(a); return bTab.Hook!.Original(a, b, c); }, backend, labelMissing);
+            InstallLabel("igBeginTabItem", baseAddr, bTab, (a, b, c) => { CollectArg(a); a = RepArg(a); return bTab.Hook!.Original(a, b, c); }, backend, labelMissing);
             var bMenu = new HookBox<BD2b>();
-            InstallLabel("igBeginMenu", baseAddr, bMenu, (a, b) => { CollectArg(a); return bMenu.Hook!.Original(a, b); }, backend, labelMissing);
+            InstallLabel("igBeginMenu", baseAddr, bMenu, (a, b) => { CollectArg(a); a = RepArg(a); return bMenu.Hook!.Original(a, b); }, backend, labelMissing);
             var bMItem = new HookBox<BD4bb>();
-            InstallLabel("igMenuItem_Bool", baseAddr, bMItem, (a, b, c, d) => { CollectArg(a); CollectArg(b); return bMItem.Hook!.Original(a, b, c, d); }, backend, labelMissing);
+            InstallLabel("igMenuItem_Bool", baseAddr, bMItem, (a, b, c, d) => { CollectArg(a); CollectArg(b); a = RepArg(a); b = RepArg(b); return bMItem.Hook!.Original(a, b, c, d); }, backend, labelMissing);
             var bCombo = new HookBox<BD3u>();
-            InstallLabel("igBeginCombo", baseAddr, bCombo, (a, b, c) => { CollectArg(a); CollectArg(b); return bCombo.Hook!.Original(a, b, c); }, backend, labelMissing);
+            InstallLabel("igBeginCombo", baseAddr, bCombo, (a, b, c) => { CollectArg(a); CollectArg(b); a = RepArg(a); b = RepArg(b); return bCombo.Hook!.Original(a, b, c); }, backend, labelMissing);
             var bTree = new HookBox<BD1>();
-            InstallLabel("igTreeNode_Str", baseAddr, bTree, a => { CollectArg(a); return bTree.Hook!.Original(a); }, backend, labelMissing);
+            InstallLabel("igTreeNode_Str", baseAddr, bTree, a => { CollectArg(a); a = RepArg(a); return bTree.Hook!.Original(a); }, backend, labelMissing);
             var bTreeEx = new HookBox<BD2u>();
-            InstallLabel("igTreeNodeEx_Str", baseAddr, bTreeEx, (a, b) => { CollectArg(a); return bTreeEx.Hook!.Original(a, b); }, backend, labelMissing);
+            InstallLabel("igTreeNodeEx_Str", baseAddr, bTreeEx, (a, b) => { CollectArg(a); a = RepArg(a); return bTreeEx.Hook!.Original(a, b); }, backend, labelMissing);
             var bRadio = new HookBox<BD2b>();
-            InstallLabel("igRadioButton_Bool", baseAddr, bRadio, (a, b) => { CollectArg(a); return bRadio.Hook!.Original(a, b); }, backend, labelMissing);
+            InstallLabel("igRadioButton_Bool", baseAddr, bRadio, (a, b) => { CollectArg(a); a = RepArg(a); return bRadio.Hook!.Original(a, b); }, backend, labelMissing);
             var bSF = new HookBox<BSliderFloatD>();
-            InstallLabel("igSliderFloat", baseAddr, bSF, (a, b, c, d, e, f) => { CollectArg(a); return bSF.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            InstallLabel("igSliderFloat", baseAddr, bSF, (a, b, c, d, e, f) => { CollectArg(a); a = RepArg(a); return bSF.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
             var bDF = new HookBox<BDragFloatD>();
-            InstallLabel("igDragFloat", baseAddr, bDF, (a, b, c, d, e, f, g) => { CollectArg(a); return bDF.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            InstallLabel("igDragFloat", baseAddr, bDF, (a, b, c, d, e, f, g) => { CollectArg(a); a = RepArg(a); return bDF.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
             var bSI = new HookBox<BSliderIntD>();
-            InstallLabel("igSliderInt", baseAddr, bSI, (a, b, c, d, e, f) => { CollectArg(a); return bSI.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            InstallLabel("igSliderInt", baseAddr, bSI, (a, b, c, d, e, f) => { CollectArg(a); a = RepArg(a); return bSI.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
             var bDI = new HookBox<BDragIntD>();
-            InstallLabel("igDragInt", baseAddr, bDI, (a, b, c, d, e, f, g) => { CollectArg(a); return bDI.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            InstallLabel("igDragInt", baseAddr, bDI, (a, b, c, d, e, f, g) => { CollectArg(a); a = RepArg(a); return bDI.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
             var bIT = new HookBox<BInputTextD>();
-            InstallLabel("igInputText", baseAddr, bIT, (a, b, c, d, e, f) => { CollectArg(a); return bIT.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
+            InstallLabel("igInputText", baseAddr, bIT, (a, b, c, d, e, f) => { CollectArg(a); a = RepArg(a); return bIT.Hook!.Original(a, b, c, d, e, f); }, backend, labelMissing);
             var bITH = new HookBox<BInputTextHintD>();
-            InstallLabel("igInputTextWithHint", baseAddr, bITH, (a, b, c, d, e, f, g) => { CollectArg(a); CollectArg(b); return bITH.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
+            InstallLabel("igInputTextWithHint", baseAddr, bITH, (a, b, c, d, e, f, g) => { CollectArg(a); CollectArg(b); a = RepArg(a); b = RepArg(b); return bITH.Hook!.Original(a, b, c, d, e, f, g); }, backend, labelMissing);
             var bCE3 = new HookBox<BD3u>();
-            InstallLabel("igColorEdit3", baseAddr, bCE3, (a, b, c) => { CollectArg(a); return bCE3.Hook!.Original(a, b, c); }, backend, labelMissing);
+            InstallLabel("igColorEdit3", baseAddr, bCE3, (a, b, c) => { CollectArg(a); a = RepArg(a); return bCE3.Hook!.Original(a, b, c); }, backend, labelMissing);
             var bCE4 = new HookBox<BD3u>();
-            InstallLabel("igColorEdit4", baseAddr, bCE4, (a, b, c) => { CollectArg(a); return bCE4.Hook!.Original(a, b, c); }, backend, labelMissing);
+            InstallLabel("igColorEdit4", baseAddr, bCE4, (a, b, c) => { CollectArg(a); a = RepArg(a); return bCE4.Hook!.Original(a, b, c); }, backend, labelMissing);
             var bText = new HookBox<D1>();
-            InstallLabel("igText", baseAddr, bText, a => { CollectArg(a); bText.Hook!.Original(a); }, backend, labelMissing);
+            InstallLabel("igText", baseAddr, bText, a => { CollectArg(a); a = RepArg(a); bText.Hook!.Original(a); }, backend, labelMissing);
             var bTD = new HookBox<D1>();
-            InstallLabel("igTextDisabled", baseAddr, bTD, a => { CollectArg(a); bTD.Hook!.Original(a); }, backend, labelMissing);
+            InstallLabel("igTextDisabled", baseAddr, bTD, a => { CollectArg(a); a = RepArg(a); bTD.Hook!.Original(a); }, backend, labelMissing);
             var bTW = new HookBox<D1>();
-            InstallLabel("igTextWrapped", baseAddr, bTW, a => { CollectArg(a); bTW.Hook!.Original(a); }, backend, labelMissing);
+            InstallLabel("igTextWrapped", baseAddr, bTW, a => { CollectArg(a); a = RepArg(a); bTW.Hook!.Original(a); }, backend, labelMissing);
             var bLT = new HookBox<D2>();
-            InstallLabel("igLabelText", baseAddr, bLT, (a, b) => { CollectArg(a); bLT.Hook!.Original(a, b); }, backend, labelMissing);
+            InstallLabel("igLabelText", baseAddr, bLT, (a, b) => { CollectArg(a); a = RepArg(a); bLT.Hook!.Original(a, b); }, backend, labelMissing);
             var bBT = new HookBox<D1>();
-            InstallLabel("igBulletText", baseAddr, bBT, a => { CollectArg(a); bBT.Hook!.Original(a); }, backend, labelMissing);
+            InstallLabel("igBulletText", baseAddr, bBT, a => { CollectArg(a); a = RepArg(a); bBT.Hook!.Original(a); }, backend, labelMissing);
             var bTip = new HookBox<D1>();
-            InstallLabel("igSetTooltip", baseAddr, bTip, a => { CollectArg(a); bTip.Hook!.Original(a); }, backend, labelMissing);
+            InstallLabel("igSetTooltip", baseAddr, bTip, a => { CollectArg(a); a = RepArg(a); bTip.Hook!.Original(a); }, backend, labelMissing);
             var bTC = new HookBox<D2>();
-            InstallLabel("igTextColored", baseAddr, bTC, (a, b) => { CollectArg(b); bTC.Hook!.Original(a, b); }, backend, labelMissing);
+            InstallLabel("igTextColored", baseAddr, bTC, (a, b) => { CollectArg(b); b = RepArg(b); bTC.Hook!.Original(a, b); }, backend, labelMissing);
 
             _appLog.Info($"[钩子] 控件标签桩：{_labelHooks.Count} 个挂接成功" +
                          (labelMissing.Count > 0 ? $"，缺导出 {labelMissing.Count} 个（{string.Join("、", labelMissing)}）" : ""));
@@ -575,19 +577,61 @@ public sealed unsafe class ImGuiHookService : IDisposable
         nint self, nint font, float fontSize, ImVec2 pos, uint col,
         nint textBegin, nint textEnd, float wrapWidth, nint cpuFineClipRect)
     {
-        if (_collecting && textBegin != 0)
+        var repBegin = textBegin;
+        if (textBegin != 0)
         {
-            try { Collect(textBegin, textEnd); } catch { /* 钩子内异常绝不外抛 */ }
+            try
+            {
+                if (_collecting) Collect(textBegin, textEnd);
+                if (_replacement.Enabled)
+                {
+                    var q = (byte*)textBegin;
+                    var n = 0;
+                    if (textEnd != 0) { n = (int)(textEnd - textBegin); if (n <= 0) n = 0; }
+                    else while (n < 1024 && q[n] != 0) n++;
+                    if (n > 1024) n = 1024;
+                    var rep = _replacement.TryReplace(q, n);
+                    if (rep != 0) { repBegin = rep; textEnd = 0; } // 中文按 NUL 结尾
+                }
+            }
+            catch { /* 钩子内异常绝不外抛 */ }
         }
-        _addTextHook!.Original(self, font, fontSize, pos, col, textBegin, textEnd, wrapWidth, cpuFineClipRect);
+        _addTextHook!.Original(self, font, fontSize, pos, col, repBegin, textEnd, wrapWidth, cpuFineClipRect);
+    }
+
+    /// <summary> 替换查表：命中返回 NUL 结尾中文指针（转发时按 NUL 结尾传），未命中返回原指针。 </summary>
+    private nint RepArg(nint p)
+    {
+        if (!_replacement.Enabled || p == 0) return p;
+        try
+        {
+            var q = (byte*)p;
+            var n = 0;
+            while (n < 1024 && q[n] != 0) n++;
+            return _replacement.TryReplace(q, n);
+        }
+        catch
+        {
+            return p;
+        }
     }
 
     /// <summary> 兜底钩子：igTextUnformatted 桩（托管侧 Text 类调用的必经桩）。 </summary>
     private void TextUnformattedDetour(nint textBegin, nint textEnd)
     {
-        if (_collecting && textBegin != 0)
+        if (textBegin != 0)
         {
-            try { Collect(textBegin, textEnd); } catch { /* 钩子内异常绝不外抛 */ }
+            try
+            {
+                if (_collecting) Collect(textBegin, textEnd);
+                var rep = _replacement.Enabled ? RepArg(textBegin) : 0;
+                if (rep != 0)
+                {
+                    _textHook!.Original(rep, 0); // 中文按 NUL 结尾，end 传 0
+                    return;
+                }
+            }
+            catch { /* 钩子内异常绝不外抛 */ }
         }
         _textHook!.Original(textBegin, textEnd);
     }
