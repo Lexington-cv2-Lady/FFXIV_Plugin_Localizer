@@ -156,10 +156,18 @@ public sealed class MtTranslateService
         _appLog.Info($"[机翻] {Status}");
     }
 
-    /// <summary> 送一批（≤单批条数）翻译：整批 JSON 进、整批 JSON 出，容错剥离 ``` 围栏。 </summary>
+    /// <summary>
+    /// 送一批（≤单批条数）翻译。**用「原文/译文」成对数组协议**（与本地文件格式一致，抄旧项目风格）：
+    /// 窗口文案常含 <c>* [ ] : ' " ,</c> 等字符，若让其当 JSON **键**回写必然大量转义失败
+    /// （实测 40 条失败 30 条）；成对数组里原文是 JSON 的**值**，序列化天然安全。
+    /// 发送 <c>[{原文:"...",译文:""}]</c>，要求 AI 只回填译文，按**下标**对应回原文（不依赖 AI 复述原文）。
+    /// </summary>
     private async Task<Dictionary<string, string>> TranslateBatch(Dictionary<string, string> batch)
     {
         var (baseUrl, model) = ResolveEndpoint(_cfg);
+        var items = batch.Keys.ToList(); // 保持插入顺序
+        var userJson = TranslationFile.ToPairJson(items);
+
         var payload = JsonSerializer.Serialize(new
         {
             model,
@@ -169,9 +177,12 @@ public sealed class MtTranslateService
                 new
                 {
                     role = "system",
-                    content = "你是游戏插件界面的翻译引擎。把用户给出的 JSON 对象中的每个英文值翻译成简洁自然的简体中文（游戏/UI 语境），键保持英文原文不变，值替换为译文。只返回 JSON 对象本身，不要输出任何解释或代码块标记。"
+                    content = "你是游戏插件界面的翻译引擎。用户会给出一个 JSON 数组，每个元素形如 " +
+                              "{\"en\": \"英文原文\", \"zh\": \"\"}。请把每条的 \"en\" 翻译成简洁自然的简体中文（游戏/UI 语境），" +
+                              "填入同一条的 \"zh\" 字段。保持数组长度、顺序、每条的 \"en\" 完全不变，只填 \"zh\"。" +
+                              "只输出这个 JSON 数组本身，不要任何解释或代码块标记。"
                 },
-                new { role = "user", content = JsonSerializer.Serialize(batch) }
+                new { role = "user", content = userJson }
             }
         });
 
@@ -191,39 +202,40 @@ public sealed class MtTranslateService
             .GetProperty("message");
         var content = message.TryGetProperty("content", out var cEl) ? cEl.GetString() ?? "" : "";
         var reasoning = message.TryGetProperty("reasoning_content", out var rcEl) ? rcEl.GetString() ?? "" : "";
-        // 推理模型（glm-4.7-flash / glm-4.5-flash 等）会把思考过程放 reasoning_content：
-        // 若 content 里没有可用 JSON，从 reasoning 兜底提取（否则整批静默失败）。
-        if (string.IsNullOrWhiteSpace(content) || !content.Contains('{') || reasoning.Length > 0)
-        {
-            content = PickJson(content, reasoning);
-        }
-        content = StripFences(content);
+        // 推理模型（glm-4.7-flash / glm-4.5-flash 等）把思考过程放 reasoning_content：content 空时兜底取用
+        if (string.IsNullOrWhiteSpace(content) && reasoning.Length > 0) content = reasoning;
 
-        var result = JsonSerializer.Deserialize<Dictionary<string, string>>(content);
-        if (result == null) throw new Exception("返回内容不是 JSON：" + Truncate(content, 200));
-        return result.Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
-            .ToDictionary(kv => kv.Key, kv => kv.Value.Trim(), StringComparer.Ordinal);
+        // 按成对数组下标解析；失败再退回「编号行」解析（兼容 AI 不听话改了格式）
+        var result = TranslationFile.FromPairJson(content, items);
+        if (result.Count == 0) result = ParseNumberedLines(content, items);
+        if (result.Count == 0) throw new Exception("返回内容无法解析：" + Truncate(content, 200));
+        return result;
     }
 
-    /// <summary> 从若干候选文本里挑出「能解析成 JSON 对象」的那段（优先 content，其次 reasoning）。 </summary>
-    private static string PickJson(string content, string reasoning)
+    /// <summary> 解析「编号. 译文」行，按编号映射回原英文。兼容全角句点、多种分隔与多余前后缀。 </summary>
+    private static Dictionary<string, string> ParseNumberedLines(string content, List<string> items)
     {
-        foreach (var candidate in new[] { content, reasoning })
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(content)) return result;
+        foreach (var rawLine in content.Replace('。', '.').Split('\n'))
         {
-            if (string.IsNullOrWhiteSpace(candidate)) continue;
-            var s = StripFences(candidate);
-            var start = s.IndexOf('{');
-            var end = s.LastIndexOf('}');
-            if (start < 0 || end <= start) continue;
-            var slice = s[start..(end + 1)];
-            try
+            var line = rawLine.Trim().TrimStart('`', '*', '-', ' ');
+            if (line.Length == 0) continue;
+            // 找开头的编号
+            var dot = -1;
+            for (var i = 0; i < line.Length && i < 6; i++)
             {
-                var probe = JsonSerializer.Deserialize<Dictionary<string, string>>(slice);
-                if (probe != null && probe.Count > 0) return slice;
+                if (line[i] == '.' || line[i] == '、' || line[i] == ')') { dot = i; break; }
+                if (!char.IsDigit(line[i])) break;
             }
-            catch { /* 这段不是 JSON，试下一段 */ }
+            if (dot <= 0) continue;
+            if (!int.TryParse(line[..dot], out var num)) continue;
+            if (num < 1 || num > items.Count) continue;
+            var zh = line[(dot + 1)..].Trim();
+            if (zh.Length == 0) continue;
+            result[items[num - 1]] = zh;
         }
-        return content;
+        return result;
     }
 
     /// <summary> 测试连接（AI 设置窗口用，返回简短结果）。抄自旧项目。 </summary>
