@@ -89,6 +89,11 @@ public sealed class MainWindow : Window
         {
             _plugin.ToggleLogUi(); // 独立日志窗口（环形日志 + 导出报错日志）
         }
+        Ui.SameLineIfFits(110f);
+        if (ImGui.Button("文案扫描"))
+        {
+            _plugin.ToggleScanUi(); // 静态扫描已安装插件 DLL 字符串堆（不依赖游戏内窗口）
+        }
 
         // ── 清单（按窗口分组，占主区可滚动） ──
         var avail = ImGui.GetContentRegionAvail();

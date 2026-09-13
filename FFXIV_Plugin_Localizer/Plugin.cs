@@ -26,18 +26,23 @@ public sealed class Plugin : IDalamudPlugin
     public Configuration Configuration { get; init; }
     public AppLog AppLog { get; }
     public ImGuiHookService Hook { get; }
+    public PluginScanService Scan { get; }
     public MainWindow MainWindow { get; }
     public LogWindow LogWindow { get; }
+    public ScanWindow ScanWindow { get; }
 
     public Plugin()
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
         Hook = new ImGuiHookService(AppLog, Log, Interop, PluginInterface.GetPluginConfigDirectory);
+        Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
         MainWindow = new MainWindow(this);
         LogWindow = new LogWindow(this);
+        ScanWindow = new ScanWindow(this, Scan);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
+        WindowSystem.AddWindow(ScanWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -83,6 +88,9 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary> 打开/关闭日志窗口（主窗口「日志窗口」按钮入口）。 </summary>
     public void ToggleLogUi() => LogWindow.Toggle();
+
+    /// <summary> 打开/关闭文案扫描窗口（主窗口「文案扫描」按钮入口）。 </summary>
+    public void ToggleScanUi() => ScanWindow.Toggle();
 
     public void Dispose()
     {
