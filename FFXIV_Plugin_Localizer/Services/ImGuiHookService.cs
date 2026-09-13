@@ -40,6 +40,10 @@ public sealed unsafe class ImGuiHookService : IDisposable
         nint self, nint font, float fontSize, ImVec2 pos, uint col,
         nint textBegin, nint textEnd, float wrapWidth, nint cpuFineClipRect);
 
+    // cimgui：igTextUnformatted(text_begin, text_end)——托管侧 Text/TextWrapped 等的底层必经桩（兜底钩子用）
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void TextUnformattedDelegate(nint textBegin, nint textEnd);
+
     // ImGuiWindowFlags 内部旗标（imgui.h，多年未变）：子窗口/提示/弹出/模态都不算「顶层窗口」
     private const uint FlagChild = 1u << 24;
     private const uint FlagTooltip = 1u << 25;
@@ -67,6 +71,36 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private Hook<BeginDelegate>? _beginHook;
     private Hook<EndDelegate>? _endHook;
     private Hook<AddTextFullDelegate>? _addTextHook;
+    private Hook<TextUnformattedDelegate>? _textHook;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORY_BASIC_INFORMATION
+    {
+        public nint BaseAddress;
+        public nint AllocationBase;
+        public uint AllocationProtect;
+        public nint RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern nint VirtualQuery(nint lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, nint dwLength);
+
+    /// <summary> 槽地址可读性校验（MEM_COMMIT 且非 PAGE_NOACCESS）——读野指针在 .NET 里会直接崩进程，必须先查。 </summary>
+    private static bool IsReadableMemory(nint addr)
+    {
+        try
+        {
+            if (VirtualQuery(addr, out var mbi, (nint)sizeof(MEMORY_BASIC_INFORMATION)) == 0) return false;
+            return mbi.State == 0x1000 && (mbi.Protect & 0xFF) != 0x01;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private readonly object _lock = new();
 
@@ -152,18 +186,30 @@ public sealed unsafe class ImGuiHookService : IDisposable
 
             // 关键：cimgui 的导出全是极小的转发桩（实测 igBegin/igEnd 相邻仅 16 字节），ImGui 内部 C++
             // 渲染文字时直调真实函数体、不经过导出桩——直接挂桩只能拦到极少数直接 P/Invoke 该导出的调用
-            //（v0.1.x 曾因此采到 0 条）。必须顺着桩首的 E9 jmp rel32 解析出真实 C++ 函数体再挂钩。
+            //（此前曾因此采到 0 条）。顺着桩首的跳转指令解析出真实 C++ 函数体再挂钩。
+            _appLog.Info($"[钩子] 导出桩字节：{addTextName}={Hex(addTextAddr, 16)} igBegin={Hex(beginAddr, 16)}");
             var addTextHookAddr = addTextAddr;
-            var realBody = TryResolveJumpTarget(addTextAddr, baseAddr, moduleSize);
+            var realBody = TryResolveFunctionBody(addTextAddr, baseAddr, moduleSize, out var how);
             if (realBody != 0)
             {
                 addTextHookAddr = realBody;
-                _appLog.Info($"[钩子] {addTextName} 导出桩 {addTextAddr:x} 已解析出真实函数体 {realBody:x}（jmp 转发）");
+                _appLog.Info($"[钩子] {addTextName} 导出桩 {addTextAddr:x} → 真实函数体 {realBody:x}（{how}）");
             }
             else
             {
-                var bytes = string.Join(" ", Enumerable.Range(0, 8).Select(i => ((byte*)addTextAddr)[i].ToString("X2")));
-                _appLog.Warn($"[钩子] {addTextName} 导出桩未识别为 jmp 转发（前 8 字节：{bytes}），退回直接挂导出桩（内部渲染文字可能拦不到）");
+                // 解析失败：AddText 桩不在内部渲染路径上，改挂 igTextUnformatted 桩兜底——
+                // 托管侧所有 Text/TextWrapped/TextColored 等调用都必经该桩；按钮/标签等走各自导出，可能漏采
+                var textStub = GetExport(baseAddr, "igTextUnformatted");
+                if (textStub != 0)
+                {
+                    _textHook = _interop.HookFromAddress<TextUnformattedDelegate>(textStub, TextUnformattedDetour, IGameInteropProvider.HookBackend.Automatic);
+                    _textHook.Enable();
+                    _appLog.Warn("[钩子] AddText 真实函数体解析失败，已改挂 igTextUnformatted 桩兜底（Text 类可采集，按钮/复选框等标签可能漏采）");
+                }
+                else
+                {
+                    _appLog.Error("[钩子] AddText 解析失败且 igTextUnformatted 导出不存在，文字采集不可用");
+                }
             }
 
             _addTextHook = _interop.HookFromAddress<AddTextFullDelegate>(addTextHookAddr, AddTextDetour, IGameInteropProvider.HookBackend.Automatic);
@@ -174,8 +220,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
             _endHook.Enable();
 
             Hooked = true;
-            var where = realBody != 0 ? "真实函数体(jmp解析)" : "导出桩";
-            HookStatus = $"已挂接 {moduleName}：AddText({where}) / igBegin / igEnd";
+            var mode = realBody != 0 ? "AddText 真实函数体" : _textHook != null ? "igTextUnformatted 兜底" : "AddText 导出桩";
+            HookStatus = $"已挂接 {moduleName}：{mode} / igBegin / igEnd";
             _appLog.Info($"[钩子] {HookStatus}");
         }
         catch (Exception ex)
@@ -220,28 +266,65 @@ public sealed unsafe class ImGuiHookService : IDisposable
     }
 
     /// <summary>
-    /// cimgui 导出桩的首指令是 E9 jmp rel32（同签名尾调用转发），解析出真实 C++ 函数体地址。
-    /// 目标必须仍在本模块地址范围内才算有效；识别失败返回 0。
+    /// 解析 cimgui 导出桩背后的真实 C++ 函数体。桩是同签名尾调用转发，实测形态：
+    /// E9 rel32（直跳）、FF 24 25 abs32（经绝对地址槽跳，槽里存目标，本机 cimgui 即此形态）、
+    /// 兼容 FF 25 rel32（RIP 相对槽）。槽读取前用 VirtualQuery 校验可读，防野指针崩进程。
     /// </summary>
-    private static nint TryResolveJumpTarget(nint stub, nint moduleBase, int moduleSize)
+    private static nint TryResolveFunctionBody(nint stub, nint moduleBase, int moduleSize, out string how)
     {
+        how = "";
         try
         {
             var p = (byte*)stub;
+            nint target;
             if (p[0] == 0xE9)
             {
-                var rel = *(int*)(p + 1);
-                var target = stub + 5 + rel;
-                if (moduleSize <= 0 || (target >= moduleBase && target < moduleBase + moduleSize))
-                    return target;
+                target = stub + 5 + *(int*)(p + 1);
+                how = "jmp rel32";
             }
+            else if (p[0] == 0xFF && p[1] == 0x25)
+            {
+                if (!TryReadPointer(stub + 6 + *(int*)(p + 2), out target)) return 0;
+                how = "jmp [rip+rel32]";
+            }
+            else if (p[0] == 0xFF && p[1] == 0x24 && p[2] == 0x25)
+            {
+                var slot = (nint)(uint)*(int*)(p + 3); // 绝对地址槽（按无符号 32 位地址）
+                if (!TryReadPointer(slot, out target)) return 0;
+                how = "jmp [abs32]";
+            }
+            else
+            {
+                return 0;
+            }
+            if (target == 0) return 0;
+            if (moduleSize > 0 && target >= moduleBase && target < moduleBase + moduleSize)
+                return target; // 目标在本模块内，最可信
+            if (target > 0x10000 && (target >> 47) == 0)
+            {
+                how += "（模块外，按有效用户态代码指针接受）";
+                return target;
+            }
+            return 0;
         }
         catch
         {
-            /* 解析失败按 0 处理 */
+            how = "";
+            return 0;
         }
-        return 0;
     }
+
+    private static bool TryReadPointer(nint slot, out nint value)
+    {
+        value = 0;
+        if (!IsReadableMemory(slot)) return false;
+        value = *(nint*)slot;
+        return value != 0;
+    }
+
+    /// <summary> 导出桩前若干字节的十六进制（诊断日志用）。 </summary>
+    private static string Hex(nint addr, int count)
+        => string.Join(" ", Enumerable.Range(0, count).Select(i => ((byte*)addr)[i].ToString("X2")));
 
     private static nint GetExport(nint baseAddr, string name)
         => NativeLibrary.TryGetExport(baseAddr, name, out var addr) ? addr : 0;
@@ -288,6 +371,22 @@ public sealed unsafe class ImGuiHookService : IDisposable
         }
         var h = Fnv1a(p, len);
 
+        // 窗口标题一并采集：兜底模式下标题走不到文字钩子；主模式下也无害（去重兜底）。
+        // 注意此时栈还没压入本窗口，归属就是「正在 Begin 的这个窗口」，所以 own 判定用本窗口自身。
+        if (_collecting && !own)
+        {
+            try
+            {
+                var shown = len; // 标题显示部分截到 ## 为止（### 之后是 ID 后缀，不是显示文字）
+                for (var i = 0; i + 1 < len; i++)
+                {
+                    if (p[i] == (byte)'#' && p[i + 1] == (byte)'#') { shown = i; break; }
+                }
+                CollectBytes(p, shown, own);
+            }
+            catch { /* 钩子内异常绝不外抛 */ }
+        }
+
         lock (_lock)
         {
             if (!_winNames.ContainsKey(h) && _winNames.Count < 4096)
@@ -326,12 +425,22 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         if (_collecting && textBegin != 0)
         {
-            try { Collect(textBegin, textEnd); } catch { /* 同上 */ }
+            try { Collect(textBegin, textEnd); } catch { /* 钩子内异常绝不外抛 */ }
         }
         _addTextHook!.Original(self, font, fontSize, pos, col, textBegin, textEnd, wrapWidth, cpuFineClipRect);
     }
 
-    /// <summary> 采集判定：纯可打印 ASCII、至少含一个字母、非本插件窗口 → 入清单。 </summary>
+    /// <summary> 兜底钩子：igTextUnformatted 桩（托管侧 Text 类调用的必经桩）。 </summary>
+    private void TextUnformattedDetour(nint textBegin, nint textEnd)
+    {
+        if (_collecting && textBegin != 0)
+        {
+            try { Collect(textBegin, textEnd); } catch { /* 钩子内异常绝不外抛 */ }
+        }
+        _textHook!.Original(textBegin, textEnd);
+    }
+
+    /// <summary> 由指针区间计算采集长度并进入采集判定。 </summary>
     private void Collect(nint textBegin, nint textEnd)
     {
         var p = (byte*)textBegin;
@@ -346,7 +455,18 @@ public sealed unsafe class ImGuiHookService : IDisposable
         {
             while (n < MaxTextLen && p[n] != 0) n++;
         }
+        CollectBytes(p, n, false, checkCurTop: true);
+    }
+
+    /// <summary>
+    /// 采集判定核心：纯可打印 ASCII、至少含一个字母、非本插件窗口 → 入清单。
+    /// isOwnText：调用方已确认属于本插件窗口（如自身标题）直接跳过；
+    /// checkCurTop：文字归属当前顶层窗口时，本插件窗口在前台则跳过（防止查看清单时把回显英文再采进去）。
+    /// </summary>
+    private void CollectBytes(byte* p, int n, bool isOwnText, bool checkCurTop = false)
+    {
         if (n < 2) return;
+        if (n > MaxTextLen) n = MaxTextLen;
 
         var hasLetter = false;
         for (var i = 0; i < n; i++)
@@ -360,7 +480,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
         var s = Encoding.UTF8.GetString(p, n);
         lock (_lock)
         {
-            if (_ownWins.Contains(_curTopHash)) return; // 本插件自身窗口显示的内容（含查看清单时回显的英文）
+            if (isOwnText) return;
+            if (checkCurTop && _ownWins.Contains(_curTopHash)) return;
             if (_flat.ContainsKey(s)) return;
             if (_flat.Count >= MaxEntries)
             {
@@ -521,9 +642,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         // 先摘钩子再保存，避免保存期间又有采集写入
         try { _addTextHook?.Dispose(); } catch { }
+        try { _textHook?.Dispose(); } catch { }
         try { _beginHook?.Dispose(); } catch { }
         try { _endHook?.Dispose(); } catch { }
         _addTextHook = null;
+        _textHook = null;
         _beginHook = null;
         _endHook = null;
         Hooked = false;
