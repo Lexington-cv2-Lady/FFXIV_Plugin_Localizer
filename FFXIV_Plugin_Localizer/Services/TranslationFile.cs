@@ -143,10 +143,17 @@ public static class TranslationFile
             {
                 if (i >= originals.Count) break;
                 if (el.ValueKind != JsonValueKind.Object) { i++; continue; }
-                // 优先 zh；兼容 AI 可能回 "译文"/"Translated"
+                // 优先取 zh；兼容 AI 可能回 "译文"/"Translated"；再不行看 en 是否被 AI 填成了译文
                 var zh = el.TryGetProperty("zh", out var z) ? z.GetString()?.Trim() : null;
                 if (string.IsNullOrEmpty(zh) && el.TryGetProperty("译文", out var z2)) zh = z2.GetString()?.Trim();
                 if (string.IsNullOrEmpty(zh) && el.TryGetProperty("Translated", out var z3)) zh = z3.GetString()?.Trim();
+                if (string.IsNullOrEmpty(zh) && el.TryGetProperty("en", out var e2))
+                {
+                    // AI 偶尔把译文填进 en 字段（原文被覆盖）；若该值≠原英文且含非 ASCII，视为译文
+                    var enVal = e2.GetString()?.Trim();
+                    if (!string.IsNullOrEmpty(enVal) && enVal != originals[i] && enVal.Any(ch => ch > 0x7F))
+                        zh = enVal;
+                }
                 if (!string.IsNullOrEmpty(zh)) result[originals[i]] = zh!;
                 i++;
             }

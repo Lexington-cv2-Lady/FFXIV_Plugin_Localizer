@@ -170,9 +170,12 @@ public sealed class WindowReplaceWindow : Window
     private void DrawEntryRow(string plugin, string en, string zh)
     {
         ImGui.PushID(en);
+        // 英文原文：明确标注并保持灰色只读（本插件窗口已免疫替换，这里永远显示原样英文，供对照）
         ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-        ImGui.TextWrapped(en);
+        ImGui.TextUnformatted("原文");
         ImGui.PopStyleColor();
+        ImGui.SameLine();
+        ImGui.TextWrapped(en);
         ImGui.SameLine();
         if (ImGui.SmallButton("删除"))
         {
@@ -182,6 +185,11 @@ public sealed class WindowReplaceWindow : Window
             return;
         }
 
+        // 中文译文：可编辑（失焦即存）
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.55f, 0.85f, 1f, 1f));
+        ImGui.TextUnformatted("译文");
+        ImGui.PopStyleColor();
+        ImGui.SameLine();
         var buf = zh;
         ImGui.SetNextItemWidth(-1f);
         if (ImGui.InputText("##窗口译文", ref buf, 1024))

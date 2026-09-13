@@ -299,10 +299,12 @@ public sealed class PluginScanService
         }
     }
 
-    /// <summary> 候选口径：纯可打印 ASCII（与运行时采集同口径）、含字母、长度合适、排除 URL 和十六进制串。 </summary>
+    /// <summary> 候选口径：纯可打印 ASCII（与运行时替换同口径）、含字母、长度合适、排除 URL 和十六进制串。
+    /// 另排除 ImGui 内部 ID（<c>##</c> 开头）——那不是显示文字，翻译了也无处可显、还可能破坏控件 ID。 </summary>
     private static bool IsCandidate(string s)
     {
         if (s.Length < 2 || s.Length > 300) return false;
+        if (s.StartsWith("##")) return false; // ImGui 内部 ID（无显示部分）
         var letter = false;
         var hexish = s.Length >= 8;
         foreach (var c in s)

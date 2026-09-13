@@ -94,10 +94,15 @@ public sealed class Plugin : IDalamudPlugin
         ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(0.42f, 0.72f, 1f, 0.9f));
         try
         {
+            // ⚠ 本插件自己的窗口**绝不参与替换**：否则窗口文字翻译编辑器里的「英文原文」会被自己的表
+            //   替换成中文，对照参照消失（用户投诉过）。ImGui 是即时模式，文字绘制发生在本调用内，
+            //   用一个抑制标志即可精确覆盖。
+            Hook.SuppressReplacement = true;
             WindowSystem.Draw();
         }
         finally
         {
+            Hook.SuppressReplacement = false;
             ImGui.PopStyleColor();
             ImGui.PopStyleVar();
             ImGui.PopStyleVar();

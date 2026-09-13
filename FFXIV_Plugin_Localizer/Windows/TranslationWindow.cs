@@ -237,10 +237,12 @@ public sealed class TranslationWindow : Window
                     }
 
                     ImGui.PushID(en);
-                    // 原文（灰字）+ 删除
+                    // 英文原文（明确标注、灰色只读；本插件窗口已免疫替换，永远显示原样英文供对照）
                     ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-                    ImGui.TextWrapped(en);
+                    ImGui.TextUnformatted("原文");
                     ImGui.PopStyleColor();
+                    ImGui.SameLine();
+                    ImGui.TextWrapped(en);
                     ImGui.SameLine();
                     if (ImGui.SmallButton("删除"))
                     {
@@ -252,6 +254,10 @@ public sealed class TranslationWindow : Window
                     }
 
                     // 中文译文（内联编辑，失焦即存）
+                    ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.55f, 0.85f, 1f, 1f));
+                    ImGui.TextUnformatted("译文");
+                    ImGui.PopStyleColor();
+                    ImGui.SameLine();
                     ImGui.SetNextItemWidth(-1f);
                     if (ImGui.InputText("##中文", ref buf, 1024))
                     {

@@ -39,6 +39,9 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// <summary> 钩子是否挂接成功（替换可用的前提）。 </summary>
     public bool Hooked { get; private set; }
 
+    /// <summary> 抑制替换（本插件自己绘制窗口期间置 true）：本插件 UI 永远显示原文，不做替换。 </summary>
+    public bool SuppressReplacement { get; set; }
+
     /// <summary> 钩子状态描述（主窗口展示）。 </summary>
     public string HookStatus { get; private set; } = "未初始化";
 
@@ -95,7 +98,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// <summary> 文字绘制转发：命中对照表则换中文指针（NUL 结尾），否则原样透传。异常绝不外抛。 </summary>
     private void TextUnformattedDetour(nint textBegin, nint textEnd)
     {
-        if (textBegin != 0 && _replacement.Enabled)
+        if (textBegin != 0 && _replacement.Enabled && !SuppressReplacement)
         {
             try
             {

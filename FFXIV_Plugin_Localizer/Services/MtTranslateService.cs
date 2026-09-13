@@ -118,6 +118,22 @@ public sealed class MtTranslateService
         });
     }
 
+    /// <summary> 是否值得翻译：含 ASCII 字母、且不含中日韩字符（已是中文的不送翻）。 </summary>
+    private static bool IsTranslatable(string s)
+    {
+        var hasLetter = false;
+        foreach (var c in s)
+        {
+            if (c >= 0x4E00 && c <= 0x9FFF) return false;      // 中日韩统一表意
+            if (c >= 0x3040 && c <= 0x30FF) return false;      // 假名
+            if (c >= 0xAC00 && c <= 0xD7A3) return false;      // 谚文
+            if (c >= 0x3000 && c <= 0x303F) return false;      // 中日韩标点（。、等）
+            if (c >= 0xFF00 && c <= 0xFFEF) return false;      // 全角字符
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) hasLetter = true;
+        }
+        return hasLetter;
+    }
+
     /// <summary> 批量循环：分批送翻 → 汇总 → merge 落盘。 </summary>
     private async Task TranslateAll(List<string> texts, Func<Dictionary<string, string>, int> merge)
     {
@@ -125,6 +141,14 @@ public sealed class MtTranslateService
         {
             Status = "没有缺失的翻译（已全部覆盖）";
             _appLog.Info("[机翻] 没有缺失条目");
+            return;
+        }
+        // 只送**英文**文案：某些插件字符串堆含中文（或已部分汉化），把它们送翻只会得到回声/解析失败。
+        texts = texts.Where(IsTranslatable).ToList();
+        if (texts.Count == 0)
+        {
+            Status = "没有需要翻译的英文文案（缺口均为非英文，已跳过）";
+            _appLog.Info("[机翻] 缺口过滤后为空");
             return;
         }
         var batchSize = Math.Clamp(_cfg.AiBatchSize, 1, 200);

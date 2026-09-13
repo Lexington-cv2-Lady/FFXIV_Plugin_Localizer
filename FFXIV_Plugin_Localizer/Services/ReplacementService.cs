@@ -160,7 +160,7 @@ public sealed unsafe class ReplacementService
         _hashes.Add(FnvUtf8(en));
     }
 
-    /// <summary> 清洗：去空白、去空值、去同文。 </summary>
+    /// <summary> 清洗：去空白、去空值、去同文，并剔除 ImGui 内部 ID（<c>##</c> 开头，无显示文字）。 </summary>
     private static Dictionary<string, string> Normalize(Dictionary<string, string> data)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -169,6 +169,7 @@ public sealed unsafe class ReplacementService
             var k = en.Trim();
             var v = (zh ?? "").Trim();
             if (k.Length < 2 || v.Length == 0 || k == v) continue;
+            if (k.StartsWith("##")) continue; // ImGui 内部 ID，不参与替换
             result[k] = v;
         }
         return result;
