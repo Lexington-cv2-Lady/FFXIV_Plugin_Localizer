@@ -43,8 +43,7 @@ public sealed class Plugin : IDalamudPlugin
         Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Replacement.Enabled = Configuration.ReplacementEnabled;
         Replacement.ImportFdcn(); // FDCN 现成机翻表默认启用（幂等：已有条目自动跳过）
-        Hook = new ImGuiHookService(AppLog, Log, Interop, PluginInterface.GetPluginConfigDirectory,
-            () => Configuration.HooksEnabled, () => Configuration.LabelHooks, Replacement);
+        Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled, Replacement);
         Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Mt = new MtTranslateService(AppLog, Replacement, () => Configuration.ZhipuApiKey);
         MainWindow = new MainWindow(this);
@@ -94,7 +93,6 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnFramework(IFramework framework)
     {
-        Hook.TickSave();
         if (!_startupCheckDone && DateTime.Now >= _startupCheckAt)
         {
             _startupCheckDone = true;
