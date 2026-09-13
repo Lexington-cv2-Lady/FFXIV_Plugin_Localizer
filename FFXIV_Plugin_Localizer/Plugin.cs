@@ -35,25 +35,37 @@ public sealed class Plugin : IDalamudPlugin
     public LogWindow LogWindow { get; }
     public ScanWindow ScanWindow { get; }
     public TranslationWindow TranslationWindow { get; }
+    public AiSettingsWindow AiSettingsWindow { get; }
 
     public Plugin()
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        // 旧版单一 ZhipuApiKey → 按服务商分存（一次性迁移）
+        if (!string.IsNullOrWhiteSpace(Configuration.ZhipuApiKey))
+        {
+            Configuration.AiApiKeys ??= new();
+            if (!Configuration.AiApiKeys.ContainsKey("智谱 GLM"))
+                Configuration.AiApiKeys["智谱 GLM"] = Configuration.ZhipuApiKey.Trim();
+            Configuration.ZhipuApiKey = "";
+            Configuration.Save();
+        }
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
         Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Replacement.Enabled = Configuration.ReplacementEnabled;
         Replacement.ImportFdcn(); // FDCN 现成机翻表默认启用（幂等：已有条目自动跳过）
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled, Replacement);
         Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
-        Mt = new MtTranslateService(AppLog, Replacement, () => Configuration.ZhipuApiKey);
+        Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         MainWindow = new MainWindow(this);
         LogWindow = new LogWindow(this);
         ScanWindow = new ScanWindow(this, Scan);
         TranslationWindow = new TranslationWindow(this, Replacement, Mt);
+        AiSettingsWindow = new AiSettingsWindow(this, Mt);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
         WindowSystem.AddWindow(ScanWindow);
         WindowSystem.AddWindow(TranslationWindow);
+        WindowSystem.AddWindow(AiSettingsWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -112,6 +124,9 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary> 打开/关闭安装器翻译窗口（主窗口「安装器翻译」按钮入口）。 </summary>
     public void ToggleTranslationUi() => TranslationWindow.Toggle();
+
+    /// <summary> 打开/关闭 AI 设置窗口（安装器翻译窗口「AI 设置」按钮入口）。 </summary>
+    public void ToggleAiSettingsUi() => AiSettingsWindow.Toggle();
 
     // ── 启动自动检查：加载约 10 秒后扫一次缺口，静默/按配置翻译（插件更新后新文案也走这条） ──
     private readonly DateTime _startupCheckAt = DateTime.Now.AddSeconds(10);

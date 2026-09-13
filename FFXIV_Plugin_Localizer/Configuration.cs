@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Dalamud.Configuration;
 using Dalamud.Plugin;
 
@@ -17,9 +18,22 @@ public class Configuration : IPluginConfiguration
     /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
     public bool ReplacementEnabled { get; set; } = true;
 
-    /// <summary> 智谱开放平台 API Key（glm-4-flash 免费模型，OpenAI 兼容端点）。
-    /// ⚠ 每个用户自己填，只存本机 pluginConfigs 配置文件（APPDATA），严禁入库/写死在代码里。 </summary>
+    /// <summary> 智谱开放平台 API Key（旧版单一字段，已迁移到按服务商分存的 AiApiKeys；保留字段仅为兼容旧配置文件）。 </summary>
     public string ZhipuApiKey { get; set; } = "";
+
+    // ── AI 设置（OpenAI 兼容端点；默认智谱 glm-4-flash 免费模型，12 家预设见 MtTranslateService.Providers） ──
+    /// <summary> AI 供应商名（预设表名称；空 = 自定义手工端点）。 </summary>
+    public string AiProviderName { get; set; } = "智谱 GLM";
+    /// <summary> API 地址覆盖（留空 = 供应商预设）。 </summary>
+    public string AiBaseUrl { get; set; } = "";
+    /// <summary> 模型名覆盖（留空 = 供应商预设）。 </summary>
+    public string AiModel { get; set; } = "";
+    /// <summary> 采样温度（越低越忠实原文）。 </summary>
+    public float AiTemperature { get; set; } = 0.1f;
+    /// <summary> 单批翻译条数（条目过多自动分批）。 </summary>
+    public int AiBatchSize { get; set; } = 10;
+    /// <summary> 按服务商分存的 API Key。⚠ 每个用户自己填，只存本机 pluginConfigs（APPDATA），严禁入库/写死在代码里。 </summary>
+    public Dictionary<string, string>? AiApiKeys { get; set; }
 
     /// <summary> 启动时自动扫描缺口并翻译（需已填 Key）。默认开。 </summary>
     public bool AutoTranslate { get; set; } = true;

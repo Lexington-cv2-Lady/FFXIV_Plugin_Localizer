@@ -92,20 +92,16 @@ public sealed class TranslationWindow : Window
             _summary = $"对照表已保存：{_replacement.TablePath}";
         }
 
-        // ── 机翻（智谱） ──
-        var key = _plugin.Configuration.ZhipuApiKey;
-        ImGui.SetNextItemWidth(Math.Max(240f, ImGui.GetContentRegionAvail().X - 180f));
-        ImGui.InputTextWithHint("##MtKey", "智谱 API Key（bigmodel.cn，glm-4-flash 免费；只存本机）", ref key, 128);
-        if (ImGui.IsItemDeactivatedAfterEdit())
+        // ── 机翻（AI 供应商/Key/模型在「AI 设置」独立窗口） ──
+        var cfg = _plugin.Configuration;
+        var keySet = !string.IsNullOrWhiteSpace(MtTranslateService.GetApiKey(cfg));
+        ImGui.Text($"AI 供应商：{MtTranslateService.CurrentProviderName(cfg)}，Key {(keySet ? "已配置" : "未配置")}");
+        if (ImGui.Button("AI 设置"))
         {
-            _plugin.Configuration.ZhipuApiKey = key.Trim();
-            _plugin.Configuration.Save();
-            // 填完 Key 自动开始翻译缺口（用户要求：填写后后台自动翻译）
-            if (_plugin.Configuration.AutoTranslate && key.Trim().Length > 0 && !_mt.Running)
-            {
-                _mt.Start();
-            }
+            _plugin.ToggleAiSettingsUi();
         }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("供应商 / API Key / 模型 / 温度 / 批量 / 测试连接。");
         ImGui.SameLine();
         if (_mt.Running)
         {
@@ -115,9 +111,9 @@ public sealed class TranslationWindow : Window
         {
             if (ImGui.Button("自动翻译缺失条目"))
             {
-                if (string.IsNullOrWhiteSpace(_plugin.Configuration.ZhipuApiKey))
+                if (!keySet)
                 {
-                    _summary = "请先填智谱 API Key（免费，bigmodel.cn 注册后创建）。";
+                    _summary = "请先在「AI 设置」填写当前服务商的 API Key。";
                 }
                 else
                 {
@@ -126,7 +122,7 @@ public sealed class TranslationWindow : Window
                 }
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("把当前缺口分批送智谱 glm-4-flash 翻译，结果自动并入对照表并保存。");
+                ImGui.SetTooltip("把当前缺口分批送 AI 翻译，结果自动并入对照表并保存。");
         }
         if (!_mt.Running && _mt.Status.Length > 0)
         {
