@@ -92,9 +92,9 @@ public sealed unsafe class ReplacementService
     {
         lock (_lock)
         {
-            foreach (var ptr in _ptrs.Values) Marshal.FreeHGlobal(ptr);
+            foreach (var ptr in _ptrs.Values) Marshal.FreeCoTaskMem(ptr);
             _ptrs.Clear();
-            _table = new Dictionary<string, string>(StringComparer.Ordinal);
+            _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             _hashes = new HashSet<ulong>();
             foreach (var (en, zh) in table)
             {
@@ -103,7 +103,7 @@ public sealed unsafe class ReplacementService
                 if (key.Length < 2 || val.Length == 0 || key == val) continue;
                 if (_table.ContainsKey(key)) continue;
                 var bytes = Encoding.UTF8.GetBytes(val);
-                var ptr = Marshal.StringToHGlobalUTF8(val);
+                var ptr = Marshal.StringToCoTaskMemUTF8(val);
                 _table[key] = bytes;
                 _ptrs[key] = ptr;
                 _hashes.Add(FnvUtf8(key));
@@ -158,7 +158,7 @@ public sealed unsafe class ReplacementService
                         if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh) || en == zh) continue;
                         if (_table.ContainsKey(en!)) continue;
                         var bytes = Encoding.UTF8.GetBytes(zh!);
-                        var ptr = Marshal.StringToHGlobalUTF8(zh!);
+                        var ptr = Marshal.StringToCoTaskMemUTF8(zh!);
                         _table[en!] = bytes;
                         _ptrs[en!] = ptr;
                         _hashes.Add(FnvUtf8(en!));
