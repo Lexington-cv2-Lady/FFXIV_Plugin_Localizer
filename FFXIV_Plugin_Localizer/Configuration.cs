@@ -18,10 +18,6 @@ public class Configuration : IPluginConfiguration
     /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
     public bool ReplacementEnabled { get; set; } = true;
 
-    /// <summary> 窗口文字替换开关（挂接 igText 等文本变体桩，让插件窗口内的文字按窗口表换中文；重载插件后生效）。
-    /// 纯指针 void 桩（与稳定钩子同型）；若界面异常可关闭后重载。 </summary>
-    public bool WindowReplaceEnabled { get; set; } = true;
-
     /// <summary> 智谱开放平台 API Key（旧版单一字段，已迁移到按服务商分存的 AiApiKeys；保留字段仅为兼容旧配置文件）。 </summary>
     public string ZhipuApiKey { get; set; } = "";
 

@@ -38,14 +38,9 @@ public sealed class WindowReplaceWindow : Window
 
     public override void Draw()
     {
-        var enabled = _plugin.Configuration.WindowReplaceEnabled;
-        if (ImGui.Checkbox("启用窗口文字替换（需钩子已挂接；改动后重载插件生效）", ref enabled))
-        {
-            _plugin.Configuration.WindowReplaceEnabled = enabled;
-            _plugin.Configuration.Save();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("对照表按精确匹配在绘制层换字；文案候选来自「文案扫描」。\n翻译走智谱（AI 设置里配 Key）或在本窗口逐条手动编辑。");
+        Ui.Hint("按插件管理窗口内界面文字的对照表。候选来自「文案扫描」，翻译写 窗口翻译\\<插件名>.json 并参与替换。\n" +
+                "⚠ 当前替换通道只覆盖走 TextUnformatted 绘制的文字（随钩子覆盖面扩展而增强）；\n" +
+                "按钮/滑条等控件标签暂不支持（相关桩会破坏游戏 UI，已移除）。");
 
         // 机翻结束的瞬间清缓存（后台任务合并了新翻译）
         if (_mtWasRunning && !_mt.Running)

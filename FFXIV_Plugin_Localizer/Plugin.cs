@@ -53,9 +53,8 @@ public sealed class Plugin : IDalamudPlugin
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
         Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Replacement.Enabled = Configuration.ReplacementEnabled;
-        Replacement.ImportFdcn(); // FDCN 现成机翻表默认启用（幂等：已有条目自动跳过）
-        Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
-            () => Configuration.WindowReplaceEnabled, Replacement);
+        Replacement.SyncFdcnOnStartup(); // 启动同步：FDCN 文件指纹变了才自动重导；未装 FDCN 用内置翻译包打底
+        Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled, Replacement);
         Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         MainWindow = new MainWindow(this);

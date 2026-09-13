@@ -25,6 +25,10 @@ public sealed unsafe class ReplacementService
     public const string WindowTableDirName = "窗口翻译";
     /// <summary> 窗口文字的未翻译候选来源目录（文案扫描输出）。 </summary>
     public const string ScanDirName = "文案扫描";
+    /// <summary> 随插件分发的内置翻译包（构建时从 FDCN 表生成，未装 FDCN 的用户也有底子）。 </summary>
+    public const string BundleFileName = "内置翻译包.json";
+    /// <summary> FDCN 表指纹记录文件（变了才自动重导）。 </summary>
+    private const string FdcnStampFileName = "FDCN同步状态.json";
 
     private static readonly JsonSerializerOptions Indented = new()
     {
@@ -200,7 +204,7 @@ public sealed unsafe class ReplacementService
         var path = FindFdcnFile();
         if (path == null)
         {
-            _appLog.Warn("[替换] 未找到 FuckDalamudCN 的 translations.json（未安装或版本目录变化）");
+            _appLog.Info("[替换] 未找到 FuckDalamudCN 的 translations.json（未安装），使用内置翻译包");
             return -1;
         }
         try
@@ -231,6 +235,100 @@ public sealed unsafe class ReplacementService
         {
             _appLog.Error("[替换] 机翻表导入失败：" + ex.Message);
             return -1;
+        }
+    }
+
+    /// <summary>
+    /// 启动时的 FDCN 同步策略：文件指纹（大小+mtime）与上次一致则跳过（省一次全量导入），
+    /// 变了（FDCN 更新）则自动重导增量；未装 FDCN 则载入随插件分发的内置翻译包打底。
+    /// </summary>
+    public void SyncFdcnOnStartup()
+    {
+        try
+        {
+            var path = FindFdcnFile();
+            if (path == null)
+            {
+                LoadBundle(); // 没装 FDCN：内置翻译包打底
+                return;
+            }
+            var stamp = $"{new FileInfo(path).Length}:{new FileInfo(path).LastWriteTimeUtc.Ticks}";
+            var stampPath = Path.Combine(_configDir(), FdcnStampFileName);
+            var lastStamp = "";
+            try
+            {
+                if (File.Exists(stampPath))
+                {
+                    var d = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(stampPath));
+                    lastStamp = d != null && d.TryGetValue("stamp", out var s) ? s : "";
+                }
+            }
+            catch { /* 状态文件坏了当作没同步过 */ }
+
+            if (stamp == lastStamp)
+            {
+                _appLog.Info("[替换] FDCN 表未变化，跳过同步");
+                return;
+            }
+            var added = ImportFdcn();
+            if (added > 0) Save();
+            File.WriteAllText(stampPath,
+                JsonSerializer.Serialize(new Dictionary<string, string> { ["stamp"] = stamp }, Indented),
+                Encoding.UTF8);
+            if (added > 0) _appLog.Info($"[替换] FDCN 表有更新：自动导入 {added} 条新翻译");
+        }
+        catch (Exception ex)
+        {
+            _appLog.Error("[替换] FDCN 启动同步失败：" + ex.Message);
+        }
+    }
+
+    /// <summary> 载入随插件分发的内置翻译包（devPlugins\&lt;ID&gt;\内置翻译包.json，构建时生成）。 </summary>
+    private void LoadBundle()
+    {
+        try
+        {
+            string? bundle = null;
+            var dir = Path.GetDirectoryName(Path.GetDirectoryName(_configDir())); // launcher 根
+            // 安装版：插件目录在 launcher\installedPlugins\<ID>\<版本>\；dev 版：launcher\devPlugins\<ID>\
+            foreach (var root in new[]
+                     {
+                         Path.Combine(dir!, "devPlugins", "FFXIV_Plugin_Localizer"),
+                         Path.Combine(dir!, "installedPlugins", "FFXIV_Plugin_Localizer"),
+                     })
+            {
+                if (!Directory.Exists(root)) continue;
+                var candidates = Directory.EnumerateFiles(root, BundleFileName, SearchOption.AllDirectories);
+                bundle = candidates.OrderByDescending(p => p, StringComparer.Ordinal).FirstOrDefault();
+                if (bundle != null) break;
+            }
+            if (bundle == null)
+            {
+                _appLog.Info("[替换] 无内置翻译包（首次构建生成后随插件分发）");
+                return;
+            }
+            var data = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(bundle));
+            if (data == null) return;
+            var added = 0;
+            lock (_lock)
+            {
+                foreach (var (en, zh) in Normalize(data!))
+                {
+                    if (_installerSource.ContainsKey(en)) continue;
+                    _installerSource[en] = zh;
+                    added++;
+                }
+            }
+            if (added > 0)
+            {
+                RebuildMerged();
+                Save();
+            }
+            _appLog.Info($"[替换] 已载入内置翻译包：{added} 条（{_installerSource.Count} 条总表）");
+        }
+        catch (Exception ex)
+        {
+            _appLog.Error("[替换] 内置翻译包载入失败：" + ex.Message);
         }
     }
 
