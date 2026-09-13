@@ -11,7 +11,8 @@ using FFXIVPluginLocalizer.Services;
 namespace FFXIVPluginLocalizer.Windows;
 
 /// <summary> 文案扫描窗口（独立窗口）：静态扫描本机已安装插件 DLL 的字符串堆，按插件提取英文文案候选。
-/// 运行时采集只能覆盖实际打开过的窗口，这里补全「装了但没开过」的插件的文案。 </summary>
+/// 运行时采集只能覆盖实际打开过的窗口，这里补全「装了但没开过」的插件的文案；
+/// 已内置中文（如 Artisan 双语汉化版）或自带语言文件（如 DailyRoutines）的插件自动跳过。 </summary>
 public sealed class ScanWindow : Window
 {
     private const int PreviewCount = 60;
@@ -19,8 +20,7 @@ public sealed class ScanWindow : Window
     private readonly Plugin _plugin;
     private readonly PluginScanService _scan;
     private List<PluginScanService.InstalledPlugin> _plugins = new();
-    private readonly Dictionary<string, int> _counts = new();
-    private readonly Dictionary<string, List<string>> _preview = new();
+    private readonly Dictionary<string, PluginScanService.ScanOutcome> _results = new();
     private string _summary = "";
     private bool _listLoaded;
 
@@ -38,7 +38,8 @@ public sealed class ScanWindow : Window
         if (!_listLoaded) RefreshList();
 
         Ui.Hint("扫描本机已安装插件（installedPlugins + devPlugins）的 DLL 字符串堆，静态提取英文界面文案候选。" +
-                "结果写入 数据目录\\文案扫描\\<插件名>_未翻译.json，供翻译管线使用。运行时采集（开始采集按钮）保留，两者互补。");
+                "结果写入 数据目录\\文案扫描\\<插件名>_未翻译.json，供翻译管线使用。" +
+                "已内置中文（如 Artisan 汉化版）或自带语言文件（如 DailyRoutines）的插件自动跳过。");
 
         if (ImGui.Button("扫描全部插件"))
         {
@@ -72,29 +73,28 @@ public sealed class ScanWindow : Window
                 {
                     for (var i = 0; i < _plugins.Count; i++)
                     {
-                        var p = _plugins[i];
                         ImGui.PushID(i);
-                        var count = _counts.TryGetValue(p.Name, out var c) ? c : -1;
-                        var label = count >= 0 ? $"{p.Name}（{count} 条）" : $"{p.Name}（未扫描）";
-                        if (ImGui.CollapsingHeader(label))
+                        var p = _plugins[i];
+                        if (ImGui.CollapsingHeader(MakeLabel(p)) && _results.TryGetValue(p.Name, out var r) && !r.Skipped)
                         {
-                            if (_preview.TryGetValue(p.Name, out var preview))
-                            {
-                                foreach (var s in preview)
-                                    ImGui.TextWrapped(s);
-                                if (count > preview.Count)
-                                    ImGui.TextDisabled($"……其余 {count - preview.Count} 条见输出文件");
-                            }
-                            else
-                            {
-                                Ui.Hint(string.Join("，", p.Versions) + "；点「扫描全部插件」提取文案");
-                            }
+                            for (var j = 0; j < r.Strings.Count && j < PreviewCount; j++)
+                                ImGui.TextWrapped(r.Strings[j]);
+                            if (r.Strings.Count > PreviewCount)
+                                ImGui.TextDisabled($"……其余 {r.Strings.Count - PreviewCount} 条见输出文件");
                         }
                         ImGui.PopID();
                     }
                 }
             }
         }
+    }
+
+    private string MakeLabel(PluginScanService.InstalledPlugin p)
+    {
+        if (!_results.TryGetValue(p.Name, out var r)) return $"{p.Name}（未扫描）";
+        if (r.SkipBilingualZh) return $"{p.Name}（已内置中文 {r.ChineseCount} 条，跳过）✔";
+        if (r.SkipLangFiles) return $"{p.Name}（自带语言文件，跳过）✔";
+        return $"{p.Name}（{r.Strings.Count} 条）";
     }
 
     private void RefreshList()
@@ -116,24 +116,30 @@ public sealed class ScanWindow : Window
     {
         RefreshList();
         var withStrings = 0;
+        var skipped = 0;
         var total = 0;
         foreach (var p in _plugins)
         {
             try
             {
-                var strings = _scan.ScanAndSave(p);
-                _counts[p.Name] = strings.Count;
-                _preview[p.Name] = strings.GetRange(0, Math.Min(PreviewCount, strings.Count));
-                total += strings.Count;
-                if (strings.Count > 0) withStrings++;
+                var r = _scan.ScanAndSave(p);
+                _results[p.Name] = r;
+                if (r.Skipped)
+                {
+                    skipped++;
+                }
+                else
+                {
+                    total += r.Strings.Count;
+                    if (r.Strings.Count > 0) withStrings++;
+                }
             }
             catch (Exception ex)
             {
-                _counts[p.Name] = 0;
                 _plugin.AppLog.Error($"[扫描] {p.Name} 扫描失败：{ex.Message}");
             }
         }
-        _summary = $"扫描完成：{_plugins.Count} 个插件，{withStrings} 个有英文文案候选，共 {total} 条，已写入 {_scan.OutputDir}";
+        _summary = $"扫描完成：{_plugins.Count} 个插件，{skipped} 个已汉化跳过，{withStrings} 个有英文文案候选，共 {total} 条，已写入 {_scan.OutputDir}";
         _plugin.AppLog.Info("[扫描] " + _summary);
     }
 

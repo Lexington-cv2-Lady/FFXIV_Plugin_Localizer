@@ -37,6 +37,15 @@ public sealed class PluginScanService
 
     public sealed record InstalledPlugin(string Name, List<string> DllPaths, List<string> Versions);
 
+    /// <summary> 单插件扫描结果。已内置中文/自带语言文件的插件视为已汉化，跳过并清理旧结果。 </summary>
+    public sealed record ScanOutcome(bool SkipBilingualZh, bool SkipLangFiles, int ChineseCount, List<string> Strings)
+    {
+        public bool Skipped => SkipBilingualZh || SkipLangFiles;
+    }
+
+    /// <summary> DLL 含中文字符串达到该数量即判定「已内置中文」（如 Artisan 双语汉化版有 1455 条）。 </summary>
+    private const int BilingualZhThreshold = 10;
+
     /// <summary> 输出目录：数据目录\文案扫描\。 </summary>
     public string OutputDir => Path.Combine(_configDir(), OutputDirName);
 
@@ -86,16 +95,20 @@ public sealed class PluginScanService
     }
 
     /// <summary>
-    /// 扫描单个插件（全部版本合并去重），写入 &lt;插件名&gt;_未翻译.json，返回提取到的文案列表。
+    /// 扫描单个插件（全部版本合并去重）。已内置中文（DLL 里中文字符串多）或自带语言文件目录的插件
+    /// 视为已汉化：不写英文清单，并删除早前生成的旧结果；否则写 &lt;插件名&gt;_未翻译.json。
     /// </summary>
-    public List<string> ScanAndSave(InstalledPlugin plugin)
+    public ScanOutcome ScanAndSave(InstalledPlugin plugin)
     {
         var strings = new SortedSet<string>(StringComparer.Ordinal);
+        var zhCount = 0;
         foreach (var dll in plugin.DllPaths)
         {
             try
             {
-                foreach (var s in ExtractStrings(dll)) strings.Add(s);
+                var (candidates, zh) = AnalyzeDll(dll);
+                foreach (var s in candidates) strings.Add(s);
+                zhCount += zh;
             }
             catch (Exception ex)
             {
@@ -103,27 +116,87 @@ public sealed class PluginScanService
             }
         }
 
+        var skipZh = zhCount >= BilingualZhThreshold;
+        var skipLang = HasLangFiles(plugin);
+        var path = Path.Combine(OutputDir, $"{plugin.Name}_未翻译.json");
+        if (skipZh || skipLang)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                    _appLog.Info($"[扫描] {plugin.Name} 已汉化（{(skipZh ? $"内置中文 {zhCount} 条" : "自带语言文件")}），删除旧英文清单");
+                }
+            }
+            catch { /* 删不掉旧文件不影响结论 */ }
+            return new ScanOutcome(skipZh, skipLang, zhCount, new List<string>());
+        }
+
         try
         {
             Directory.CreateDirectory(OutputDir);
             var dict = new Dictionary<string, string>();
             foreach (var s in strings) dict[s] = "";
-            var path = Path.Combine(OutputDir, $"{plugin.Name}_未翻译.json");
             File.WriteAllText(path, JsonSerializer.Serialize(dict, Indented), Encoding.UTF8);
         }
         catch (Exception ex)
         {
             _appLog.Error($"[扫描] {plugin.Name} 写结果失败：{ex.Message}");
         }
-        return new List<string>(strings);
+        return new ScanOutcome(false, false, zhCount, new List<string>(strings));
+    }
+
+    /// <summary> 版本目录（含其一级子目录，如 Assets\Langs）里是否存在语言文件目录。 </summary>
+    private static bool HasLangFiles(InstalledPlugin plugin)
+    {
+        foreach (var dll in plugin.DllPaths)
+        {
+            var dir = Path.GetDirectoryName(dll);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
+            try
+            {
+                foreach (var sub in Directory.EnumerateDirectories(dir, "*", SearchOption.AllDirectories))
+                {
+                    var name = Path.GetFileName(sub);
+                    if (name.Contains("lang", StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+            catch { /* 读不了就当没有 */ }
+        }
+        return false;
+    }
+
+    /// <summary> 解析一个 DLL：返回（候选英文文案，中文字符串条数）。 </summary>
+    private static (List<string> Candidates, int ChineseCount) AnalyzeDll(string dllPath)
+    {
+        var candidates = new List<string>();
+        var chinese = 0;
+        foreach (var raw in DecodeDllUserStrings(dllPath))
+        {
+            var s = raw.Trim();
+            if (s.Length < 2) continue;
+            var hasChinese = false;
+            foreach (var c in s)
+            {
+                if (c is >= (char)0x4E00 and <= (char)0x9FFF) { hasChinese = true; break; }
+            }
+            if (hasChinese)
+            {
+                chinese++;
+                continue;
+            }
+            if (IsCandidate(s)) candidates.Add(s);
+        }
+        return (candidates, chinese);
     }
 
     /// <summary>
-    /// 提取一个 DLL 的全部字符串字面量：手工解析 CLI 元数据根、定位 #US（用户字符串）堆，
+    /// 解码一个 DLL 的 #US（用户字符串）堆原始内容：手工解析 CLI 元数据根，
     /// 按 ECMA-335 II.24.2.4 解码（压缩 uint 长度 + UTF-16，末位奇数字节是标志位）。
     /// System.Reflection.Metadata 没有公开的 #US 枚举 API，只能这样读。
     /// </summary>
-    private static IEnumerable<string> ExtractStrings(string dllPath)
+    private static IEnumerable<string> DecodeDllUserStrings(string dllPath)
     {
         using var fs = File.OpenRead(dllPath);
         using var pe = new PEReader(fs);
@@ -213,7 +286,7 @@ public sealed class PluginScanService
             }
             var s = Encoding.Unicode.GetString(b, p, dataBytes).Trim();
             p += dataBytes;
-            if (IsCandidate(s)) yield return s;
+            yield return s;
         }
     }
 
