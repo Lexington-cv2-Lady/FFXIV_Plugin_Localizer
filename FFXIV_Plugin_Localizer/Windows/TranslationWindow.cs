@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.ImGuiFileDialog;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 using FFXIVPluginLocalizer.Services;
@@ -11,7 +12,8 @@ namespace FFXIVPluginLocalizer.Windows;
 /// <summary> 安装器翻译窗口（独立窗口）：插件安装器里插件介绍的中文化。
 /// 替换层按对照表在文字绘制层换字，「全部插件」和「已安装」两个列表都生效，不改启动器文件。
 /// 自动化：FDCN 机翻表启动即导入；填 Key 后自动翻译缺口；插件更新后的新文案启动时自动扫描翻译（可关）。
-/// 手动翻译：仿旧项目详情区——对照表条目直接内联编辑中文，失焦即存。 </summary>
+/// 手动翻译：仿旧项目详情区——对照表条目直接内联编辑中文，失焦即存。
+/// 支持导出/导入翻译包（安装器表 + 窗口表），便于备份与用户间分享。 </summary>
 public sealed class TranslationWindow : Window
 {
     private const int MaxManualRows = 200;
@@ -19,6 +21,7 @@ public sealed class TranslationWindow : Window
     private readonly Plugin _plugin;
     private readonly ReplacementService _replacement;
     private readonly MtTranslateService _mt;
+    private readonly FileDialogManager _fileDialog = new();
     private string _summary = "";
 
     // 手动翻译编辑区状态
@@ -91,6 +94,47 @@ public sealed class TranslationWindow : Window
             _replacement.Save();
             _summary = $"对照表已保存：{_replacement.TablePath}";
         }
+        ImGui.SameLine();
+        if (ImGui.Button("导出翻译包"))
+        {
+            var defaultName = $"翻译包_{DateTime.Now:yyyyMMdd_HHmmss}.json";
+            _fileDialog.SaveFileDialog("导出翻译包", ".json", defaultName, ".json", (ok, path) =>
+            {
+                if (!ok || string.IsNullOrWhiteSpace(path)) return;
+                try
+                {
+                    var (inst, win) = _replacement.ExportPack(path);
+                    _summary = $"已导出：安装器 {inst} 条 + 窗口 {win} 条 → {path}";
+                }
+                catch (Exception ex)
+                {
+                    _summary = "导出失败：" + ex.Message;
+                    _plugin.AppLog.Error("[替换] 导出翻译包失败：" + ex.Message);
+                }
+            }, Plugin.PluginInterface.GetPluginConfigDirectory());
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把对照表 + 全部窗口翻译导出成一个 json 文件，可备份或分享给别人。");
+        ImGui.SameLine();
+        if (ImGui.Button("导入翻译包"))
+        {
+            _fileDialog.OpenFileDialog("选择翻译包（本工具导出包 / FuckDalamudCN 机翻表）", ".json", (ok, paths) =>
+            {
+                if (!ok || paths.Count == 0) return;
+                try
+                {
+                    var (inst, win) = _replacement.ImportPack(paths[0]);
+                    _summary = $"已导入合并（不覆盖已有条目）：安装器 +{inst} 条，窗口 +{win} 条";
+                }
+                catch (Exception ex)
+                {
+                    _summary = "导入失败：" + ex.Message;
+                    _plugin.AppLog.Error("[替换] 导入翻译包失败：" + ex.Message);
+                }
+            }, 1, Plugin.PluginInterface.GetPluginConfigDirectory());
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("合并导入，不覆盖你已有的翻译（本机编辑优先）。\n支持本工具导出的翻译包，也支持 FuckDalamudCN 的 translations.json。");
 
         // ── 机翻（AI 供应商/Key/模型在「AI 设置」独立窗口） ──
         var cfg = _plugin.Configuration;
@@ -140,6 +184,9 @@ public sealed class TranslationWindow : Window
         {
             DrawManualEditor();
         }
+
+        // 文件选择对话框（导出/导入用，须每帧调用）
+        _fileDialog.Draw();
     }
 
     private void DrawManualEditor()

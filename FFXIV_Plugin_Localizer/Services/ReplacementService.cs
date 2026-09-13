@@ -50,6 +50,21 @@ public sealed unsafe class ReplacementService
     /// <summary> 替换开关（只影响绘制替换；表的管理不受影响）。 </summary>
     public bool Enabled { get; set; }
 
+    /// <summary> 导出包的文件扩展名（JSON 内容，含安装器表 + 窗口表）。 </summary>
+    public const string PackExtension = "json";
+
+    /// <summary> 导出的翻译包结构：安装器表 + 每插件窗口表。 </summary>
+    public sealed class TranslationPack
+    {
+        public string Format { get; set; } = "FFXIVPluginLocalizer.Translations";
+        public int Version { get; set; } = 1;
+        public DateTime ExportedAt { get; set; } = DateTime.Now;
+        /// <summary> 安装器介绍对照：英文 → 中文。 </summary>
+        public Dictionary<string, string> Installer { get; set; } = new(StringComparer.Ordinal);
+        /// <summary> 窗口文字对照：插件名 →（英文 → 中文）。 </summary>
+        public Dictionary<string, Dictionary<string, string>> Windows { get; set; } = new(StringComparer.Ordinal);
+    }
+
     public int Count { get { lock (_lock) return _table.Count; } }
 
     public ReplacementService(AppLog appLog, Func<string> configDir)
@@ -615,6 +630,139 @@ public sealed unsafe class ReplacementService
         }
         RebuildMerged();
         Save();
+    }
+
+    // ═══════════════════════ 导入 / 导出（用户间分享翻译成果） ═══════════════════════
+
+    /// <summary>
+    /// 导出翻译包（安装器表 + 全部窗口表）到指定文件。返回（安装器条数, 窗口表条数）。
+    /// </summary>
+    public (int Installer, int Window) ExportPack(string path)
+    {
+        TranslationPack pack;
+        lock (_lock)
+        {
+            pack = new TranslationPack
+            {
+                Installer = new Dictionary<string, string>(_installerSource, StringComparer.Ordinal),
+                Windows = _windowSources.ToDictionary(
+                    kv => kv.Key,
+                    kv => new Dictionary<string, string>(kv.Value, StringComparer.Ordinal),
+                    StringComparer.Ordinal),
+            };
+        }
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        File.WriteAllText(path, JsonSerializer.Serialize(pack, Indented), Encoding.UTF8);
+        var winTotal = pack.Windows.Values.Sum(w => w.Count);
+        _appLog.Info($"[替换] 已导出翻译包：安装器 {pack.Installer.Count} 条 + 窗口 {winTotal} 条（{pack.Windows.Count} 个插件）→ {path}");
+        return (pack.Installer.Count, winTotal);
+    }
+
+    /// <summary>
+    /// 导入翻译包并与现有表合并（**不覆盖已有条目**，先到先得，本机编辑优先）。返回（新增安装器条数, 新增窗口条数）。
+    /// 自动识别两种文件：①本工具导出的翻译包（含 Format 字段）②FuckDalamudCN 的 translations.json 原始格式。
+    /// </summary>
+    public (int Installer, int Window) ImportPack(string path)
+    {
+        var text = File.ReadAllText(path);
+        var addedInstaller = 0;
+        var addedWindow = 0;
+
+        // 先试本工具翻译包格式。
+        // ⚠ 只靠 Format 字段不可靠：反序列化 FDCN 文件成 TranslationPack 时 Format 会取默认值（非 null），
+        //   必须同时确认文件里确实带本工具标志串与结构键，才按本工具格式解析。
+        TranslationPack? pack = null;
+        var looksLikePack = text.Contains("\"FFXIVPluginLocalizer.Translations\"") &&
+                            text.Contains("\"Installer\"") && text.Contains("\"Windows\"");
+        if (looksLikePack)
+        {
+            try
+            {
+                pack = JsonSerializer.Deserialize<TranslationPack>(text);
+                if (pack == null || pack.Format != "FFXIVPluginLocalizer.Translations") looksLikePack = false;
+            }
+            catch
+            {
+                pack = null;
+                looksLikePack = false;
+            }
+        }
+        if (looksLikePack && pack != null)
+        {
+            lock (_lock)
+            {
+                foreach (var (en, zh) in Normalize(pack.Installer ?? new()))
+                {
+                    if (_installerSource.ContainsKey(en)) continue;
+                    _installerSource[en] = zh;
+                    addedInstaller++;
+                }
+                foreach (var (plugin, table) in pack.Windows ?? new())
+                {
+                    if (!_windowSources.TryGetValue(plugin, out var dst))
+                        _windowSources[plugin] = dst = new Dictionary<string, string>(StringComparer.Ordinal);
+                    foreach (var (en, zh) in Normalize(table))
+                    {
+                        if (dst.ContainsKey(en)) continue;
+                        dst[en] = zh;
+                        addedWindow++;
+                    }
+                }
+            }
+            if (addedWindow > 0)
+            {
+                foreach (var (plugin, table) in pack.Windows!) WriteWindowFile(plugin, table);
+            }
+            if (addedInstaller > 0) Save();
+            RebuildMerged();
+            _appLog.Info($"[替换] 已导入翻译包：安装器 +{addedInstaller} 条，窗口 +{addedWindow} 条（{Path.GetFileName(path)}）");
+            return (addedInstaller, addedWindow);
+        }
+
+        // 回退：按 FDCN 原始 translations.json 格式解析
+        var fdAdded = ImportFdcnFile(path);
+        if (fdAdded >= 0)
+        {
+            _appLog.Info($"[替换] 已按 FuckDalamudCN 格式导入：+{fdAdded} 条（{Path.GetFileName(path)}）");
+            return (fdAdded, 0);
+        }
+
+        throw new InvalidDataException("无法识别的文件格式（既不是本工具翻译包，也不是 FuckDalamudCN 机翻表）");
+    }
+
+    /// <summary> 按 FDCN 原始格式解析指定文件并入安装器表。返回新增条数，格式不符返回 -1。 </summary>
+    private int ImportFdcnFile(string path)
+    {
+        try
+        {
+            var raw = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, JsonElement>>>(File.ReadAllText(path));
+            if (raw == null) return -1;
+            var added = 0;
+            lock (_lock)
+            {
+                foreach (var fields in raw.Values)
+                {
+                    foreach (var f in fields.Values)
+                    {
+                        if (f.ValueKind != JsonValueKind.Object) return -1; // 结构不符
+                        if (!f.TryGetProperty("Original", out var o) || !f.TryGetProperty("Translated", out var t)) continue;
+                        var en = o.GetString()?.Trim();
+                        var zh = t.GetString()?.Trim();
+                        if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh) || en == zh) continue;
+                        if (_installerSource.ContainsKey(en!)) continue;
+                        _installerSource[en!] = zh!;
+                        added++;
+                    }
+                }
+            }
+            if (added > 0) { RebuildMerged(); Save(); }
+            return added;
+        }
+        catch
+        {
+            return -1;
+        }
     }
 
     // ═══════════════════════ 哈希 ═══════════════════════
