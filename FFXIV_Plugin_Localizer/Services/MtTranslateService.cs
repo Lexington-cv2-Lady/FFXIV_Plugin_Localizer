@@ -19,7 +19,7 @@ public sealed class MtTranslateService
     /// <summary> 预置供应商（国内可直连优先，海外在后；自定义模式见 AI 设置 Combo 末项）。 </summary>
     public static readonly (string Name, string Model, string BaseUrl, string Note)[] Providers =
     {
-        ("智谱 GLM", "glm-4-flash", "https://open.bigmodel.cn/api/paas/v4", "智谱 AI 开放平台（OpenAI 兼容；glm-4-flash 模型免费）"),
+        ("智谱 GLM", "glm-4-flash-250414", "https://open.bigmodel.cn/api/paas/v4", "智谱 AI 开放平台（OpenAI 兼容；glm-4-flash-250414 免费、128K 长上下文、结构化 JSON 友好，实测比 glm-4-flash 快数倍）"),
         ("通义千问", "qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1", "阿里云百炼（OpenAI 兼容，需先开通百炼）"),
         ("腾讯混元", "hunyuan-turbos-latest", "https://api.hunyuan.cloud.tencent.com/v1", "腾讯云大模型（OpenAI 兼容）"),
         ("百度千帆", "ernie-4.5-turbo-32k", "https://qianfan.baidubce.com/v2", "百度智能云千帆（OpenAI 兼容）"),
@@ -186,17 +186,44 @@ public sealed class MtTranslateService
         }
 
         var json = JsonDocument.Parse(body);
-        var content = json.RootElement
+        var message = json.RootElement
             .GetProperty("choices")[0]
-            .GetProperty("message")
-            .GetProperty("content")
-            .GetString() ?? "";
+            .GetProperty("message");
+        var content = message.TryGetProperty("content", out var cEl) ? cEl.GetString() ?? "" : "";
+        var reasoning = message.TryGetProperty("reasoning_content", out var rcEl) ? rcEl.GetString() ?? "" : "";
+        // 推理模型（glm-4.7-flash / glm-4.5-flash 等）会把思考过程放 reasoning_content：
+        // 若 content 里没有可用 JSON，从 reasoning 兜底提取（否则整批静默失败）。
+        if (string.IsNullOrWhiteSpace(content) || !content.Contains('{') || reasoning.Length > 0)
+        {
+            content = PickJson(content, reasoning);
+        }
         content = StripFences(content);
 
         var result = JsonSerializer.Deserialize<Dictionary<string, string>>(content);
         if (result == null) throw new Exception("返回内容不是 JSON：" + Truncate(content, 200));
         return result.Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
             .ToDictionary(kv => kv.Key, kv => kv.Value.Trim(), StringComparer.Ordinal);
+    }
+
+    /// <summary> 从若干候选文本里挑出「能解析成 JSON 对象」的那段（优先 content，其次 reasoning）。 </summary>
+    private static string PickJson(string content, string reasoning)
+    {
+        foreach (var candidate in new[] { content, reasoning })
+        {
+            if (string.IsNullOrWhiteSpace(candidate)) continue;
+            var s = StripFences(candidate);
+            var start = s.IndexOf('{');
+            var end = s.LastIndexOf('}');
+            if (start < 0 || end <= start) continue;
+            var slice = s[start..(end + 1)];
+            try
+            {
+                var probe = JsonSerializer.Deserialize<Dictionary<string, string>>(slice);
+                if (probe != null && probe.Count > 0) return slice;
+            }
+            catch { /* 这段不是 JSON，试下一段 */ }
+        }
+        return content;
     }
 
     /// <summary> 测试连接（AI 设置窗口用，返回简短结果）。抄自旧项目。 </summary>
