@@ -57,7 +57,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte BD2b(nint a, byte b);                  // igBeginMenu / igRadioButton_Bool
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate byte BD2u(nint a, uint b);                  // igTreeNodeEx_Str
+    private delegate byte BD2u(nint a, uint b);                  // igCollapsingHeader_TreeNodeFlags / igTreeNodeEx_Str
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte BD2v(nint a, ImVec2 b);                // igButton
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -102,6 +102,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly IPluginLog _log;
     private readonly IGameInteropProvider _interop;
     private readonly Func<string> _configDir;
+    private readonly Func<bool> _hooksEnabled;
+    private readonly Func<bool> _labelHooksEnabled;
 
     private Hook<BeginDelegate>? _beginHook;
     private Hook<EndDelegate>? _endHook;
@@ -178,12 +180,15 @@ public sealed unsafe class ImGuiHookService : IDisposable
     public int WindowCount { get { lock (_lock) return _byWindow.Count; } }
     public long SessionNewCount { get { lock (_lock) return _sessionNew; } }
 
-    public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop, Func<string> configDir)
+    public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop, Func<string> configDir,
+        Func<bool> hooksEnabled, Func<bool> labelHooksEnabled)
     {
         _appLog = appLog;
         _log = log;
         _interop = interop;
         _configDir = configDir;
+        _hooksEnabled = hooksEnabled;
+        _labelHooksEnabled = labelHooksEnabled;
         Load();
         InstallHooks();
     }
@@ -192,6 +197,12 @@ public sealed unsafe class ImGuiHookService : IDisposable
 
     private void InstallHooks()
     {
+        if (!_hooksEnabled())
+        {
+            HookStatus = "钩子已按配置关闭（运行时采集不可用，静态扫描不受影响）";
+            _appLog.Info("[钩子] " + HookStatus);
+            return;
+        }
         try
         {
             if (!TryFindCimgui(out var baseAddr, out var moduleName, out var moduleSize))
@@ -263,6 +274,13 @@ public sealed unsafe class ImGuiHookService : IDisposable
             // ── 控件标签桩钩子：按钮/复选框/滑条/下拉框等的 label 走各自控件导出，不经过
             //    igTextUnformatted（兜底模式漏采的根因）。按 cimgui 真实签名逐个挂桩转发
             //    （浮点参数必须专用委托，否则寄存器错位会弄坏控件）；两种模式都装，与 AddText 去重。
+            //    可在配置里整体关闭（界面异常时的排障开关），重载插件后生效。
+            if (!_labelHooksEnabled())
+            {
+                _appLog.Info("[钩子] 控件标签桩钩子已按配置关闭");
+            }
+            else
+            {
             var labelMissing = new List<string>();
             var backend = IGameInteropProvider.HookBackend.Automatic;
 
@@ -274,10 +292,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
             InstallLabel("igCheckbox", baseAddr, bCheck, (a, b) => { CollectArg(a); return bCheck.Hook!.Original(a, b); }, backend, labelMissing);
             var bSel = new HookBox<BD4bu>();
             InstallLabel("igSelectable_Bool", baseAddr, bSel, (a, b, c, d) => { CollectArg(a); return bSel.Hook!.Original(a, b, c, d); }, backend, labelMissing);
-            var bCol1 = new HookBox<BD2>();
-            InstallLabel("igCollapsingHeader_BoolPtr", baseAddr, bCol1, (a, b) => { CollectArg(a); return bCol1.Hook!.Original(a, b); }, backend, labelMissing);
-            var bCol2 = new HookBox<BD3u>();
-            InstallLabel("igCollapsingHeader_TreeNodeFlags", baseAddr, bCol2, (a, b, c) => { CollectArg(a); return bCol2.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bCol1 = new HookBox<BD3u>();
+            // ⚠ igCollapsingHeader_BoolPtr 是 3 参（label, p_visible, flags）——少转发一个，flags 读到垃圾，折叠头就废了
+            InstallLabel("igCollapsingHeader_BoolPtr", baseAddr, bCol1, (a, b, c) => { CollectArg(a); return bCol1.Hook!.Original(a, b, c); }, backend, labelMissing);
+            var bCol2 = new HookBox<BD2u>();
+            InstallLabel("igCollapsingHeader_TreeNodeFlags", baseAddr, bCol2, (a, b) => { CollectArg(a); return bCol2.Hook!.Original(a, b); }, backend, labelMissing);
             var bTab = new HookBox<BD3u>();
             InstallLabel("igBeginTabItem", baseAddr, bTab, (a, b, c) => { CollectArg(a); return bTab.Hook!.Original(a, b, c); }, backend, labelMissing);
             var bMenu = new HookBox<BD2b>();
@@ -325,6 +344,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
 
             _appLog.Info($"[钩子] 控件标签桩：{_labelHooks.Count} 个挂接成功" +
                          (labelMissing.Count > 0 ? $"，缺导出 {labelMissing.Count} 个（{string.Join("、", labelMissing)}）" : ""));
+            }
         }
         catch (Exception ex)
         {

@@ -35,7 +35,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
-        Hook = new ImGuiHookService(AppLog, Log, Interop, PluginInterface.GetPluginConfigDirectory);
+        Hook = new ImGuiHookService(AppLog, Log, Interop, PluginInterface.GetPluginConfigDirectory,
+            () => Configuration.HooksEnabled, () => Configuration.LabelHooks);
         Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
         MainWindow = new MainWindow(this);
         LogWindow = new LogWindow(this);

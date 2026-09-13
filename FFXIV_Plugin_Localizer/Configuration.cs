@@ -11,5 +11,11 @@ public class Configuration : IPluginConfiguration
     /// <summary> 报错日志导出目录（空 = 用插件数据目录 pluginConfigs\&lt;ID&gt;\）。 </summary>
     public string LogExportPath { get; set; } = "";
 
+    /// <summary> ImGui 钩子总开关（关掉 = 只用静态扫描，对游戏 UI 零干扰；重载插件后生效）。 </summary>
+    public bool HooksEnabled { get; set; } = true;
+
+    /// <summary> 控件标签桩钩子（采集按钮/滑条/复选框等标签；界面异常时先关它再重载）。重载插件后生效。 </summary>
+    public bool LabelHooks { get; set; } = true;
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

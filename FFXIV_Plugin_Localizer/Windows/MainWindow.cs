@@ -33,6 +33,25 @@ public sealed class MainWindow : Window
         else
             Ui.ColoredWrapped(new Vector4(1f, 0.45f, 0.4f, 1f), "✘ " + hook.HookStatus);
 
+        // ── 钩子开关（改后需重载插件生效；界面异常时的排障入口） ──
+        var hooksOn = _plugin.Configuration.HooksEnabled;
+        if (ImGui.Checkbox("全部钩子", ref hooksOn))
+        {
+            _plugin.Configuration.HooksEnabled = hooksOn;
+            _plugin.Configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("关闭后本插件对游戏 UI 零干扰（运行时采集不可用，静态扫描不受影响）。");
+        ImGui.SameLine();
+        var labelOn = _plugin.Configuration.LabelHooks;
+        if (ImGui.Checkbox("控件标签钩子", ref labelOn))
+        {
+            _plugin.Configuration.LabelHooks = labelOn;
+            _plugin.Configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("采集按钮/滑条/复选框等控件标签用。\n界面出现异常时先关它重载试试，仍异常再关「全部钩子」。\n两处改动都需重载插件生效。");
+
         ImGui.Separator();
 
         // ── 采集开关 ──
