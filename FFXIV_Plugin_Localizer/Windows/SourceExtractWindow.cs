@@ -236,14 +236,15 @@ public sealed class SourceExtractWindow : Window
                         StartExtract(name, url);
                     }
                     ImGui.SameLine();
-                    ImGui.TextUnformatted(name);
+                    // 名称显示：**显示名【内部名】**（用户在安装器里看到的是显示名，故把显示名放前、内部名用【】标注）
                     if (displayName.Length > 0 &&
                         !string.Equals(displayName, name, StringComparison.OrdinalIgnoreCase))
                     {
-                        ImGui.SameLine();
-                        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-                        ImGui.TextUnformatted($"＝ {displayName}");
-                        ImGui.PopStyleColor();
+                        ImGui.TextUnformatted($"{displayName}【{name}】");
+                    }
+                    else
+                    {
+                        ImGui.TextUnformatted(name);
                     }
 
                     // 状态标注：另起一行（不与名字抢宽度）
