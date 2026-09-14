@@ -76,7 +76,7 @@ public sealed class MainWindow : Window
         ImGui.Separator();
 
         // ── 功能入口（按使用流程排序：① 配置 → ② 提取 → ③ 翻译 → ④ 排障；放不下自动换行） ──
-        Ui.Hint("流程：① AI 设置（填 Key） → ② 源码提取 / 文案扫描（获取英文） → ③ 窗口文字翻译（翻成中文）；安装器翻译为并行支线，日志随时可看。");
+        Ui.Hint("流程：① AI 设置（填 Key） → ② 源码提取（获取英文，需代理） → ③ 窗口文字翻译（翻成中文）；安装器翻译为并行支线，日志随时可看。");
         if (ImGui.Button("① AI 设置"))
         {
             _plugin.ToggleAiSettingsUi();
@@ -90,20 +90,13 @@ public sealed class MainWindow : Window
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("从插件公开源码提取界面文案（最准：只拿界面文字 + 标出绘制函数）。\n需勾选并填写代理才能访问 GitHub；闭源插件无法翻译。");
-        Ui.SameLineIfFits(Ui.ButtonWidth("② 文案扫描"));
-        if (ImGui.Button("② 文案扫描"))
-        {
-            _plugin.ToggleScanUi();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("第二步·备选：静态扫描已安装插件 DLL 的全部英文文案（不依赖网络，但会混入非界面文本）。");
         Ui.SameLineIfFits(Ui.ButtonWidth("③ 窗口文字翻译"));
         if (ImGui.Button("③ 窗口文字翻译"))
         {
             _plugin.ToggleWindowReplaceUi();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("第三步·翻译：按插件把窗口内文字翻成中文（机翻/手动，候选来自②文案扫描），替换层即时生效。");
+            ImGui.SetTooltip("第三步·翻译：按插件把窗口内文字翻成中文（机翻/手动，候选来自②源码提取），替换层即时生效。");
         Ui.SameLineIfFits(Ui.ButtonWidth("安装器翻译"));
         if (ImGui.Button("安装器翻译"))
         {

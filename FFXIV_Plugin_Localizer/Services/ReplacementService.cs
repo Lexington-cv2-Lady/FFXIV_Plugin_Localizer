@@ -24,7 +24,7 @@ public sealed unsafe class ReplacementService
     /// <summary> 窗口文字表目录（每插件一份 &lt;插件名&gt;.json）。 </summary>
     public const string WindowTableDirName = "窗口翻译";
     /// <summary> 窗口文字的未翻译候选来源目录（文案扫描输出）。 </summary>
-    public const string ScanDirName = "文案扫描";
+    public const string CandidateDirName = "文案扫描"; // 候选文案目录（源码提取 + 历史 DLL 扫描都写这里）
     /// <summary> 随插件分发的内置翻译包（构建时从 FDCN 表生成，未装 FDCN 的用户也有底子）。 </summary>
     public const string BundleFileName = "内置翻译包.json";
     /// <summary> FDCN 表指纹记录文件（变了才自动重导）。 </summary>
@@ -477,18 +477,47 @@ public sealed unsafe class ReplacementService
 
     // ═══════════════════════ 窗口文字表（每插件一份） ═══════════════════════
 
-    /// <summary> 窗口表清单：插件名 →（候选总数, 已翻译数）。候选来自文案扫描输出，已翻译来自窗口表。 </summary>
-    public List<(string Plugin, int Total, int Translated)> GetWindowPlugins()
+    /// <summary> 候选来源文件名后缀（两种来源合并：源码提取优先，其次历史 DLL 扫描结果）。 </summary>
+    private static readonly string[] CandidateSuffixes = { "_源码提取.json", "_未翻译.json" };
+
+    /// <summary> 读取某插件的候选文案（合并两种来源：源码提取 + 历史 DLL 扫描）。 </summary>
+    private Dictionary<string, string> ReadCandidates(string plugin)
     {
-        var result = new List<(string Plugin, int Total, int Translated)>();
-        var scanDir = Path.Combine(_configDir(), ScanDirName);
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        var dir = Path.Combine(_configDir(), CandidateDirName);
+        // 后读的优先（源码提取放前面先读，_未翻译 只补它没有的）
+        foreach (var suffix in CandidateSuffixes)
+        {
+            foreach (var (k, v) in ReadJsonDict(Path.Combine(dir, plugin + suffix)))
+            {
+                if (!result.ContainsKey(k)) result[k] = v;
+            }
+        }
+        return result;
+    }
+
+    /// <summary> 列出所有有候选的插件名（两种来源的并集）。 </summary>
+    private List<string> ListCandidatePlugins()
+    {
         var names = new SortedSet<string>(StringComparer.Ordinal);
+        var dir = Path.Combine(_configDir(), CandidateDirName);
         try
         {
-            if (Directory.Exists(scanDir))
+            if (Directory.Exists(dir))
             {
-                foreach (var f in Directory.EnumerateFiles(scanDir, "*_未翻译.json"))
-                    names.Add(Path.GetFileNameWithoutExtension(f)[..^"_未翻译".Length]);
+                foreach (var f in Directory.EnumerateFiles(dir, "*.json"))
+                {
+                    var stem = Path.GetFileNameWithoutExtension(f);
+                    foreach (var suffix in CandidateSuffixes)
+                    {
+                        var tag = Path.GetFileNameWithoutExtension(suffix);
+                        if (stem.EndsWith(tag, StringComparison.Ordinal))
+                        {
+                            names.Add(stem[..^tag.Length]);
+                            break;
+                        }
+                    }
+                }
             }
         }
         catch { /* 枚举失败忽略 */ }
@@ -496,9 +525,16 @@ public sealed unsafe class ReplacementService
         {
             foreach (var n in _windowSources.Keys) names.Add(n);
         }
-        foreach (var name in names)
+        return names.ToList();
+    }
+
+    /// <summary> 窗口表清单：插件名 →（候选总数, 已翻译数）。候选来自源码提取/扫描输出，已翻译来自窗口表。 </summary>
+    public List<(string Plugin, int Total, int Translated)> GetWindowPlugins()
+    {
+        var result = new List<(string Plugin, int Total, int Translated)>();
+        foreach (var name in ListCandidatePlugins())
         {
-            var candidates = ReadJsonDict(Path.Combine(scanDir, $"{name}_未翻译.json"));
+            var candidates = ReadCandidates(name);
             int translated;
             lock (_lock)
             {
@@ -513,7 +549,7 @@ public sealed unsafe class ReplacementService
     /// <summary> 某插件的窗口条目：返回（已翻译列表，未翻译英文列表）。每帧 UI 勿直接调，先缓存。 </summary>
     public (List<(string En, string Zh)> Translated, List<string> Untranslated) GetWindowEntries(string plugin)
     {
-        var candidates = ReadJsonDict(Path.Combine(_configDir(), ScanDirName, $"{plugin}_未翻译.json"));
+        var candidates = ReadCandidates(plugin);
         List<(string, string)> translated;
         List<string> untranslated;
         lock (_lock)

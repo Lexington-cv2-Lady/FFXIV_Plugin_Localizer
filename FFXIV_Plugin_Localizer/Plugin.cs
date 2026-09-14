@@ -28,12 +28,10 @@ public sealed class Plugin : IDalamudPlugin
     public Configuration Configuration { get; init; }
     public AppLog AppLog { get; }
     public ImGuiHookService Hook { get; }
-    public PluginScanService Scan { get; }
     public ReplacementService Replacement { get; }
     public MtTranslateService Mt { get; }
     public MainWindow MainWindow { get; }
     public LogWindow LogWindow { get; }
-    public ScanWindow ScanWindow { get; }
     public TranslationWindow TranslationWindow { get; }
     public AiSettingsWindow AiSettingsWindow { get; }
     public WindowReplaceWindow WindowReplaceWindow { get; }
@@ -58,11 +56,9 @@ public sealed class Plugin : IDalamudPlugin
         Replacement.SyncFdcnOnStartup(); // 启动同步：FDCN 文件指纹变了才自动重导；未装 FDCN 用内置翻译包打底
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
             () => Configuration.WidgetHooks, Replacement);
-        Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         MainWindow = new MainWindow(this);
         LogWindow = new LogWindow(this);
-        ScanWindow = new ScanWindow(this, Scan);
         TranslationWindow = new TranslationWindow(this, Replacement, Mt);
         AiSettingsWindow = new AiSettingsWindow(this, Mt);
         WindowReplaceWindow = new WindowReplaceWindow(this, Replacement, Mt);
@@ -70,7 +66,6 @@ public sealed class Plugin : IDalamudPlugin
         SourceExtractWindow = new SourceExtractWindow(this, SourceExtract);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
-        WindowSystem.AddWindow(ScanWindow);
         WindowSystem.AddWindow(TranslationWindow);
         WindowSystem.AddWindow(AiSettingsWindow);
         WindowSystem.AddWindow(WindowReplaceWindow);
@@ -132,9 +127,6 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary> 打开/关闭日志窗口（主窗口「日志窗口」按钮入口）。 </summary>
     public void ToggleLogUi() => LogWindow.Toggle();
-
-    /// <summary> 打开/关闭文案扫描窗口（主窗口「文案扫描」按钮入口）。 </summary>
-    public void ToggleScanUi() => ScanWindow.Toggle();
 
     /// <summary> 打开/关闭安装器翻译窗口（主窗口「安装器翻译」按钮入口）。 </summary>
     public void ToggleTranslationUi() => TranslationWindow.Toggle();
