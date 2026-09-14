@@ -67,9 +67,8 @@ public sealed unsafe class ReplacementService
     /// <summary> 从磁盘重新载入安装器表 + 窗口表，重建生效表（还原后可恢复中文）。 </summary>
     public void Reload()
     {
-        Load();
-        LoadWindowTables();
-        RebuildMerged();
+        Load();              // 内部会重建
+        LoadWindowTables();  // 内部会重建（这次含最新的窗口表，已是最终结果）
     }
 
     /// <summary> 设置 wiki 官方术语表（null 或空 = 不启用）。优先级最高，重建生效表。 </summary>
@@ -196,12 +195,50 @@ public sealed unsafe class ReplacementService
         }
     }
 
+    /// <summary>
+    /// 写入合并表（**只存字符串与哈希，不预分配原生指针**）。
+    /// ⚠ 性能关键：合并表含 6 万+ 条 wiki 术语，若每条都预分配（原实现），
+    /// 每次重建需 6 万次 StringToCoTaskMemUTF8 → 单次 80~220ms 卡顿，
+    /// 而 ImGui 逐帧处理按键，卡顿会**丢输入事件**（表现为「Ctrl+V 要按好几次才粘贴成功」）。
+    /// 现改为惰性分配：只有真正被渲染命中的条目才建指针（见 GetOrCreatePtr）。
+    /// </summary>
     private void AddMerged(string en, string zh)
     {
         if (_table.ContainsKey(en)) return;
         _table[en] = Encoding.UTF8.GetBytes(zh);
-        _ptrs[en] = Marshal.StringToCoTaskMemUTF8(zh);
         _hashes.Add(FnvUtf8(en));
+    }
+
+    /// <summary> 惰性取中文指针：命中才分配并缓存（避免为 6 万条未被渲染的术语预分配）。 </summary>
+    private nint GetOrCreatePtr(string key)
+    {
+        if (_ptrs.TryGetValue(key, out var ptr)) return ptr;
+        if (!_table.TryGetValue(key, out var bytes)) return 0;
+        ptr = Marshal.StringToCoTaskMemUTF8(Encoding.UTF8.GetString(bytes));
+        _ptrs[key] = ptr;
+        return ptr;
+    }
+
+    /// <summary> 增量更新单条窗口译文（避免写入时全量重建）。调用方须持有 _lock。 </summary>
+    private void ApplyOneWindowEntry(string en, string zh)
+    {
+        if (_wikiTerms?.ContainsKey(en) == true || _installerSource.ContainsKey(en)) return; // 高优先级来源已占该键
+        if (_ptrs.Remove(en, out var old)) _graveyard.Add(old);   // 旧指针作废（延迟释放）
+        _table[en] = Encoding.UTF8.GetBytes(zh);
+        _hashes.Add(FnvUtf8(en));
+    }
+
+    /// <summary> 增量移除单条窗口译文（其它窗口表或高优先级来源仍有时保留）。调用方须持有 _lock。 </summary>
+    private void RemoveOneWindowEntry(string en)
+    {
+        if (_wikiTerms?.ContainsKey(en) == true || _installerSource.ContainsKey(en)) return;
+        foreach (var t in _windowSources.Values)
+        {
+            if (t.ContainsKey(en)) return; // 别的插件表还有同键
+        }
+        if (_ptrs.Remove(en, out var old)) _graveyard.Add(old);
+        _table.Remove(en);
+        // 不摘 _hashes：防止哈希碰撞误伤同哈希的其它键（多一次未命中，无害）
     }
 
     /// <summary> 清洗：去空白、去空值、去同文，并剔除 ImGui 内部 ID（<c>##</c> 开头，无显示文字）。 </summary>
@@ -228,26 +265,43 @@ public sealed unsafe class ReplacementService
     public nint TryReplace(byte* p, int n)
     {
         if (!Enabled || _table.Count == 0 || n < 2 || n > 1024) return 0;
+
+        // 热路径零分配预筛：算整串哈希，并**在字节层面**找 ## 分隔符（不构造字符串）
         ulong h;
+        int hashIdx = -1;
         unsafe
         {
             h = FnvBytes(p, n);
+            for (var i = 0; i + 1 < n; i++)
+            {
+                if (p[i] == (byte)'#' && p[i + 1] == (byte)'#') { hashIdx = i; break; }
+            }
         }
+        ulong hShown = 0;
+        if (hashIdx > 0)
+        {
+            unsafe { hShown = FnvBytes(p, hashIdx); }
+        }
+
         lock (_lock)
         {
             // ① 整串匹配
             if (_hashes.Contains(h))
             {
                 var s = Encoding.UTF8.GetString(p, n);
-                if (_ptrs.TryGetValue(s, out var ptr)) return ptr;
+                var ptr = GetOrCreatePtr(s);
+                if (ptr != 0) return ptr;
+            }
 
-                // ② 截掉 ##ID 后的显示部分匹配
-                var hash = s.IndexOf("##", StringComparison.Ordinal);
-                if (hash > 0)
-                {
-                    var shown = s[..hash];
-                    if (_hashes.Contains(FnvUtf8(shown)) && _ptrs.TryGetValue(shown, out var ptr2)) return ptr2;
-                }
+            // ② 截掉 ##ID 后的显示部分匹配
+            // ⚠ 必须**独立判断**（不能嵌在①的命中分支内）：控件标签形如 `显示文字##内部ID`，
+            //    而表里存的是 `显示文字`——整串哈希必然不命中，只有截断后才可能命中。
+            //    原实现把它嵌在①内部，导致**带 ##ID 的控件标签全部替换不了**（已修）。
+            if (hashIdx > 0 && _hashes.Contains(hShown))
+            {
+                var shown = Encoding.UTF8.GetString(p, hashIdx);
+                var ptr2 = GetOrCreatePtr(shown);
+                if (ptr2 != 0) return ptr2;
             }
             return 0;
         }
@@ -601,9 +655,17 @@ public sealed unsafe class ReplacementService
                 table[key] = val;
                 added++;
             }
-            if (added > 0) WriteWindowFile(plugin, table);
+            if (added > 0)
+            {
+                WriteWindowFile(plugin, table);
+                foreach (var (en, zh) in translations)     // 增量写入合并表，避免全量重建
+                {
+                    var key = en.Trim();
+                    var val = (zh ?? "").Trim();
+                    if (key.Length >= 2 && val.Length > 0) ApplyOneWindowEntry(key, val);
+                }
+            }
         }
-        if (added > 0) RebuildMerged();
         return added;
     }
 
@@ -622,8 +684,9 @@ public sealed unsafe class ReplacementService
             else
                 table[en] = zh;
             WriteWindowFile(plugin, table);
+            if (zh.Length == 0) RemoveOneWindowEntry(en);
+            else ApplyOneWindowEntry(en, zh);
         }
-        RebuildMerged();
     }
 
     /// <summary> 删除某插件窗口表的单条。 </summary>
@@ -632,9 +695,11 @@ public sealed unsafe class ReplacementService
         lock (_lock)
         {
             if (_windowSources.TryGetValue(plugin, out var table) && table.Remove(en))
+            {
                 WriteWindowFile(plugin, table);
+                RemoveOneWindowEntry(en);
+            }
         }
-        RebuildMerged();
     }
 
     /// <summary>
@@ -674,6 +739,8 @@ public sealed unsafe class ReplacementService
             {
                 removed = table.Count;
                 _windowSources.Remove(plugin);
+                // 先移出 _windowSources 再逐条增量移除（这样"别的表是否还有同键"的判断才准确）
+                foreach (var en in table.Keys.ToList()) RemoveOneWindowEntry(en);
             }
             try
             {
@@ -685,7 +752,6 @@ public sealed unsafe class ReplacementService
                 _appLog.Warn($"[替换] 删除 {plugin} 的译文文件失败：{ex.Message}");
             }
         }
-        RebuildMerged();
         _appLog.Info($"[替换] 已还原 {plugin} 为英文（清除 {removed} 条译文，候选文件保留）");
         return removed;
     }
