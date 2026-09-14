@@ -72,6 +72,16 @@ public sealed class MainWindow : Window
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("滑条/复选框/下拉框等控件标签的替换（文本之外的另一条通道）。\n若界面异常，先关它重载试试；仍异常再关「全部钩子」。");
+        Ui.SameLineIfFits(Ui.ButtonWidth("钩子调试日志"));
+        var dbgLog = _plugin.Configuration.DebugHookLog;
+        if (ImGui.Checkbox("钩子调试日志", ref dbgLog))
+        {
+            _plugin.Configuration.DebugHookLog = dbgLog;
+            _plugin.Configuration.Save();
+            _plugin.Hook.DebugStats = dbgLog; // 即时生效，无需重载
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("排查「对照表里有译文、但界面没变成中文」用。\n开启后每 5 秒在日志输出各钩子（文字/控件）的调用次数、命中次数与未命中样本——\n能区分是「钩子没被触发」还是「触发了但没查中」。");
 
         ImGui.Separator();
 
