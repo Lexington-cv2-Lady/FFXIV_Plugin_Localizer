@@ -26,6 +26,29 @@ public sealed class MainWindow : Window
     {
         var hook = _plugin.Hook;
 
+        var enabled = _plugin.Configuration.ReplacementEnabled;
+        if (ImGui.Checkbox("启用替换（即时生效，无需重载）", ref enabled))
+        {
+            _plugin.Configuration.ReplacementEnabled = enabled;
+            _plugin.Replacement.Enabled = enabled;
+            _plugin.Configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("总开关：关掉后所有已翻译的界面文字立即还原为英文（对照表保留，随时可再开）。");
+        ImGui.SameLine();
+        // 一键还原英文：关替换 + 清空内存表，让所有窗口立刻回到原样
+        if (ImGui.Button("还原英文"))
+        {
+            _plugin.Configuration.ReplacementEnabled = false;
+            _plugin.Replacement.Enabled = false;
+            _plugin.Configuration.Save();
+            _plugin.RestoreEnglish();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("立即把界面还原成英文（关闭替换开关 + 清空当前生效的对照表）。\n对照表文件不会删除，重新勾选「启用替换」并重载即可恢复中文。");
+
+        ImGui.Separator();
+
         // ── 钩子状态 + 排障开关 ──
         if (hook.Hooked)
             Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), "✔ " + hook.HookStatus);

@@ -148,6 +148,13 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary> 打开/关闭源码提取窗口（主窗口「源码提取」按钮入口）。 </summary>
     public void ToggleSourceExtractUi() => SourceExtractWindow.Toggle();
 
+    /// <summary> 主窗口「还原英文」：清空生效对照表让界面立刻回到英文（磁盘文件保留）。 </summary>
+    public void RestoreEnglish()
+    {
+        Replacement.ClearActive();
+        AppLog.Info("[还原] 界面已还原为英文（对照表文件未删除）");
+    }
+
     // ── 启动自动检查：加载约 10 秒后扫一次缺口，静默/按配置翻译（插件更新后新文案也走这条） ──
     private readonly DateTime _startupCheckAt = DateTime.Now.AddSeconds(10);
     private bool _startupCheckDone;

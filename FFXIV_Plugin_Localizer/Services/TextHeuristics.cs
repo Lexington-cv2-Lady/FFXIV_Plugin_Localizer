@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace FFXIVPluginLocalizer.Services;
@@ -24,6 +25,37 @@ public static class TextHeuristics
 
     /// <summary> F1–F24 功能键。 </summary>
     private static readonly Regex FunctionKey = new(@"^f([1-9]|1[0-9]|2[0-4])$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary> 颜色值：#RGB / #RRGGBB / #RRGGBBAA（LightlessSync 等插件堆里大量存在，非界面文案）。 </summary>
+    private static readonly Regex HexColor = new(@"^#[0-9a-fA-F]{3,8}$", RegexOptions.Compiled);
+
+    /// <summary> printf 风格格式模板：%.2f、%d、%s、{0} 等——是代码模板不是可读文案。 </summary>
+    private static readonly Regex FormatTemplate = new(@"%[-+ #0-9.]*[diouxXeEfgGsc%]", RegexOptions.Compiled);
+
+    /// <summary> 结构化片段：以 { [ ( 开头且以 } ] ) 结尾，或是 JSON 键值/转义片段。 </summary>
+    private static readonly Regex StructFragment = new(@"^[\{\[\(].*[\}\]\)]$", RegexOptions.Compiled);
+
+    /// <summary> 代码标识符风格：无空格、含下划线/驼峰混排的点号路径（如 lightless-file-cache-version）。 </summary>
+    private static readonly Regex IdentLike = new(@"^[a-z0-9][a-z0-9._\-]*$", RegexOptions.Compiled);
+
+    /// <summary> 是否像「非界面的技术字符串」（颜色/格式模板/结构化片段/纯标识符），应排除。 </summary>
+    public static bool IsTechnicalNoise(string s)
+    {
+        var t = (s ?? "").Trim();
+        if (t.Length == 0) return true;
+        if (t.Length <= 2) return true;
+        if (HexColor.IsMatch(t)) return true;                 // #FFFFFF
+        if (t.StartsWith("#lightless-")) return true;          // 缓存键前缀（插件特有，通用规则兜底）
+        if (FormatTemplate.IsMatch(t)) return true;            // %.0f px
+        if (StructFragment.IsMatch(t)) return true;            // {Cids} / [x]
+        if (t.Contains("\\n") || t.Contains("\\t")) return true; // 转义残留
+        if (t.Contains("://")) return true;                    // URL
+        // 无空格 + 全小写/含连字符点号 → 标识符或键名（不含自然语言的空格与大小写混排）
+        if (!t.Contains(' ') && t.Length > 8 && IdentLike.IsMatch(t) && !t.Any(char.IsUpper)) return true;
+        // JSON 键值残片
+        if (t.Contains("\":") || t.Contains("\":")) return true;
+        return false;
+    }
 
     /// <summary> 是否为「纯键位名」：整串就是一个按键（如 Ctrl / F5 / Tab）。 </summary>
     public static bool IsKeyName(string s)
@@ -80,7 +112,8 @@ public static class TextHeuristics
     }
 
     /// <summary>
-    /// 是否为「值得汉化的文案」：含 ASCII 字母、不含中日韩字符、不是纯键位名、不是 ImGui 内部 ID。
+    /// 是否为「值得汉化的文案」：含 ASCII 字母、不含中日韩字符、不是纯键位名、不是 ImGui 内部 ID、
+    /// 且不是技术噪音（颜色值 / 格式模板 / 结构化片段 / 标识符）。
     /// </summary>
     public static bool IsTranslatable(string s)
     {
@@ -89,6 +122,7 @@ public static class TextHeuristics
         if (t.Length == 0) return false;
         if (HasCjk(t)) return false;            // 已是中文/日文
         if (IsKeyName(t)) return false;         // 纯键位名
+        if (IsTechnicalNoise(t)) return false;  // 技术噪音（颜色/模板/标识符等）
         return HasAsciiLetter(t);
     }
 }

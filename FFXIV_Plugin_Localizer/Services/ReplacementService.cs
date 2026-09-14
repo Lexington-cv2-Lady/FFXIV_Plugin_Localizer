@@ -47,6 +47,29 @@ public sealed unsafe class ReplacementService
     private readonly Dictionary<string, nint> _ptrs = new(StringComparer.Ordinal); // 英文 → 中文指针
     private readonly List<nint> _graveyard = new();                            // 已弃用的中文指针（仅 Dispose 释放，避免渲染线程 use-after-free）
 
+    /// <summary>
+    /// 还原英文：立即清空**生效的合并表**（安装器表 + 窗口表的内存副本一并清掉，替换立刻失效），
+    /// 但**不动磁盘文件**——重新载入即可恢复。用于「主窗口 → 还原英文」一键回到英文界面。
+    /// </summary>
+    public void ClearActive()
+    {
+        lock (_lock)
+        {
+            _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            _hashes = new HashSet<ulong>();
+            foreach (var ptr in _ptrs.Values) _graveyard.Add(ptr);
+            _ptrs.Clear();
+        }
+        _appLog.Info("[替换] 已清空生效对照表（界面还原英文；磁盘文件保留，重新载入可恢复）");
+    }
+
+    /// <summary> 从磁盘重新载入安装器表 + 窗口表，重建生效表（还原后可恢复中文）。 </summary>
+    public void Reload()
+    {
+        Load();
+        LoadWindowTables();
+    }
+
     /// <summary> 替换开关（只影响绘制替换；表的管理不受影响）。 </summary>
     public bool Enabled { get; set; }
 

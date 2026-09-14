@@ -306,8 +306,8 @@ public sealed class PluginScanService
         // 只针对显示部分判断：ImGui 实际收到的是 "显示文字##内部ID"，替换层会截断后匹配
         var t = TextHeuristics.StripIdSuffix(s).Trim();
         if (t.Length < 2 || t.Length > 300) return false;
-        if (t.Length == 0) return false;              // 纯 ##ID，无显示文字
         if (TextHeuristics.IsKeyName(t)) return false; // 纯键位名（Ctrl / F5 / Tab 等）
+        if (TextHeuristics.IsTechnicalNoise(t)) return false; // 颜色值/格式模板/标识符等噪音（LightlessSync 大量存在）
         var letter = false;
         var hexish = t.Length >= 8;
         foreach (var c in t)
