@@ -21,6 +21,9 @@ public sealed class SourceExtractWindow : Window
     private string _manualUrl = "";
     private string _summary = "";
     private readonly Dictionary<string, string> _lastResult = new();
+    private bool _testing;          // 连接测试进行中
+    private bool? _testOk;          // 上次测试结果（null=未测）
+    private string _testMessage = "";
 
     public SourceExtractWindow(Plugin plugin, SourceExtractService svc)
         : base("源码提取###PluginLocalizerSource")
@@ -36,7 +39,7 @@ public sealed class SourceExtractWindow : Window
         var cfg = _plugin.Configuration;
 
         // ── 说明（用户定稿文案）──
-        Ui.Hint("汉化是获取插件公开源码提取的，闭源的无法翻译，同时也需要用户挂着梯子才能进行汉化。");
+        Ui.Hint("汉化是获取插件公开源码提取的，闭源的无法翻译。\n需要能访问 GitHub（先点「测试直连」；不通则勾选「启用代理」填端口并点「测试代理」）。");
 
         ImGui.Separator();
 
@@ -102,13 +105,40 @@ public sealed class SourceExtractWindow : Window
         if (ImGui.SmallButton("1080")) { cfg.ProxyScheme = "socks5"; cfg.ProxyPort = "1080"; cfg.Save(); }
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("常见 socks5 端口（会自动切换为 socks5 协议）");
 
-        // 状态灯：条件是否满足一目了然
-        if (cfg.CanAccessGitHub)
-            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"✔ 已启用代理：{cfg.ProxyAddress}（可以访问 GitHub 拉取源码）");
+        // 填写状态（中性提示，**不用绿色**——避免让用户误以为代理已通） + 真实连接测试按钮
+        ImGui.SameLine();
+        ImGui.BeginDisabled(_testing);
+        if (ImGui.Button(_testing ? "测试中…" : "测试直连"))
+        {
+            StartTest(useProxy: false);
+        }
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("测试不使用代理时能否访问 GitHub（部分网络环境可直连）。");
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(_testing || !cfg.CanAccessGitHub || !cfg.UseProxy);
+        if (ImGui.Button("测试代理"))
+        {
+            StartTest(useProxy: true);
+        }
+        ImGui.EndDisabled();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("测试通过当前代理能否访问 GitHub。\n只有测试成功才说明代理可用。");
+
+        // 状态：中性色说明填写情况；绿色**只在测试通过后**出现
+        if (_testOk == true)
+            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"✔ {_testMessage}");
+        else if (_testOk == false)
+            Ui.ColoredWrapped(new Vector4(1f, 0.45f, 0.4f, 1f), $"✘ {_testMessage}");
         else if (!cfg.UseProxy)
-            Ui.ColoredWrapped(new Vector4(1f, 0.6f, 0.35f, 1f), "✘ 未勾选「启用代理」：不能访问 GitHub（即使填了端口也不会联网）。");
+            Ui.ColoredWrapped(new Vector4(0.75f, 0.8f, 0.85f, 1f),
+                "当前为「直连」模式（未启用代理）——点「测试直连」确认能否访问 GitHub。");
+        else if (string.IsNullOrWhiteSpace(cfg.ProxyPort))
+            Ui.ColoredWrapped(new Vector4(1f, 0.6f, 0.35f, 1f), "✘ 已勾选启用代理，但端口为空：请填写端口。");
         else
-            Ui.ColoredWrapped(new Vector4(1f, 0.6f, 0.35f, 1f), "✘ 已勾选启用代理，但端口为空：请填写端口后再试。");
+            Ui.ColoredWrapped(new Vector4(0.75f, 0.8f, 0.85f, 1f),
+                $"已填写代理 {cfg.ProxyAddress}（尚未验证连通性）——建议先点「测试代理」确认。");
 
         ImGui.Separator();
 
@@ -181,9 +211,35 @@ public sealed class SourceExtractWindow : Window
         }
     }
 
-    private void StartExtract(string name, string url)
+    /// <summary> 连接测试（后台跑，结果更新状态区）。useProxy=false 测直连。 </summary>
+    private void StartTest(bool useProxy)
     {
-        if (_svc.Running) return;
+        if (_testing) return;
+        _testing = true;
+        _testOk = null;
+        _testMessage = "测试中…";
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                var (ok, msg) = useProxy ? await _svc.TestProxyAsync() : await _svc.TestDirectAsync();
+                _testOk = ok;
+                _testMessage = msg;
+            }
+            catch (Exception ex)
+            {
+                _testOk = false;
+                _testMessage = "测试异常：" + ex.Message;
+            }
+            finally
+            {
+                _testing = false;
+            }
+        });
+    }
+
+    private void StartExtract(string name, string url)
+    {        if (_svc.Running) return;
         _summary = "";
         _svc.SetStatus($"正在拉取 {name} 的仓库…");
         _svc.Running = true;

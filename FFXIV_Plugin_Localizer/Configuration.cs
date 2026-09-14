@@ -46,8 +46,12 @@ public class Configuration : IPluginConfiguration
     /// <summary> 旧字段兼容：早期版本直接存完整地址字符串（读取后自动拆解到新字段）。 </summary>
     public string? ProxyAddressLegacy { get; set; }
 
-    /// <summary> 是否满足访问 GitHub 的条件：**已勾选启用代理 且 端口非空**。二者缺一不可。 </summary>
-    public bool CanAccessGitHub => UseProxy && !string.IsNullOrWhiteSpace(ProxyPort);
+    /// <summary>
+    /// 是否**可以尝试**访问 GitHub（仅表示表单合法，**不代表网络真的通**）。
+    /// 勾选代理 → 需填端口；不勾选 → 直连（部分网络环境可直接访问 GitHub）。
+    /// 真实可用性必须靠「测试连接」确认（SourceExtractService.TestConnectionAsync）。
+    /// </summary>
+    public bool CanAccessGitHub => !UseProxy || !string.IsNullOrWhiteSpace(ProxyPort);
 
     /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
     public bool ReplacementEnabled { get; set; } = true;

@@ -19,6 +19,51 @@ namespace FFXIVPluginLocalizer.Services;
 /// </summary>
 public sealed class SourceExtractService
 {
+    /// <summary>
+    /// 连接测试：通过当前代理实际访问 GitHub，验证代理是否真的可用。
+    /// ⚠ 只有本测试**成功**才说明能拉源码——仅"填了端口"不代表代理通（用户反馈过状态灯误导）。
+    /// 用 git ls-remote（轻量、不需要仓库存在性，只验证与 github.com 的连通性）。
+    /// </summary>
+    public async Task<(bool Ok, string Message)> TestProxyAsync()
+    {
+        return await TestConnectionAsync(useProxy: true);
+    }
+
+    /// <summary> 测试「不使用代理」的直连是否可用（有些网络环境可直接访问 GitHub）。 </summary>
+    public async Task<(bool Ok, string Message)> TestDirectAsync()
+    {
+        return await TestConnectionAsync(useProxy: false);
+    }
+
+    /// <summary> 连接测试：useProxy=true 走配置的代理，false 直连。 </summary>
+    private async Task<(bool Ok, string Message)> TestConnectionAsync(bool useProxy)
+    {
+        if (useProxy && !_cfg.CanAccessGitHub)
+        {
+            return (false, "请先勾选「启用代理」并填写端口");
+        }
+        var proxy = useProxy ? _cfg.ProxyAddress : "";
+        var (code, output) = await RunGitAsync(
+            new[] { "ls-remote", "--exit-code", "-h", "https://github.com/octocat/Hello-World.git", "HEAD" }, proxy);
+
+        var label = useProxy ? $"代理 {proxy}" : "直连（不使用代理）";
+        if (code == 0)
+        {
+            _appLog.Info($"[源码] 连接测试成功：{label}");
+            return (true, $"连接成功：{label} 可以访问 GitHub");
+        }
+
+        var why = output.Contains("Could not connect", StringComparison.OrdinalIgnoreCase) ||
+                  output.Contains("Failed to connect", StringComparison.OrdinalIgnoreCase)
+            ? (useProxy ? "无法通过该代理连接 GitHub —— 请确认代理软件已开启、端口与协议正确"
+                        : "无法直连 GitHub —— 需要启用代理（梯子）后重试")
+            : output.Contains("Could not resolve", StringComparison.OrdinalIgnoreCase)
+                ? "DNS 解析失败 —— 可能是代理未开启或网络受限"
+                : Tail(output);
+        _appLog.Warn($"[源码] 连接测试失败（{label}）：{why}");
+        return (false, $"连接失败：{why}（{label}）");
+    }
+
     /// <summary> 提取结果子目录（仓库克隆到此处）。 </summary>
     public const string RepoDirName = "源码仓库";
     /// <summary> 提取结果子目录（产出的对照表放此处）。 </summary>
@@ -120,7 +165,8 @@ public sealed class SourceExtractService
         if (!bare.Success) return (false, 0, new(), "无法解析仓库地址");
         var dirName = $"{bare.Groups[1].Value}__{bare.Groups[2].Value}".TrimEnd('.');
         var dir = Path.Combine(repoRoot, dirName);
-        var proxy = _cfg.ProxyAddress;
+        // 勾选代理才走代理；未勾选则直连（部分网络环境可直连 GitHub）
+        var proxy = _cfg.UseProxy ? _cfg.ProxyAddress : "";
 
         var gitArgs = dir is not null && Directory.Exists(dir)
             ? new[] { "-C", dir, "pull", "--ff-only" }                                  // 已克隆过 → 更新
