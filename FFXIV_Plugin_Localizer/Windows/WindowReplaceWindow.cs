@@ -90,6 +90,52 @@ public sealed class WindowReplaceWindow : Window
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("重新读取磁盘上的译文与候选文件。\n在外部删除/修改 json 后点它即可同步（无需重载插件）。");
+        ImGui.SameLine();
+        if (ImGui.Button("复制待翻原文"))
+        {
+            // 汇总所有插件的未翻译原文，一行一条，便于丢给外部 AI / 在线翻译
+            var lines = new List<string>();
+            foreach (var (pname, _, _) in _replacement.GetWindowPlugins())
+            {
+                var (_, untranslated) = _replacement.GetWindowEntries(pname);
+                foreach (var en in untranslated) lines.Add(en);
+            }
+            if (lines.Count == 0)
+            {
+                _summary = "没有待翻译的原文（各插件均已翻完或未提取候选）。";
+            }
+            else
+            {
+                ImGui.SetClipboardText(string.Join("\n", lines));
+                _summary = $"已复制 {lines.Count} 条待翻原文到剪贴板（一行一条）。";
+            }
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把所有插件尚未翻译的英文原文汇总复制（一行一条）。\n可直接粘到外部 AI / 在线翻译，再逐条填回。");
+        ImGui.SameLine();
+        if (ImGui.Button("复制为翻译提示词"))
+        {
+            // 直接生成一段可粘给外部 AI 的完整提示（含格式要求），回来可手工对照填
+            var pairs = new List<string>();
+            foreach (var (pname, _, _) in _replacement.GetWindowPlugins())
+            {
+                var (_, untranslated) = _replacement.GetWindowEntries(pname);
+                foreach (var en in untranslated) pairs.Add($"- {en}");
+            }
+            if (pairs.Count == 0)
+            {
+                _summary = "没有待翻译内容。";
+            }
+            else
+            {
+                var prompt = "请把下列游戏插件界面英文翻译成简洁自然的简体中文，保持原顺序，逐条输出「英文 => 中文」：\n\n"
+                             + string.Join("\n", pairs);
+                ImGui.SetClipboardText(prompt);
+                _summary = $"已复制翻译提示词（含 {pairs.Count} 条原文）到剪贴板。";
+            }
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("生成一段完整的翻译提示词（含格式要求与全部英文原文）复制到剪贴板，\n直接粘给任意 AI 对话框即可，无需自己写要求。");
 
         if (_mt.Running)
         {
@@ -293,6 +339,14 @@ public sealed class WindowReplaceWindow : Window
         ImGui.PopStyleColor();
         ImGui.SameLine();
         ImGui.TextWrapped(en);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("复制原文"))
+        {
+            ImGui.SetClipboardText(en);
+            _summary = $"已复制原文到剪贴板：{(en.Length > 40 ? en[..40] + "…" : en)}";
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把这句英文原文复制到剪贴板（免手动选中，便于外部检索或翻译）。");
         ImGui.SameLine();
         if (ImGui.SmallButton("删除"))
         {
