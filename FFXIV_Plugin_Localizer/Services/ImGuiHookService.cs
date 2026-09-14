@@ -79,6 +79,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private Hook<TextUnformattedDelegate>? _textHook;
     private Hook<TextExDelegate>? _textExHook;
     private readonly List<IDisposable> _widgetHooks = new();
+    /// <summary> 实际挂接成功的控件导出名（诊断用：日志会列出，便于确认某控件是否真挂上）。 </summary>
+    private readonly List<string> _hookedWidgetNames = new();
     // ── 调试统计（仅 DebugHookLog 开启时输出）：各钩子调用次数 / 查表命中次数 / 未命中样本 ──
     private readonly Dictionary<string, long> _dbgCalls = new();
     private readonly Dictionary<string, long> _dbgHits = new();
@@ -312,6 +314,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
             box.Hook = _interop.HookFromAddress<T>(addr, detour, backend);
             box.Hook.Enable();
             _widgetHooks.Add(box.Hook);
+            _hookedWidgetNames.Add(export);
         }
 
         // 各控件统一模式：把第 1 个参数（label）替换后再转发，返回值原样透传。
@@ -362,7 +365,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
         //    曾误挂过，2026-09-14 移除。
 
         _appLog.Info($"[钩子] 控件标签桩：{_widgetHooks.Count} 个挂接成功" +
-                     (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : ""));
+                     (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : "") +
+                     $"\n        已挂：{string.Join("、", _hookedWidgetNames)}");
     }
 
     /// <summary>
