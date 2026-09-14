@@ -19,6 +19,17 @@ public class Configuration : IPluginConfiguration
     /// 只挂「指针+基本类型」签名的安全控件（不含 ImVec2 的 igButton/igSelectable）；界面异常时关它重载可单独排除。 </summary>
     public bool WidgetHooks { get; set; } = true;
 
+    // ── 源码提取（访问 GitHub）──
+    /// <summary> 是否允许访问 GitHub 拉取插件源码。**必须勾选且填了代理地址才放行**（见 CanAccessGitHub）。 </summary>
+    public bool UseProxy { get; set; }
+
+    /// <summary> 网络代理地址（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）。
+    /// 仅本机保存；未勾选「启用代理」时即使填了也不生效。 </summary>
+    public string ProxyAddress { get; set; } = "";
+
+    /// <summary> 是否满足访问 GitHub 的条件：**已勾选启用代理 且 代理地址非空**。二者缺一不可。 </summary>
+    public bool CanAccessGitHub => UseProxy && !string.IsNullOrWhiteSpace(ProxyAddress);
+
     /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
     public bool ReplacementEnabled { get; set; } = true;
 

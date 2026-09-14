@@ -37,6 +37,8 @@ public sealed class Plugin : IDalamudPlugin
     public TranslationWindow TranslationWindow { get; }
     public AiSettingsWindow AiSettingsWindow { get; }
     public WindowReplaceWindow WindowReplaceWindow { get; }
+    public SourceExtractWindow SourceExtractWindow { get; }
+    public SourceExtractService SourceExtract { get; }
 
     public Plugin()
     {
@@ -64,12 +66,15 @@ public sealed class Plugin : IDalamudPlugin
         TranslationWindow = new TranslationWindow(this, Replacement, Mt);
         AiSettingsWindow = new AiSettingsWindow(this, Mt);
         WindowReplaceWindow = new WindowReplaceWindow(this, Replacement, Mt);
+        SourceExtract = new SourceExtractService(AppLog, Configuration, PluginInterface.GetPluginConfigDirectory);
+        SourceExtractWindow = new SourceExtractWindow(this, SourceExtract);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
         WindowSystem.AddWindow(ScanWindow);
         WindowSystem.AddWindow(TranslationWindow);
         WindowSystem.AddWindow(AiSettingsWindow);
         WindowSystem.AddWindow(WindowReplaceWindow);
+        WindowSystem.AddWindow(SourceExtractWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -139,6 +144,9 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary> 打开/关闭窗口文字翻译窗口（主窗口「窗口文字翻译」按钮入口）。 </summary>
     public void ToggleWindowReplaceUi() => WindowReplaceWindow.Toggle();
+
+    /// <summary> 打开/关闭源码提取窗口（主窗口「源码提取」按钮入口）。 </summary>
+    public void ToggleSourceExtractUi() => SourceExtractWindow.Toggle();
 
     // ── 启动自动检查：加载约 10 秒后扫一次缺口，静默/按配置翻译（插件更新后新文案也走这条） ──
     private readonly DateTime _startupCheckAt = DateTime.Now.AddSeconds(10);
