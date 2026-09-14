@@ -86,6 +86,16 @@ public sealed class SourceExtractService
         @"\b(?:Im|ImGui)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*""((?:[^""\\]|\\.)*)""\s*u8",
         RegexOptions.Compiled);
 
+    /// <summary> 任意字符串字面量（用于统计源码里的中文字符串，判断是否已源码级汉化）。 </summary>
+    private static readonly Regex StringLiteralRe = new(
+        @"""((?:[^""\\]|\\.)*)""",
+        RegexOptions.Compiled);
+
+    /// <summary> 判定「源码已内置中文」的中文字符串条数下限。 </summary>
+    private const int BilingualZhThreshold = 50;
+    /// <summary> 中文占比判据：中文条数 × 该值 ≥ 英文条数（即中文占 1/N 以上）才认定已汉化。 </summary>
+    private const int BilingualZhRatioDiv = 3;
+
     /// <summary> 判定"绘制函数"是否为纯文本绘制（决定该句走文字通道还是控件通道）。 </summary>
     private static readonly HashSet<string> TextFuncs = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -184,10 +194,22 @@ public sealed class SourceExtractService
             return (false, 0, new(), $"拉取失败（退出码 {code}）：{Tail(output)}{hint}");
         }
 
-        var (strings, funcStats) = ExtractFromDirectory(dir);
+        var (strings, funcStats, zhCount) = ExtractFromDirectory(dir);
         if (strings.Count == 0)
         {
             return (true, 0, funcStats, "仓库已拉取，但未找到可识别的界面文案（可能用了不支持的写法）");
+        }
+
+        // ── 已是源码级汉化的插件：直接跳过（如 Artisan 源码里就有 2700+ 处中文）──
+        // 判据：该仓库源码里的中文字符串达到阈值 → 说明作者/汉化分支已把界面写成中文。
+        // 注意：Glamourer/Penumbra 这类源码纯净（0 中文）但「装好后显示中文」的，是**别的汉化插件**
+        // 在做运行时替换，源码提取对它们依然有效，不能跳过。
+        if (zhCount >= BilingualZhThreshold && zhCount * BilingualZhRatioDiv >= strings.Count)
+        {
+            var msg = $"该插件源码已内置中文（中文字符串 {zhCount} 条 / 英文字符串 {strings.Count} 条，约占 " +
+                      $"{zhCount * 100 / Math.Max(1, zhCount + strings.Count)}%），判定为已汉化，跳过提取。";
+            _appLog.Info($"[源码] {pluginName} 跳过：源码已内置中文 {zhCount} 条");
+            return (true, 0, funcStats, msg);
         }
 
         // 写出：<插件名>_源码提取.json（与原字典格式一致，空值待翻译）
@@ -206,10 +228,12 @@ public sealed class SourceExtractService
     }
 
     /// <summary> 扫描目录下所有 .cs，抓界面文案与绘制函数统计。 </summary>
-    private (SortedSet<string> Strings, Dictionary<string, int> FuncStats) ExtractFromDirectory(string dir)
+    /// <summary> 扫描目录下所有 .cs，抓界面文案与绘制函数统计，同时统计含中文的字符串（判断是否已汉化）。 </summary>
+    private (SortedSet<string> Strings, Dictionary<string, int> FuncStats, int ZhCount) ExtractFromDirectory(string dir)
     {
         var strings = new SortedSet<string>(StringComparer.Ordinal);
         var funcStats = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var zhSeen = new HashSet<string>(StringComparer.Ordinal); // 去重，避免同一句重复计数
         foreach (var file in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
         {
             // 跳过构建产物与第三方库目录
@@ -221,6 +245,12 @@ public sealed class SourceExtractService
             try { lines = File.ReadAllLines(file, Encoding.UTF8); } catch { continue; }
             foreach (var line in lines)
             {
+                // 统计该行的中文字符串字面量（判断"源码级汉化"）
+                foreach (Match zm in StringLiteralRe.Matches(line))
+                {
+                    var lit = Unescape(zm.Groups[1].Value).Trim();
+                    if (lit.Length >= 2 && TextHeuristics.HasCjk(lit)) zhSeen.Add(lit);
+                }
                 foreach (Match m in CallRe.Matches(line))
                 {
                     AddCandidate(strings, funcStats, m.Groups[1].Value, m.Groups[2].Value);
@@ -235,7 +265,7 @@ public sealed class SourceExtractService
                 }
             }
         }
-        return (strings, funcStats);
+        return (strings, funcStats, zhSeen.Count);
     }
 
     private static void AddCandidate(SortedSet<string> strings, Dictionary<string, int> funcStats, string func, string raw)
