@@ -70,13 +70,23 @@ public static class TextHeuristics
     }
 
     /// <summary>
+    /// 去掉 ImGui 内部 ID 后缀：<c>"显示文字##internal_id"</c> → <c>"显示文字"</c>。
+    /// <c>##</c> 之后不是显示内容（仅用于控件去重），采集与替换都只应针对显示部分。
+    /// </summary>
+    public static string StripIdSuffix(string s)
+    {
+        var i = s.IndexOf("##", StringComparison.Ordinal);
+        return i >= 0 ? s[..i] : s;
+    }
+
+    /// <summary>
     /// 是否为「值得汉化的文案」：含 ASCII 字母、不含中日韩字符、不是纯键位名、不是 ImGui 内部 ID。
     /// </summary>
     public static bool IsTranslatable(string s)
     {
         if (string.IsNullOrWhiteSpace(s)) return false;
-        var t = s.Trim();
-        if (t.StartsWith("##")) return false;   // ImGui 内部 ID
+        var t = StripIdSuffix(s.Trim());
+        if (t.Length == 0) return false;
         if (HasCjk(t)) return false;            // 已是中文/日文
         if (IsKeyName(t)) return false;         // 纯键位名
         return HasAsciiLetter(t);

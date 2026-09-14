@@ -187,13 +187,17 @@ public sealed class SourceExtractService
 
     private static void AddCandidate(SortedSet<string> strings, Dictionary<string, int> funcStats, string func, string raw)
     {
-        var s = Unescape(raw).Trim();
+        // ## 是 ImGui 内部 ID 分隔符：只取显示部分（"显示文字##内部ID" → "显示文字"），
+        // 与替换层的「截断后匹配」呼应（ImGui 实际收到的是完整串）。
+        var s = TextHeuristics.StripIdSuffix(Unescape(raw)).Trim();
+
         if (s.Length < 2 || s.Length > 300) return;
-        if (s.StartsWith("##")) return;                 // ImGui 内部 ID
         if (TextHeuristics.HasCjk(s)) return;           // 已是中文
         if (TextHeuristics.IsKeyName(s)) return;        // 纯键位名
         if (!TextHeuristics.HasAsciiLetter(s)) return;  // 必须含英文字母
-        if (s.Contains("://") || s.Contains("{")) return; // URL / 插值残留
+        if (s.Contains("://")) return;                  // URL
+        // 含 C# 插值残留（{...}）说明是动态拼接，静态值不可靠 → 不采
+        if (s.Contains('{') || s.Contains('}')) return;
         strings.Add(s);
         funcStats[func] = funcStats.TryGetValue(func, out var c) ? c + 1 : 1;
     }

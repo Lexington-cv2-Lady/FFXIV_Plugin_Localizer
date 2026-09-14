@@ -177,6 +177,9 @@ public sealed unsafe class ReplacementService
 
     /// <summary>
     /// 热路径查表：命中返回 NUL 结尾的中文指针（转发时 text_end 传 0），未命中返回 0。
+    /// **双段匹配**：先按整串查（含 <c>##ID</c> 的完整标签）；未命中再按去掉 <c>##ID</c> 的显示部分查。
+    /// 原因：采集/源码提取入库时存的是「显示文字」（如 <c>设置</c>），而 ImGui 收到的完整串是 <c>设置##bdp</c>——
+    /// 只按整串匹配会导致带 ID 的控件标签全部替换不了。
     /// </summary>
     public nint TryReplace(byte* p, int n)
     {
@@ -188,9 +191,21 @@ public sealed unsafe class ReplacementService
         }
         lock (_lock)
         {
-            if (!_hashes.Contains(h)) return 0;
-            var s = Encoding.UTF8.GetString(p, n);
-            return _ptrs.TryGetValue(s, out var ptr) ? ptr : 0;
+            // ① 整串匹配
+            if (_hashes.Contains(h))
+            {
+                var s = Encoding.UTF8.GetString(p, n);
+                if (_ptrs.TryGetValue(s, out var ptr)) return ptr;
+
+                // ② 截掉 ##ID 后的显示部分匹配
+                var hash = s.IndexOf("##", StringComparison.Ordinal);
+                if (hash > 0)
+                {
+                    var shown = s[..hash];
+                    if (_hashes.Contains(FnvUtf8(shown)) && _ptrs.TryGetValue(shown, out var ptr2)) return ptr2;
+                }
+            }
+            return 0;
         }
     }
 

@@ -300,15 +300,17 @@ public sealed class PluginScanService
     }
 
     /// <summary> 候选口径：纯可打印 ASCII、含字母、长度合适、排除 URL 和十六进制串。
-    /// 另排除：ImGui 内部 ID（<c>##</c> 开头，无显示文字）、纯键位名（Ctrl/F1/Tab 等，无需翻译）。 </summary>
+    /// 另排除：ImGui 内部 ID（<c>##</c> 之后的内部标识）、纯键位名（Ctrl/F1/Tab 等，无需翻译）。 </summary>
     private static bool IsCandidate(string s)
     {
-        if (s.Length < 2 || s.Length > 300) return false;
-        if (s.StartsWith("##")) return false;        // ImGui 内部 ID（无显示部分）
-        if (TextHeuristics.IsKeyName(s)) return false; // 纯键位名（Ctrl / F5 / Tab 等）
+        // 只针对显示部分判断：ImGui 实际收到的是 "显示文字##内部ID"，替换层会截断后匹配
+        var t = TextHeuristics.StripIdSuffix(s).Trim();
+        if (t.Length < 2 || t.Length > 300) return false;
+        if (t.Length == 0) return false;              // 纯 ##ID，无显示文字
+        if (TextHeuristics.IsKeyName(t)) return false; // 纯键位名（Ctrl / F5 / Tab 等）
         var letter = false;
-        var hexish = s.Length >= 8;
-        foreach (var c in s)
+        var hexish = t.Length >= 8;
+        foreach (var c in t)
         {
             if (c < 0x20 && c != '\n' && c != '\t') return false;
             if (c >= 0x80) return false; // 中文/全角字符串不要（本插件目标是英文文案）
@@ -317,7 +319,7 @@ public sealed class PluginScanService
             if (!isHexDigit) hexish = false;
         }
         if (!letter || hexish) return false;
-        if (s.Contains("://")) return false; // URL
+        if (t.Contains("://")) return false; // URL
         return true;
     }
 }
