@@ -14,7 +14,7 @@ using FFXIVPluginLocalizer.Windows;
 
 namespace FFXIVPluginLocalizer;
 
-/// <summary> 插件界面汉化：给其他 Dalamud 插件的界面文本做运行时汉化。MVP 为只读采集模式。 </summary>
+/// <summary> 翻译插件的插件：给其他 Dalamud 插件的界面文本做运行时汉化。 </summary>
 public sealed class Plugin : IDalamudPlugin
 {
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
@@ -100,7 +100,7 @@ public sealed class Plugin : IDalamudPlugin
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "打开插件界面汉化窗口"
+            HelpMessage = "打开翻译插件的插件窗口"
         });
 
         PluginInterface.UiBuilder.Draw += DrawAll;
@@ -108,8 +108,8 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi += ToggleMain; // 插件安装器的设置按钮：本插件暂无独立设置窗，打开主窗（官方模板同款回调，缺失会在安装器报校验警告）
         Framework.Update += OnFramework;
 
-        AppLog.Info("[插件] 插件界面汉化 已加载（MVP：只读采集模式）");
-        Log.Information("插件界面汉化 已加载");
+        AppLog.Info("[插件] 翻译插件的插件 已加载");
+        Log.Information("翻译插件的插件 已加载");
     }
 
     /// <summary> 统一绘制：给所有窗口加明显边框（与旧项目同风格）。 </summary>
@@ -298,6 +298,6 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.RemoveAllWindows();
         Hook.Dispose();
         Replacement.Dispose();
-        AppLog.Info("[插件] 插件界面汉化 已卸载");
+        AppLog.Info("[插件] 翻译插件的插件 已卸载");
     }
 }

@@ -15,7 +15,7 @@ public sealed class MainWindow : Window
     private readonly Plugin _plugin;
     private int _lastLogCount = -1;
 
-    public MainWindow(Plugin plugin) : base("插件界面汉化###PluginLocalizer")
+    public MainWindow(Plugin plugin) : base("翻译插件的插件###PluginLocalizer")
     {
         _plugin = plugin;
         Size = new Vector2(560, 470);

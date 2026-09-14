@@ -9,7 +9,7 @@
     <CopyDebugSymbolFilesFromPackages>false</CopyDebugSymbolFilesFromPackages>
     <!-- Manifest 字段：必填 Name / Author / Description / Punchline；InternalName/AssemblyVersion/DalamudApiLevel 由打包器自动填。 -->
     <Author>Lexington-cv2-Lady</Author>
-    <Name>插件界面汉化</Name>
+    <Name>翻译插件的插件</Name>
     <Punchline>运行时把其他 Dalamud 插件的英文界面文字替换为简体中文。</Punchline>
     <Description>给其他 Dalamud 插件的界面做运行时汉化：在 ImGui 文字绘制层把插件渲染的英文按对照表换成中文显示，不改对方插件文件，自用/发布皆可。
 采集模式（只读）把屏幕上实际渲染的英文收集为待翻译清单；翻译管线沿用 _未翻译.json → _已翻译.json 的既有流程；仓库链接扫描辅助归属。
