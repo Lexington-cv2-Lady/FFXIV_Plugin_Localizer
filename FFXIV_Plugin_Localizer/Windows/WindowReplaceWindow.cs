@@ -40,6 +40,7 @@ public sealed class WindowReplaceWindow : Window
 
     /// <summary> 目录指纹（文件名+修改时间+大小），用于检测外部增删改，自动刷新。</summary>
     private string _dirStamp = "";
+    private readonly Dictionary<string, DateTime> _restoreArmedUntil = new(); // 还原英文的二次确认（键=restore::插件名）
 
     public override void Draw()
     {
@@ -217,6 +218,30 @@ public sealed class WindowReplaceWindow : Window
             }
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("重新读取该插件的译文文件与候选清单。\n在外部删除/编辑 json 后点它同步，无需重载插件。");
+
+            // 单插件还原英文：清空该插件译文（候选保留），二次确认防误点
+            ImGui.SameLine();
+            var restoreKey = "restore::" + plugin;
+            var armed = _restoreArmedUntil.TryGetValue(restoreKey, out var until) && DateTime.Now < until;
+            if (armed) ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.72f, 0.24f, 0.2f, 1f));
+            if (ImGui.Button(armed ? "确认还原英文" : "还原英文"))
+            {
+                if (armed)
+                {
+                    var n = _replacement.ClearPluginTranslations(plugin);
+                    _restoreArmedUntil.Remove(restoreKey);
+                    Invalidate(plugin);
+                    _summary = $"已把 {plugin} 还原为英文（清除 {n} 条译文；候选保留，可重新翻译）。";
+                }
+                else
+                {
+                    _restoreArmedUntil[restoreKey] = DateTime.Now.AddSeconds(3);
+                    _summary = $"再次点击「确认还原英文」将清除 {plugin} 的全部译文（3 秒内有效）。";
+                }
+            }
+            if (armed) ImGui.PopStyleColor();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("把这个插件的界面文字还原为英文：删除它的译文文件。\n候选清单保留，之后仍可重新机翻；二次确认防误点。");
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("把该插件全部未翻译条目分批送智谱翻译（免费模型，自动限速）。");
         }

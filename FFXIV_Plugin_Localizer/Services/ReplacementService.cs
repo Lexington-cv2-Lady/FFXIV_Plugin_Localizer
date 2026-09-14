@@ -634,6 +634,36 @@ public sealed unsafe class ReplacementService
         RebuildMerged();
     }
 
+    /// <summary>
+    /// **还原某插件为英文**：清空该插件的全部译文（删除其译文文件并移出内存表）。
+    /// 候选文件**不动**——重新翻译时仍在（属"题目"与"答卷"分离的设计）。
+    /// 返回被清除的译文条数。
+    /// </summary>
+    public int ClearPluginTranslations(string plugin)
+    {
+        var removed = 0;
+        lock (_lock)
+        {
+            if (_windowSources.TryGetValue(plugin, out var table))
+            {
+                removed = table.Count;
+                _windowSources.Remove(plugin);
+            }
+            try
+            {
+                var file = Path.Combine(WindowTableDir, $"{plugin}.json");
+                if (File.Exists(file)) File.Delete(file);
+            }
+            catch (Exception ex)
+            {
+                _appLog.Warn($"[替换] 删除 {plugin} 的译文文件失败：{ex.Message}");
+            }
+        }
+        RebuildMerged();
+        _appLog.Info($"[替换] 已还原 {plugin} 为英文（清除 {removed} 条译文，候选文件保留）");
+        return removed;
+    }
+
     private void WriteWindowFile(string plugin, Dictionary<string, string> table)
     {
         try
