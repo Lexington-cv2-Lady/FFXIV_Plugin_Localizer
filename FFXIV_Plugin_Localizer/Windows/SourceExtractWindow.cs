@@ -378,6 +378,7 @@ public sealed class SourceExtractWindow : Window
             try
             {
                 var (ok, count, funcs, msg) = await _svc.ExtractAsync(name, url);
+                if (ok) _replacement.InvalidateCandidateCache();   // 候选已更新，让窗口读到新数据
                 _lastResult[name] = (ok ? "【正常】 " : "【异常】 ") + msg;
                 _summary = msg;
                 _plugin.AppLog.Info($"[源码] {name}：{msg}");

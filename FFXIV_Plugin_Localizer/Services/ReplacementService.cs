@@ -47,6 +47,8 @@ public sealed unsafe class ReplacementService
     private readonly Dictionary<string, nint> _ptrs = new(StringComparer.Ordinal); // 英文 → 中文指针
     private readonly List<nint> _graveyard = new();                            // 已弃用的中文指针（仅 Dispose 释放，避免渲染线程 use-after-free）
     private Dictionary<string, string>? _wikiTerms;                            // wiki 官方术语（优先级最高，可选）
+    // 候选文案缓存（避免每帧读磁盘 + JSON 解析；键=插件名，值=(候选, 目录指纹时间)）
+    private readonly Dictionary<string, (Dictionary<string, string> Cand, DateTime Stamp)> _candCache = new(StringComparer.Ordinal);
 
     /// <summary>
     /// 还原英文：立即清空**生效的合并表**（安装器表 + 窗口表的内存副本一并清掉，替换立刻失效），
@@ -555,11 +557,34 @@ public sealed unsafe class ReplacementService
     /// <summary> 候选来源文件名后缀（两种来源合并：源码提取优先，其次历史 DLL 扫描结果）。 </summary>
     private static readonly string[] CandidateSuffixes = { "_源码提取.json", "_未翻译.json" };
 
-    /// <summary> 读取某插件的候选文案（合并两种来源：源码提取 + 历史 DLL 扫描）。 </summary>
+    /// <summary>
+    /// 读取某插件的候选文案（合并两种来源：源码提取 + 历史 DLL 扫描）。
+    /// ⚠ 带缓存：本方法会被**每帧**调用（插件翻译窗口列插件时），而候选文件可能很大
+    /// （如 LightlessSync 1.1 万条，读+解析 ~44ms）——不缓存会严重掉帧。
+    /// 缓存以「相关文件的最新写入时间」为失效依据，外部改动会自动刷新。
+    /// </summary>
     private Dictionary<string, string> ReadCandidates(string plugin)
     {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
         var dir = Path.Combine(_configDir(), CandidateDirName);
+        // 计算指纹（两个候选文件的最后写入时间取最大；文件不存在记 MinValue）
+        var stamp = DateTime.MinValue;
+        foreach (var suffix in CandidateSuffixes)
+        {
+            try
+            {
+                var fi = new FileInfo(Path.Combine(dir, plugin + suffix));
+                if (fi.Exists && fi.LastWriteTimeUtc > stamp) stamp = fi.LastWriteTimeUtc;
+            }
+            catch { /* 取不到时间就按未缓存处理 */ }
+        }
+
+        lock (_lock)
+        {
+            if (_candCache.TryGetValue(plugin, out var cached) && cached.Stamp == stamp)
+                return cached.Cand;
+        }
+
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
         // 后读的优先（源码提取放前面先读，_未翻译 只补它没有的）
         foreach (var suffix in CandidateSuffixes)
         {
@@ -568,12 +593,32 @@ public sealed unsafe class ReplacementService
                 if (!result.ContainsKey(k)) result[k] = v;
             }
         }
+
+        lock (_lock)
+        {
+            _candCache[plugin] = (result, stamp);
+        }
         return result;
     }
 
-    /// <summary> 列出所有有候选的插件名（两种来源的并集）。 </summary>
+    /// <summary> 清空候选缓存（源码提取出新候选后调用）。 </summary>
+    public void InvalidateCandidateCache()
+    {
+        lock (_lock) _candCache.Clear();
+    }
+
+    /// <summary> 列出所有有候选的插件名（两种来源的并集）。带缓存，避免每帧列目录。 </summary>
+    private List<string>? _pluginNameCache;
+    private DateTime _pluginNameCacheAt = DateTime.MinValue;
+
     private List<string> ListCandidatePlugins()
     {
+        // 5 秒内的结果复用（列目录+文件名解析虽快，但每帧做也不必要）
+        lock (_lock)
+        {
+            if (_pluginNameCache != null && (DateTime.UtcNow - _pluginNameCacheAt).TotalSeconds < 5)
+                return _pluginNameCache;
+        }
         var names = new SortedSet<string>(StringComparer.Ordinal);
         var dir = Path.Combine(_configDir(), CandidateDirName);
         try
@@ -599,8 +644,10 @@ public sealed unsafe class ReplacementService
         lock (_lock)
         {
             foreach (var n in _windowSources.Keys) names.Add(n);
+            _pluginNameCache = names.ToList();
+            _pluginNameCacheAt = DateTime.UtcNow;
+            return _pluginNameCache;
         }
-        return names.ToList();
     }
 
     /// <summary> 窗口表清单：插件名 →（候选总数, 已翻译数）。候选来自源码提取/扫描输出，已翻译来自窗口表。 </summary>
