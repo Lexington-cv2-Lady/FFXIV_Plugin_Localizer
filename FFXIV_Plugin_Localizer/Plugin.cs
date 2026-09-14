@@ -161,7 +161,7 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary> 打开/关闭 AI 设置窗口（安装器翻译窗口「AI 设置」按钮入口）。 </summary>
     public void ToggleAiSettingsUi() => AiSettingsWindow.Toggle();
 
-    /// <summary> 打开/关闭窗口文字翻译窗口（主窗口「窗口文字翻译」按钮入口）。 </summary>
+    /// <summary> 打开/关闭插件翻译窗口（主窗口「插件翻译」按钮入口）。 </summary>
     public void ToggleWindowReplaceUi() => WindowReplaceWindow.Toggle();
 
     /// <summary> 打开/关闭源码提取窗口（主窗口「源码提取」按钮入口）。 </summary>

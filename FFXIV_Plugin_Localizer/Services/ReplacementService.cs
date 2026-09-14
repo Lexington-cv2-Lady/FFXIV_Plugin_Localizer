@@ -142,19 +142,27 @@ public sealed unsafe class ReplacementService
         try
         {
             var dir = WindowTableDir;
-            if (!Directory.Exists(dir)) return;
+            // ⚠ 即使目录不存在也要先清空内存表：否则用户删掉整个目录后，界面仍显示旧的已翻译内容
             lock (_lock)
             {
                 _windowSources.Clear();
-                foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
+                if (!Directory.Exists(dir))
                 {
-                    var data = TranslationFile.Load(file);
-                    if (data.Count == 0) continue;
-                    _windowSources[Path.GetFileNameWithoutExtension(file)] = Normalize(data);
+                    // 目录都没了 → 视为无译文，重建生效表（让替换立即失效）
+                    _appLog.Info("[替换] 插件翻译目录不存在，已清空窗口表");
+                }
+                else
+                {
+                    foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
+                    {
+                        var data = TranslationFile.Load(file);
+                        if (data.Count == 0) continue;
+                        _windowSources[Path.GetFileNameWithoutExtension(file)] = Normalize(data);
+                    }
                 }
             }
             RebuildMerged();
-            _appLog.Info($"[替换] 已载入窗口文字表：{_windowSources.Count} 个插件");
+            _appLog.Info($"[替换] 已载入插件翻译表：{_windowSources.Count} 个插件");
         }
         catch (Exception ex)
         {
