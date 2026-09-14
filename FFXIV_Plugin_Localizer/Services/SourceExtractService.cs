@@ -107,7 +107,7 @@ public sealed class SourceExtractService
     {
         if (!_cfg.CanAccessGitHub)
         {
-            return (false, 0, new(), "未启用代理或代理地址为空：访问 GitHub 需要勾选「启用代理」并填写代理地址");
+            return (false, 0, new(), "未启用代理或端口为空：请勾选「启用代理」并填写端口后重试");
         }
         if (string.IsNullOrWhiteSpace(repoUrl) || !repoUrl.Contains("github.com", StringComparison.OrdinalIgnoreCase))
         {
@@ -128,7 +128,12 @@ public sealed class SourceExtractService
         var (code, output) = await RunGitAsync(gitArgs, proxy);
         if (code != 0 && !Directory.Exists(dir))
         {
-            return (false, 0, new(), $"拉取失败（退出码 {code}）：{Tail(output)}");
+            // 给出可操作的诊断：代理连不上时明确提示检查代理是否开着/端口是否正确
+            var hint = output.Contains("Could not connect", StringComparison.OrdinalIgnoreCase) ||
+                       output.Contains("Failed to connect", StringComparison.OrdinalIgnoreCase)
+                ? $"\n提示：无法通过代理 {proxy} 连接 GitHub —— 请确认代理软件已开启、端口正确（当前用 {proxy}）。"
+                : "";
+            return (false, 0, new(), $"拉取失败（退出码 {code}）：{Tail(output)}{hint}");
         }
 
         var (strings, funcStats) = ExtractFromDirectory(dir);
@@ -230,12 +235,15 @@ public sealed class SourceExtractService
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8, // git 输出含中文路径（数据目录名），必须按 UTF-8 读，否则乱码
+            StandardErrorEncoding = Encoding.UTF8,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
         // 代理只作用于本次 git 进程，不污染全局
         psi.Environment["HTTPS_PROXY"] = proxy;
         psi.Environment["HTTP_PROXY"] = proxy;
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0"; // 不弹交互式登录
+        psi.Environment["LC_ALL"] = "C.UTF-8";        // 让 git 用 UTF-8 输出路径，避免中文乱码
 
         try
         {

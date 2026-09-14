@@ -71,23 +71,23 @@ public sealed class SourceExtractWindow : Window
             ImGui.SetTooltip("代理协议。Clash / v2ray 一般用 http。");
 
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(70f);
+        ImGui.SetNextItemWidth(110f); // 容纳 127.0.0.1 完整显示
         var host = cfg.ProxyHost;
         if (ImGui.InputText("##ProxyHost", ref host, 64)) // 默认 127.0.0.1，通常无需改
         {
             cfg.ProxyHost = host.Trim();
+            cfg.Save(); // 改动即存（失焦事件在游戏内不可靠，曾导致配置丢失）
         }
-        if (ImGui.IsItemDeactivatedAfterEdit()) cfg.Save();
 
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(70f);
+        ImGui.SetNextItemWidth(80f);
         var port = cfg.ProxyPort;
         if (ImGui.InputTextWithHint("##ProxyPort", "端口", ref port, 8))
         {
             // 只允许数字，防止误填整串地址
             cfg.ProxyPort = new string(port.Where(char.IsDigit).ToArray());
+            cfg.Save(); // 改动即存（同上：不能依赖失焦事件）
         }
-        if (ImGui.IsItemDeactivatedAfterEdit()) cfg.Save();
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("只填端口号即可，如 Clash 默认 7890、v2ray 常见 10809（http）或 1080（socks5）。\n只保存在本机配置，不会随插件分发。");
 
