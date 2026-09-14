@@ -43,8 +43,10 @@ public sealed class SourceExtractService
             return (false, "请先勾选「启用代理」并填写端口");
         }
         var proxy = useProxy ? _cfg.ProxyAddress : "";
+        // ⚠ 不要用 --exit-code 与 -h + 具体 ref 组合：实测 git 2.55 下会误报退出码 2（明明能连）。
+        //   直接跑最朴素的 ls-remote，靠退出码判断连通性即可。
         var (code, output) = await RunGitAsync(
-            new[] { "ls-remote", "--exit-code", "-h", "https://github.com/octocat/Hello-World.git", "HEAD" }, proxy);
+            new[] { "ls-remote", "https://github.com/octocat/Hello-World.git" }, proxy);
 
         var label = useProxy ? $"代理 {proxy}" : "直连（不使用代理）";
         if (code == 0)
