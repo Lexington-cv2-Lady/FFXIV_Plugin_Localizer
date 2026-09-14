@@ -147,6 +147,8 @@ public sealed class Plugin : IDalamudPlugin
             _startupCheckDone = true;
             StartupCheck();
         }
+        // 外部改了译文 json（资源管理器里增删改）也要即时生效——不能只在「插件翻译」窗口开着时才检测
+        Replacement.CheckExternalChanges();
         // 调试日志（可选）
         if (Configuration.DebugHookLog && (DateTime.Now - _lastDbgLog).TotalSeconds >= 5)
         {

@@ -77,6 +77,48 @@ public sealed unsafe class ReplacementService
         LoadWindowTables();  // 内部会重建（这次含最新的窗口表，已是最终结果）
     }
 
+    /// <summary> 译文目录指纹（文件名+修改时间+大小）。 </summary>
+    private string ComputeWindowDirStamp()
+    {
+        try
+        {
+            var dir = WindowTableDir;
+            if (!Directory.Exists(dir)) return "<none>";
+            var entries = Directory.EnumerateFiles(dir, "*.json")
+                .Select(f => new FileInfo(f))
+                .OrderBy(f => f.Name, StringComparer.Ordinal)
+                .Select(f => $"{f.Name}:{f.LastWriteTimeUtc.Ticks}:{f.Length}");
+            return string.Join("|", entries);
+        }
+        catch
+        {
+            return "<err>";
+        }
+    }
+
+    /// <summary>
+    /// 检测**外部**对译文目录的增删改（用户在资源管理器里删/改/加 json），有变化就 Reload；返回是否重载了。
+    ///
+    /// ⚠ 以前这个检查**只写在「插件翻译」窗口的 Draw 里**——于是「窗口没开时在外部改了 json，
+    ///    界面毫无变化」，用户会以为改动不生效（曾被投诉"删了 json 还显示已翻译"）。
+    ///    现改为本服务自持指纹 + 自带降频，由框架回调周期性调用，**与窗口是否打开无关**。
+    /// </summary>
+    public bool CheckExternalChanges()
+    {
+        var now = Environment.TickCount64;
+        if (now - _lastStampCheckMs < 3000) return false;   // 降频：3 秒一次（列目录便宜，但没必要每帧做）
+        _lastStampCheckMs = now;
+        var stamp = ComputeWindowDirStamp();
+        if (stamp == _windowDirStamp) return false;
+        _windowDirStamp = stamp;
+        Reload();
+        _appLog.Info("[替换] 检测到译文目录变化，已自动重读（外部增删改 json 生效）");
+        return true;
+    }
+
+    private long _lastStampCheckMs;
+    private string _windowDirStamp;
+
     /// <summary> 设置 wiki 官方术语表（null 或空 = 不启用）。优先级最高，重建生效表。 </summary>
     public void SetWikiTerms(Dictionary<string, string>? terms)
     {

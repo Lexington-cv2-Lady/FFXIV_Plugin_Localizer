@@ -49,8 +49,8 @@ public sealed class WindowReplaceWindow : Window
                 "已是中文版的插件会自动跳过。");
 
         // ── 自动检测译文目录变化（外部删/改 json 后无需手动点刷新）──
-        // ⚠ 降频：每帧列目录 + 建 FileInfo 会持续占用帧时间（实测单次 0.22ms、60 帧 13ms），
-        //    改为每 30 帧（约 0.5 秒）检查一次——人眼无感，但省下配额给输入处理。
+        // ⚠ 检测逻辑已上移到 ReplacementService.CheckExternalChanges（框架回调周期调用），
+        //    原因：只在本窗口 Draw 里检测会导致「窗口没开时改 json 不生效」。这里只需处理本窗口的显示缓存。
         if (++_stampTick >= 30)
         {
             _stampTick = 0;
@@ -58,9 +58,8 @@ public sealed class WindowReplaceWindow : Window
             if (stamp != _dirStamp)
             {
                 _dirStamp = stamp;
-                _cache.Clear();
+                _cache.Clear();      // 磁盘变了，本窗口的候选缓存也要跟着失效
                 _editBufs.Clear();
-                _replacement.Reload(); // 重读磁盘 + 重建生效表，删除的译文立即失效
             }
         }
 
