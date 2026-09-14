@@ -228,16 +228,22 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 while (n < MaxTextLen && q[n] != 0) n++;
             }
             var hit = _replacement.TryReplace(q, n);
-            if (DebugStats)
+            if (DebugStats && n >= 2)
             {
                 lock (_dbgCalls)
                 {
                     _dbgCalls[source] = _dbgCalls.TryGetValue(source, out var c) ? c + 1 : 1;
-                    if (hit != 0) _dbgHits[source] = _dbgHits.TryGetValue(source, out var h) ? h + 1 : 1;
-                    else if (_dbgMissSamples.Count < 40 && n >= 2)
+                    if (hit != 0)
                     {
-                        var s = System.Text.Encoding.UTF8.GetString(q, n);
-                        if (s.Length >= 3) _dbgMissSamples.Add($"[{source}] {s}");
+                        _dbgHits[source] = _dbgHits.TryGetValue(source, out var h) ? h + 1 : 1;
+                    }
+                    else if (_dbgMissSamples.Count < 40)
+                    {
+                        var text = System.Text.Encoding.UTF8.GetString(q, n).Trim();
+                        // ⚠ 只记录**纯 ASCII 英文**样本：界面里已是中文的（安装器/Dalamud 自带汉化）不是问题，
+                        //    全记下来会淹没有效信息（此前版本即如此，看不出真正漏网的英文）。
+                        if (text.Length >= 3 && IsPureAscii(text))
+                            _dbgMissSamples.Add($"[{source}] {text}");
                     }
                 }
             }
@@ -247,6 +253,17 @@ public sealed unsafe class ImGuiHookService : IDisposable
         {
             return 0;
         }
+    }
+
+    /// <summary> 纯 ASCII（不含中文/日文/全角）——用于过滤"已经是中文"的噪音。 </summary>
+    private static bool IsPureAscii(string s)
+    {
+        foreach (var c in s)
+        {
+            if (c > 0x7E) return false;
+            if (c < 0x20 && c != '\t') return false;
+        }
+        return true;
     }
 
     /// <summary> 周期性输出调试统计（由 Plugin 的框架回调每 5 秒调用一次）。 </summary>
@@ -265,11 +282,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 sb.Append($"{k}: 调用 {v} 次, 命中 {h} 次; ");
             }
             report = sb.ToString();
-            // 未命中样本（去重后最多 12 条）
+            // 未命中样本（**只含纯英文**，去重后最多 12 条）——这些才是真正"表里没有、界面仍是英文"的候选
             if (_dbgMissSamples.Count > 0)
             {
                 var uniq = _dbgMissSamples.Distinct().Take(12).ToList();
-                report += "\n    未命中样本: " + string.Join(" | ", uniq);
+                report += "\n    未命中英文（可能是漏网的界面文字）: " + string.Join(" | ", uniq);
                 _dbgMissSamples.Clear();
             }
             _dbgCalls.Clear();
@@ -299,45 +316,45 @@ public sealed unsafe class ImGuiHookService : IDisposable
 
         // 各控件统一模式：把第 1 个参数（label）替换后再转发，返回值原样透传。
         var bCheck = new HookBox<W2>();
-        Add("igCheckbox", bCheck, (a, b) => bCheck.Hook!.Original(Label(a), b), _ => { });
+        Add("igCheckbox", bCheck, (a, b) => bCheck.Hook!.Original(Label(a, "igCheckbox"), b), _ => { });
         var bTree = new HookBox<W1>();
-        Add("igTreeNode_Str", bTree, a => bTree.Hook!.Original(Label(a)), _ => { });
+        Add("igTreeNode_Str", bTree, a => bTree.Hook!.Original(Label(a, "igTreeNode_Str")), _ => { });
         var bTreeEx = new HookBox<W2u>();
-        Add("igTreeNodeEx_Str", bTreeEx, (a, b) => bTreeEx.Hook!.Original(Label(a), b), _ => { });
+        Add("igTreeNodeEx_Str", bTreeEx, (a, b) => bTreeEx.Hook!.Original(Label(a, "igTreeNodeEx_Str"), b), _ => { });
         var bCol = new HookBox<W3u>();
-        Add("igCollapsingHeader_BoolPtr", bCol, (a, b, c) => bCol.Hook!.Original(Label(a), b, c), _ => { });
+        Add("igCollapsingHeader_BoolPtr", bCol, (a, b, c) => bCol.Hook!.Original(Label(a, "igCollapsingHeader_BoolPtr"), b, c), _ => { });
         var bCol2 = new HookBox<W2u>();
-        Add("igCollapsingHeader_TreeNodeFlags", bCol2, (a, b) => bCol2.Hook!.Original(Label(a), b), _ => { });
+        Add("igCollapsingHeader_TreeNodeFlags", bCol2, (a, b) => bCol2.Hook!.Original(Label(a, "igCollapsingHeader_TreeNodeFlags"), b), _ => { });
         var bTab = new HookBox<W3u>();
-        Add("igBeginTabItem", bTab, (a, b, c) => bTab.Hook!.Original(Label(a), b, c), _ => { });
+        Add("igBeginTabItem", bTab, (a, b, c) => bTab.Hook!.Original(Label(a, "igBeginTabItem"), b, c), _ => { });
         var bCombo = new HookBox<W3u>();
-        Add("igBeginCombo", bCombo, (a, b, c) => bCombo.Hook!.Original(Label(a), Label(b), c), _ => { });
+        Add("igBeginCombo", bCombo, (a, b, c) => bCombo.Hook!.Original(Label(a, "igBeginCombo"), Label(b, "igBeginCombo"), c), _ => { });
         var bMenu = new HookBox<W2b>();
-        Add("igBeginMenu", bMenu, (a, b) => bMenu.Hook!.Original(Label(a), b), _ => { });
+        Add("igBeginMenu", bMenu, (a, b) => bMenu.Hook!.Original(Label(a, "igBeginMenu"), b), _ => { });
         var bMItem = new HookBox<W4bb>();
-        Add("igMenuItem_Bool", bMItem, (a, b, c, d) => bMItem.Hook!.Original(Label(a), Label(b), c, d), _ => { });
+        Add("igMenuItem_Bool", bMItem, (a, b, c, d) => bMItem.Hook!.Original(Label(a, "igMenuItem_Bool"), Label(b, "igMenuItem_Bool"), c, d), _ => { });
         var bRadio = new HookBox<W2b>();
-        Add("igRadioButton_Bool", bRadio, (a, b) => bRadio.Hook!.Original(Label(a), b), _ => { });
+        Add("igRadioButton_Bool", bRadio, (a, b) => bRadio.Hook!.Original(Label(a, "igRadioButton_Bool"), b), _ => { });
         var bSF = new HookBox<WSliderFloat>();
-        Add("igSliderFloat", bSF, (a, b, c, d, e, f) => bSF.Hook!.Original(Label(a), b, c, d, e, f), _ => { });
+        Add("igSliderFloat", bSF, (a, b, c, d, e, f) => bSF.Hook!.Original(Label(a, "igSliderFloat"), b, c, d, e, f), _ => { });
         var bSI = new HookBox<WSliderInt>();
-        Add("igSliderInt", bSI, (a, b, c, d, e, f) => bSI.Hook!.Original(Label(a), b, c, d, e, f), _ => { });
+        Add("igSliderInt", bSI, (a, b, c, d, e, f) => bSI.Hook!.Original(Label(a, "igSliderInt"), b, c, d, e, f), _ => { });
         var bDF = new HookBox<WDragFloat>();
-        Add("igDragFloat", bDF, (a, b, c, d, e, f, g) => bDF.Hook!.Original(Label(a), b, c, d, e, f, g), _ => { });
+        Add("igDragFloat", bDF, (a, b, c, d, e, f, g) => bDF.Hook!.Original(Label(a, "igDragFloat"), b, c, d, e, f, g), _ => { });
         var bDI = new HookBox<WDragInt>();
-        Add("igDragInt", bDI, (a, b, c, d, e, f, g) => bDI.Hook!.Original(Label(a), b, c, d, e, f, g), _ => { });
+        Add("igDragInt", bDI, (a, b, c, d, e, f, g) => bDI.Hook!.Original(Label(a, "igDragInt"), b, c, d, e, f, g), _ => { });
         var bCE3 = new HookBox<W3u>();
-        Add("igColorEdit3", bCE3, (a, b, c) => bCE3.Hook!.Original(Label(a), b, c), _ => { });
+        Add("igColorEdit3", bCE3, (a, b, c) => bCE3.Hook!.Original(Label(a, "igColorEdit3"), b, c), _ => { });
         var bCE4 = new HookBox<W3u>();
-        Add("igColorEdit4", bCE4, (a, b, c) => bCE4.Hook!.Original(Label(a), b, c), _ => { });
+        Add("igColorEdit4", bCE4, (a, b, c) => bCE4.Hook!.Original(Label(a, "igColorEdit4"), b, c), _ => { });
         var bIT = new HookBox<WInputText>();
-        Add("igInputText", bIT, (a, b, c, d, e, f) => bIT.Hook!.Original(Label(a), b, c, d, e, f), _ => { });
+        Add("igInputText", bIT, (a, b, c, d, e, f) => bIT.Hook!.Original(Label(a, "igInputText"), b, c, d, e, f), _ => { });
         var bITH = new HookBox<WInputTextHint>();
-        Add("igInputTextWithHint", bITH, (a, b, c, d, e, f, g) => bITH.Hook!.Original(Label(a), Label(b), c, d, e, f, g), _ => { });
+        Add("igInputTextWithHint", bITH, (a, b, c, d, e, f, g) => bITH.Hook!.Original(Label(a, "igInputTextWithHint"), Label(b, "igInputTextWithHint"), c, d, e, f, g), _ => { });
         // 表格列标题（TableSetupColumn）与工具提示（SetTooltip）——常见但此前漏挂：
         // 前者是"表格里的列名"（实测 TeleporterPlugin 的 Alias/Aetheryte 就是它），后者是悬停提示。
         var bTsc = new HookBox<V4>();
-        Add("igTableSetupColumn", bTsc, (a, b, c, d) => bTsc.Hook!.Original(Label(a), b, c, d), _ => { });
+        Add("igTableSetupColumn", bTsc, (a, b, c, d) => bTsc.Hook!.Original(Label(a, "igTableSetupColumn"), b, c, d), _ => { });
         // ⚠ **不挂 igSetTooltip**：cimgui 对可变参数函数有独立的 `V` 后缀导出（igSetTooltipV），
         //    说明 `igSetTooltip` 是 varargs（`SetTooltip(const char* fmt, ...)`）。
         //    用固定签名委托挂 varargs → x64 调用方需预留 XMM 溢出区而托管封送不保证 →
@@ -348,11 +365,14 @@ public sealed unsafe class ImGuiHookService : IDisposable
                      (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : ""));
     }
 
-    /// <summary> 控件标签查表：命中返回中文指针，否则原指针。异常绝不外抛。 </summary>
-    private nint Label(nint p)
+    /// <summary>
+    /// 控件标签查表：命中返回中文指针，否则原指针。异常绝不外抛。
+    /// exportName 仅用于调试统计（按具体控件分别计数，便于定位"哪个控件的标签没被替换"）。
+    /// </summary>
+    private nint Label(nint p, string exportName = "控件")
     {
         if (p == 0 || !_replacement.Enabled || SuppressReplacement) return p;
-        var rep = TryLookup(p, 0, "控件");
+        var rep = TryLookup(p, 0, DebugStats ? exportName : "控件");
         return rep != 0 ? rep : p;
     }
 
