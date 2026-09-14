@@ -86,6 +86,14 @@ public sealed class WindowReplaceWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("打开候选文案目录（源码提取产出的未翻译清单）。");
         ImGui.SameLine();
+        if (ImGui.Button("全部预翻译"))
+        {
+            // 用旧项目词典给**所有插件**的候选套用现成译文（不调 AI、零成本）
+            PrefillAll();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("用旧项目词典（我的翻译.json 等）给所有插件的候选文案套用已有译文。\n已翻译过的不动；命中才填，剩下的再交给机翻。");
+        ImGui.SameLine();
         if (ImGui.Button("重新扫描"))
         {
             // 清缓存 + 重读目录与表，解决"删了 json 仍显示已翻译"的问题
@@ -224,6 +232,53 @@ public sealed class WindowReplaceWindow : Window
         }
     }
 
+    /// <summary> 对单个插件执行预翻译（用旧词典套用现成译文，不调 AI）。 </summary>
+    private void PrefillOne(string plugin)
+    {
+        var (_, untranslated) = _replacement.GetWindowEntries(plugin);
+        var (hit, pairs) = _plugin.OldDict.Prefill(untranslated);
+        if (hit == 0)
+        {
+            _summary = _plugin.OldDict.Loaded
+                ? $"{plugin}：旧词典未命中任何待翻条目（词典 {_plugin.OldDict.Count} 条）。"
+                : "旧词典未加载（检查「AI 设置」里的词典目录）。";
+            return;
+        }
+        var dict = pairs.ToDictionary(p => p.En, p => p.Zh, StringComparer.Ordinal);
+        _replacement.MergeWindowEntries(plugin, dict);
+        Invalidate(plugin);
+        var left = untranslated.Count - hit;
+        _summary = $"{plugin}：预翻译命中 {hit} 条（剩余 {left} 条可机翻）。";
+        _plugin.AppLog.Info($"[预翻译] {plugin} 命中 {hit} 条，剩余 {left} 条");
+    }
+
+    /// <summary> 对所有插件执行预翻译。 </summary>
+    private void PrefillAll()
+    {
+        if (!_plugin.OldDict.Loaded)
+        {
+            _summary = "旧词典未加载（词典目录可能未探测到，可在「AI 设置」手动指定）。";
+            return;
+        }
+        var totalHit = 0;
+        var totalLeft = 0;
+        var plugins = _replacement.GetWindowPlugins();
+        foreach (var (name, _, _) in plugins)
+        {
+            var (_, untranslated) = _replacement.GetWindowEntries(name);
+            var (hit, pairs) = _plugin.OldDict.Prefill(untranslated);
+            if (hit > 0)
+            {
+                _replacement.MergeWindowEntries(name, pairs.ToDictionary(p => p.En, p => p.Zh, StringComparer.Ordinal));
+                Invalidate(name);
+            }
+            totalHit += hit;
+            totalLeft += untranslated.Count - hit;
+        }
+        _summary = $"全部预翻译完成：{plugins.Count} 个插件共命中 {totalHit} 条（剩余 {totalLeft} 条待机翻）。";
+        _plugin.AppLog.Info($"[预翻译] {_summary}");
+    }
+
     /// <summary> 用资源管理器打开目录（不存在则创建）。 </summary>
     private void OpenDir(string path)
     {
@@ -261,6 +316,13 @@ public sealed class WindowReplaceWindow : Window
                     _mt.StartWindowPlugin(plugin);
                 }
             }
+            ImGui.SameLine();
+            if (ImGui.Button("预翻译本插件"))
+            {
+                PrefillOne(plugin);
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("用旧项目词典给该插件的候选文案套用已有译文（不调 AI）。\n已翻译过的不覆盖；剩下的可再点「翻译全部缺失」机翻。");
             ImGui.SameLine();
             if (ImGui.Button("重读本插件"))
             {

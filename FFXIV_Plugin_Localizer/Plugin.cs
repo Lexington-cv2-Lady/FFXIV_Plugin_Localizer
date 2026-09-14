@@ -39,6 +39,7 @@ public sealed class Plugin : IDalamudPlugin
     public SourceExtractWindow SourceExtractWindow { get; }
     public SourceExtractService SourceExtract { get; }
     public WikiGlossaryService Wiki { get; }
+    public OldDictionaryService OldDict { get; }
 
     public Plugin()
     {
@@ -76,6 +77,9 @@ public sealed class Plugin : IDalamudPlugin
         // wiki 官方术语表（可选）：联动旧项目词典目录，加载后作为替换最高优先级词源 + 机翻参考
         Wiki = new WikiGlossaryService(AppLog);
         EnsureWikiDir();   // 内部：探测目录 → Wiki.Load → Replacement.SetWikiTerms
+        // 本项目词典（预翻译用）：独立于旧项目，放本插件数据目录
+        OldDict = new OldDictionaryService(AppLog);
+        EnsureDictDir();
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
             () => Configuration.WidgetHooks, Replacement);
         Hook.DebugStats = Configuration.DebugHookLog;
@@ -228,6 +232,36 @@ public sealed class Plugin : IDalamudPlugin
         {
             Log.Warning($"[wiki] 术语目录准备失败：{ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 准备**本项目自己的**词典目录（默认 = 插件数据目录\词典目录），并加载其中的「我的翻译.json」等。
+    /// ⚠ 与旧项目完全独立：不读旧项目词典；目录不存在则创建（供用户放入自己的译文）。
+    /// </summary>
+    private void EnsureDictDir()
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(Configuration.DictDir))
+            {
+                Configuration.DictDir = Path.Combine(PluginInterface.GetPluginConfigDirectory(), "词典目录");
+                Configuration.Save();
+            }
+            Directory.CreateDirectory(Configuration.DictDir);
+            var n = OldDict.Load(Configuration.DictDir);
+            Log.Information($"[预翻译] 本项目词典目录 {Configuration.DictDir}，已载入 {n} 条");
+        }
+        catch (Exception ex)
+        {
+            Log.Warning($"[预翻译] 词典目录准备失败：{ex.Message}");
+        }
+    }
+
+    /// <summary> 重新加载本项目词典（UI 调用）。 </summary>
+    public int ReloadOldDict()
+    {
+        EnsureDictDir();
+        return OldDict.Load(Configuration.DictDir);
     }
 
     /// <summary> 重新加载 wiki 术语表并让替换层生效（UI「加载」按钮调用；含重新探测旧项目目录）。 </summary>

@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
@@ -191,6 +192,39 @@ public sealed class AiSettingsWindow : Window
                 $"【已启用】 已加载 {_plugin.Wiki.Count} 条官方术语（{string.Join("、", _plugin.Wiki.CategoryCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）");
         else
             Ui.Hint("未加载术语表。装了旧项目插件会自动读取其术语；也可在上方手动指定目录后点「自动探测并加载」。");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        // ── 本项目词典（预翻译用；独立于旧项目） ──
+        ImGui.TextUnformatted("本项目词典（预翻译用，独立于旧项目）：");
+        Ui.Hint("「插件翻译」里的「预翻译」会读这里的「我的翻译.json」等文件，把现成译文直接套用到候选文案（不调 AI）。\n" +
+                "目录默认在本插件数据目录下，与旧项目的词典互不影响。");
+
+        if (ImGui.Button("打开词典目录"))
+        {
+            try
+            {
+                Directory.CreateDirectory(cfg.DictDir);
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{cfg.DictDir}\"") { UseShellExecute = true });
+            }
+            catch (Exception ex) { _plugin.AppLog.Error("打开词典目录失败：" + ex.Message); }
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("重载词典"))
+        {
+            var n = _plugin.ReloadOldDict();
+            _testResult = n > 0 ? $"本项目词典已重载 {n} 条（{cfg.DictDir}）" : $"词典目录为空或无「我的翻译.json」（{cfg.DictDir}）";
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("重新读取词典目录下的译文文件。放入/修改「我的翻译.json」后点它即可。");
+
+        if (_plugin.OldDict.Loaded)
+            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f),
+                $"【已启用】 本项目词典 {_plugin.OldDict.Count} 条（{string.Join("、", _plugin.OldDict.SourceCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）");
+        else
+            Ui.Hint($"本项目词典为空（{cfg.DictDir}）。把「我的翻译.json」放进去再点「重载词典」即可用于预翻译。");
 
         ImGui.Spacing();
         ImGui.Separator();

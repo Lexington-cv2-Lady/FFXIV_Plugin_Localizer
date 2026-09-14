@@ -15,6 +15,13 @@ public class Configuration : IPluginConfiguration
     /// <summary> wiki 术语表目录（含 任务.json / 物品.json 等的目录）。 </summary>
     public string WikiDir { get; set; } = "";
 
+    /// <summary>
+    /// **本项目自己的**词典目录（含「我的翻译.json」等），用于「预翻译」套用现成译文。
+    /// ⚠ 与旧项目**完全独立**：不读取/写入旧项目的词典目录。默认 = 插件数据目录\词典目录（留空即用默认）。
+    /// （wiki 官方术语表是另一回事，它按官方译名联动旧项目，属只读共享。）
+    /// </summary>
+    public string DictDir { get; set; } = "";
+
     /// <summary> 报错日志导出目录（空 = 用插件数据目录 pluginConfigs\&lt;ID&gt;\）。 </summary>
     public string LogExportPath { get; set; } = "";
 
