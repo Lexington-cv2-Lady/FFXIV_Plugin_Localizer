@@ -46,6 +46,7 @@ public sealed unsafe class ReplacementService
     private HashSet<ulong> _hashes = new();                                    // 英文键 FNV（热路径预筛）
     private readonly Dictionary<string, nint> _ptrs = new(StringComparer.Ordinal); // 英文 → 中文指针
     private readonly List<nint> _graveyard = new();                            // 已弃用的中文指针（仅 Dispose 释放，避免渲染线程 use-after-free）
+    private Dictionary<string, string>? _wikiTerms;                            // wiki 官方术语（优先级最高，可选）
 
     /// <summary>
     /// 还原英文：立即清空**生效的合并表**（安装器表 + 窗口表的内存副本一并清掉，替换立刻失效），
@@ -68,6 +69,15 @@ public sealed unsafe class ReplacementService
     {
         Load();
         LoadWindowTables();
+        RebuildMerged();
+    }
+
+    /// <summary> 设置 wiki 官方术语表（null 或空 = 不启用）。优先级最高，重建生效表。 </summary>
+    public void SetWikiTerms(Dictionary<string, string>? terms)
+    {
+        _wikiTerms = terms is { Count: > 0 } ? terms : null;
+        RebuildMerged();
+        _appLog.Info($"[wiki] 生效术语 {_wikiTerms?.Count ?? 0} 条（优先级最高）");
     }
 
     /// <summary> 替换开关（只影响绘制替换；表的管理不受影响）。 </summary>
@@ -152,7 +162,7 @@ public sealed unsafe class ReplacementService
         }
     }
 
-    /// <summary> 重建合并查找表（安装器表优先，窗口表不覆盖同键）。
+    /// <summary> 重建合并查找表。优先级：**wiki 官方术语 > 安装器表 > 各插件窗口表**（先写入者优先）。
     /// ⚠ 旧中文指针**不在运行时释放**：渲染线程可能正拿着某个指针绘制（后台机翻线程重建表时会并发），
     /// 立即 Free 会造成 use-after-free 崩溃。统一塞进 _graveyard，只在 Dispose 释放；重建不频繁，内存代价可忽略。 </summary>
     private void RebuildMerged()
@@ -163,14 +173,17 @@ public sealed unsafe class ReplacementService
             _ptrs.Clear();
             _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             _hashes = new HashSet<ulong>();
+            // ① wiki 官方术语最高优先（物品/技能名机翻几乎必错，必须用官方译名）
+            if (_wikiTerms is { Count: > 0 })
+            {
+                foreach (var (en, zh) in _wikiTerms) AddMerged(en, zh);
+            }
+            // ② 安装器对照表
             foreach (var (en, zh) in _installerSource) AddMerged(en, zh);
+            // ③ 各插件窗口表（AddMerged 内部已是"已有键跳过"，天然实现优先级）
             foreach (var table in _windowSources.Values)
             {
-                foreach (var (en, zh) in table)
-                {
-                    if (_table.ContainsKey(en)) continue; // 安装器表优先
-                    AddMerged(en, zh);
-                }
+                foreach (var (en, zh) in table) AddMerged(en, zh);
             }
         }
     }

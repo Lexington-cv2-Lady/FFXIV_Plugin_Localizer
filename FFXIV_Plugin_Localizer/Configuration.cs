@@ -9,6 +9,12 @@ public class Configuration : IPluginConfiguration
 {
     public int Version { get; set; }
 
+    // ── wiki 术语表（官方译名；来自旧项目维护的 6.2 万条对照：物品/技能/任务/成就/种族/情感动作）──
+    /// <summary> 是否启用 wiki 术语表。启用后术语优先于机翻与普通对照（物品名机翻几乎必错，用官方译名）。 </summary>
+    public bool WikiEnabled { get; set; } = true;
+    /// <summary> wiki 术语表目录（含 任务.json / 物品.json 等的目录）。 </summary>
+    public string WikiDir { get; set; } = "";
+
     /// <summary> 报错日志导出目录（空 = 用插件数据目录 pluginConfigs\&lt;ID&gt;\）。 </summary>
     public string LogExportPath { get; set; } = "";
 

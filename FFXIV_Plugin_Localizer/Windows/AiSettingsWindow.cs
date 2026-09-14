@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Numerics;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
@@ -148,6 +149,46 @@ public sealed class AiSettingsWindow : Window
             cfg.AiBatchSize = Math.Clamp(batch, 1, 200);
             cfg.Save();
         }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        // ── wiki 官方术语表（术语优先于机翻，物品/技能名必须用官方译名） ──
+        ImGui.TextUnformatted("wiki 术语表（官方译名，优先级最高）：");
+        var wikiOn = cfg.WikiEnabled;
+        if (ImGui.Checkbox("启用 wiki 术语表", ref wikiOn))
+        {
+            cfg.WikiEnabled = wikiOn;
+            cfg.Save();
+            _plugin.ReloadWiki(); // 立即生效
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("启用后，命中术语的英文一律用官方译名（如物品名、技能名），\n优先于机翻和普通对照表。中文化界面时更准确统一。");
+
+        var wikiDir = cfg.WikiDir;
+        ImGui.SetNextItemWidth(Math.Max(200f, ImGui.GetContentRegionAvail().X - 60f));
+        if (ImGui.InputTextWithHint("##WikiDir", "术语表目录（含 物品.json / 技能_动作.json 等）", ref wikiDir, 512))
+        {
+            cfg.WikiDir = wikiDir.Trim();
+            cfg.Save();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("加载"))
+        {
+            var n = _plugin.ReloadWiki();
+            _testResult = n > 0
+                ? $"wiki 术语已加载 {n} 条并生效（各类：{string.Join("、", _plugin.Wiki.CategoryCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）"
+                : $"未在目录中找到术语文件：{cfg.WikiDir}";
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("从该目录读取全部术语 json（旧项目维护的 6 类官方译名对照）。");
+
+        if (_plugin.Wiki.Loaded)
+            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f),
+                $"✔ 已加载 {_plugin.Wiki.Count} 条官方术语（{string.Join("、", _plugin.Wiki.CategoryCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）");
+        else
+            Ui.Hint("未加载术语表。可把旧项目的 wiki_术语对照 目录内容放入上方目录后点「加载」。");
 
         ImGui.Spacing();
         ImGui.Separator();

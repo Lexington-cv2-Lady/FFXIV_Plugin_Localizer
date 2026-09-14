@@ -38,6 +38,7 @@ public sealed class MtTranslateService
     private readonly AppLog _appLog;
     private readonly ReplacementService _replacement;
     private readonly Configuration _cfg;
+    private WikiGlossaryService? _wiki;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(90) };
 
     /// <summary> 翻译任务是否在跑（窗口据此禁用按钮）。 </summary>
@@ -49,8 +50,7 @@ public sealed class MtTranslateService
     /// <summary> 外部（如启动检查）写入提示，不改运行状态。 </summary>
     public void Notify(string message) => Status = message;
 
-    public MtTranslateService(AppLog appLog, ReplacementService replacement, Configuration cfg)
-    {
+    public MtTranslateService(AppLog appLog, ReplacementService replacement, Configuration cfg)    {
         _appLog = appLog;
         _replacement = replacement;
         _cfg = cfg;
@@ -167,8 +167,10 @@ public sealed class MtTranslateService
         _appLog.Info($"[机翻] {Status}");
     }
 
-    /// <summary>
-    /// 送一批（≤单批条数）翻译。**用「原文/译文」成对数组协议**（与本地文件格式一致，抄旧项目风格）：
+    /// <summary> 注入 wiki 术语表（送翻时附带相关术语作对照，保证游戏专有名词译名一致）。 </summary>
+    public void SetWiki(WikiGlossaryService? wiki) => _wiki = wiki;
+
+    /// <summary> 送一批（≤单批条数）翻译。**用「原文/译文」成对数组协议**（与本地文件格式一致，抄旧项目风格）：
     /// 窗口文案常含 <c>* [ ] : ' " ,</c> 等字符，若让其当 JSON **键**回写必然大量转义失败
     /// （实测 40 条失败 30 条）；成对数组里原文是 JSON 的**值**，序列化天然安全。
     /// 发送 <c>[{原文:"...",译文:""}]</c>，要求 AI 只回填译文，按**下标**对应回原文（不依赖 AI 复述原文）。
@@ -179,20 +181,28 @@ public sealed class MtTranslateService
         var items = batch.Keys.ToList(); // 保持插入顺序
         var userJson = TranslationFile.ToPairJson(items);
 
+        var system = "你是游戏插件界面的翻译引擎。用户会给出一个 JSON 数组，每个元素形如 " +
+                     "{\"en\": \"英文原文\", \"zh\": \"\"}。请把每条的 \"en\" 翻译成简洁自然的简体中文（游戏/UI 语境），" +
+                     "填入同一条的 \"zh\" 字段。保持数组长度、顺序、每条的 \"en\" 完全不变，只填 \"zh\"。" +
+                     "只输出这个 JSON 数组本身，不要任何解释或代码块标记。";
+        // 附带相关官方术语（词汇出现在本批文案中的），确保游戏专有名词译名与官方一致
+        if (_wiki is { Loaded: true })
+        {
+            var relevant = _wiki.FindRelevant(items, 80);
+            if (relevant.Count > 0)
+            {
+                system += "\n\n以下是《最终幻想14》官方译名对照，涉及这些词时必须使用官方译法（不要自行意译）：\n" +
+                          string.Join("\n", relevant.Select(t => $"{t.En} = {t.Zh}"));
+            }
+        }
+
         var payload = JsonSerializer.Serialize(new
         {
             model,
             temperature = Math.Clamp(_cfg.AiTemperature, 0f, 2f),
             messages = new[]
             {
-                new
-                {
-                    role = "system",
-                    content = "你是游戏插件界面的翻译引擎。用户会给出一个 JSON 数组，每个元素形如 " +
-                              "{\"en\": \"英文原文\", \"zh\": \"\"}。请把每条的 \"en\" 翻译成简洁自然的简体中文（游戏/UI 语境），" +
-                              "填入同一条的 \"zh\" 字段。保持数组长度、顺序、每条的 \"en\" 完全不变，只填 \"zh\"。" +
-                              "只输出这个 JSON 数组本身，不要任何解释或代码块标记。"
-                },
+                new { role = "system", content = system },
                 new { role = "user", content = userJson }
             }
         });

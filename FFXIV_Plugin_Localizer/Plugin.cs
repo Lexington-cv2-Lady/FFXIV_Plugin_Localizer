@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
@@ -37,6 +38,7 @@ public sealed class Plugin : IDalamudPlugin
     public WindowReplaceWindow WindowReplaceWindow { get; }
     public SourceExtractWindow SourceExtractWindow { get; }
     public SourceExtractService SourceExtract { get; }
+    public WikiGlossaryService Wiki { get; }
 
     public Plugin()
     {
@@ -67,12 +69,21 @@ public sealed class Plugin : IDalamudPlugin
             Configuration.Save();
         }
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
+        // wiki 官方术语表（可选）：加载后作为替换最高优先级词源 + 机翻参考
+        Wiki = new WikiGlossaryService(AppLog);
+        EnsureWikiDir();
         Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Replacement.Enabled = Configuration.ReplacementEnabled;
         Replacement.SyncFdcnOnStartup(); // 启动同步：FDCN 文件指纹变了才自动重导；未装 FDCN 用内置翻译包打底
+        if (Configuration.WikiEnabled && !string.IsNullOrWhiteSpace(Configuration.WikiDir))
+        {
+            Wiki.Load(Configuration.WikiDir);
+            Replacement.SetWikiTerms(new Dictionary<string, string>(Wiki.All, StringComparer.Ordinal));
+        }
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
             () => Configuration.WidgetHooks, Replacement);
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
+        Mt.SetWiki(Wiki); // 机翻时附带官方术语对照，保证专有名词译名一致
         MainWindow = new MainWindow(this);
         LogWindow = new LogWindow(this);
         TranslationWindow = new TranslationWindow(this, Replacement, Mt);
@@ -161,6 +172,35 @@ public sealed class Plugin : IDalamudPlugin
     {
         Replacement.ClearActive();
         AppLog.Info("[还原] 界面已还原为英文（对照表文件未删除）");
+    }
+
+    /// <summary> 在插件数据目录下建 wiki 术语目录（放术语 json）；已设置则用设置值。 </summary>
+    private void EnsureWikiDir()
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(Configuration.WikiDir))
+            {
+                Configuration.WikiDir = Path.Combine(PluginInterface.GetPluginConfigDirectory(), WikiGlossaryService.DirName);
+                Configuration.Save();
+                Log.Information($"[wiki] 术语目录默认为 {Configuration.WikiDir}");
+            }
+            Directory.CreateDirectory(Configuration.WikiDir);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning($"[wiki] 术语目录准备失败：{ex.Message}");
+        }
+    }
+
+    /// <summary> 重新加载 wiki 术语表并让替换层生效（设置目录后调用）。 </summary>
+    public int ReloadWiki()
+    {
+        var n = Wiki.Load(Configuration.WikiDir);
+        Replacement.SetWikiTerms(Configuration.WikiEnabled && n > 0
+            ? new Dictionary<string, string>(Wiki.All, StringComparer.Ordinal)
+            : null);
+        return n;
     }
 
     // ── 启动自动检查：加载约 10 秒后扫一次缺口，静默/按配置翻译（插件更新后新文案也走这条） ──
