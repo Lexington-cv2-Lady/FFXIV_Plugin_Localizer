@@ -49,6 +49,12 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte W3u(nint a, nint b, uint c);                           // igBeginCombo / igCollapsingHeader_BoolPtr / igBeginTabItem / igColorEdit3/4
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void V1(nint a);                                             // igSetTooltip(text) —— void 返回
+    /// <summary> igTableSetupColumn(label, flags, float init_width_or_weight, uint user_id)——表格列标题。
+    /// ⚠ 精确签名经绑定程序集核实为 **4 参数**（label, ImGuiTableColumnFlags, float, ImGuiID），不是 2 个。 </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void V4(nint a, uint flags, float width, uint userId);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte W4bb(nint a, nint b, byte c, byte d);                  // igMenuItem_Bool
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte WDragFloat(nint label, nint v, float speed, float min, float max, nint fmt, uint flags);
@@ -281,6 +287,12 @@ public sealed unsafe class ImGuiHookService : IDisposable
         Add("igInputText", bIT, (a, b, c, d, e, f) => bIT.Hook!.Original(Label(a), b, c, d, e, f), _ => { });
         var bITH = new HookBox<WInputTextHint>();
         Add("igInputTextWithHint", bITH, (a, b, c, d, e, f, g) => bITH.Hook!.Original(Label(a), Label(b), c, d, e, f, g), _ => { });
+        // 表格列标题（TableSetupColumn）与工具提示（SetTooltip）——常见但此前漏挂：
+        // 前者是"表格里的列名"（实测 TeleporterPlugin 的 Alias/Aetheryte 就是它），后者是悬停提示。
+        var bTsc = new HookBox<V4>();
+        Add("igTableSetupColumn", bTsc, (a, b, c, d) => bTsc.Hook!.Original(Label(a), b, c, d), _ => { });
+        var bTip = new HookBox<V1>();
+        Add("igSetTooltip", bTip, a => bTip.Hook!.Original(Label(a)), _ => { });
 
         _appLog.Info($"[钩子] 控件标签桩：{_widgetHooks.Count} 个挂接成功" +
                      (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : ""));
