@@ -103,9 +103,23 @@ public sealed class WindowReplaceWindow : Window
         return data;
     }
 
-    private void DrawPluginEditor(string plugin)
+    /// <summary> 用资源管理器打开目录（不存在则创建）。 </summary>
+    private void OpenDir(string path)
     {
-        var (translated, untranslated) = GetCached(plugin);
+        try
+        {
+            System.IO.Directory.CreateDirectory(path);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            _summary = "打开目录失败：" + ex.Message;
+            _plugin.AppLog.Error("[窗口] 打开目录失败：" + ex.Message);
+        }
+    }
+
+    private void DrawPluginEditor(string plugin)
+    {        var (translated, untranslated) = GetCached(plugin);
 
         if (_mt.Running)
         {
@@ -125,6 +139,20 @@ public sealed class WindowReplaceWindow : Window
                     _mt.StartWindowPlugin(plugin);
                 }
             }
+            ImGui.SameLine();
+            if (ImGui.Button("打开翻译目录"))
+            {
+                OpenDir(_replacement.WindowTableDir);
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("打开窗口对照表所在目录（窗口翻译\\<插件名>.json），可直接查看/备份/分享。");
+            ImGui.SameLine();
+            if (ImGui.Button("打开候选目录"))
+            {
+                OpenDir(System.IO.Path.Combine(Plugin.PluginInterface.GetPluginConfigDirectory(), ReplacementService.CandidateDirName));
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("打开候选文案目录（未翻译清单：源码提取 / 历史扫描产物）。");
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("把该插件全部未翻译条目分批送智谱翻译（免费模型，自动限速）。");
         }

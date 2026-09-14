@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
@@ -155,6 +156,22 @@ public sealed class SourceExtractWindow : Window
         }
         ImGui.EndDisabled();
 
+        // 打开提取结果目录（未翻译 json 所在处）——删掉扫描窗口后曾丢失此入口
+        ImGui.SameLine();
+        if (ImGui.Button("打开提取目录"))
+        {
+            OpenOutputDir();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("在资源管理器打开提取结果目录（数据目录\\文案扫描\\<插件名>_源码提取.json）。\n未翻译清单就放在这里，可交给翻译管线或外部 AI。");
+        ImGui.SameLine();
+        if (ImGui.Button("打开仓库目录"))
+        {
+            OpenRepoDir();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("在资源管理器打开已克隆的源码仓库目录（数据目录\\源码仓库\\）。");
+
         if (_svc.Running)
         {
             Ui.ColoredWrapped(new Vector4(1f, 0.8f, 0.3f, 1f), _svc.Status);
@@ -208,6 +225,27 @@ public sealed class SourceExtractWindow : Window
                     ImGui.PopID();
                 }
             }
+        }
+    }
+
+    /// <summary> 打开提取结果目录（未翻译 json 所在处）。 </summary>
+    private void OpenOutputDir() => OpenDir(Path.Combine(Plugin.PluginInterface.GetPluginConfigDirectory(), Services.SourceExtractService.OutputDirName));
+
+    /// <summary> 打开已克隆的源码仓库目录。 </summary>
+    private void OpenRepoDir() => OpenDir(Path.Combine(Plugin.PluginInterface.GetPluginConfigDirectory(), Services.SourceExtractService.RepoDirName));
+
+    /// <summary> 用资源管理器打开目录（不存在则先创建）。 </summary>
+    private void OpenDir(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            _summary = "打开目录失败：" + ex.Message;
+            _plugin.AppLog.Error("[源码] 打开目录失败：" + ex.Message);
         }
     }
 
