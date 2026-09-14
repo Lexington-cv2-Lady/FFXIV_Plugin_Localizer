@@ -48,8 +48,6 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private delegate byte W2b(nint a, byte b);                                   // igBeginMenu / igRadioButton_Bool
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte W3u(nint a, nint b, uint c);                           // igBeginCombo / igCollapsingHeader_BoolPtr / igBeginTabItem / igColorEdit3/4
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void V1(nint a);                                             // igSetTooltip(text) —— void 返回
     /// <summary> igTableSetupColumn(label, flags, float init_width_or_weight, uint user_id)——表格列标题。
     /// ⚠ 精确签名经绑定程序集核实为 **4 参数**（label, ImGuiTableColumnFlags, float, ImGuiID），不是 2 个。 </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -340,8 +338,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
         // 前者是"表格里的列名"（实测 TeleporterPlugin 的 Alias/Aetheryte 就是它），后者是悬停提示。
         var bTsc = new HookBox<V4>();
         Add("igTableSetupColumn", bTsc, (a, b, c, d) => bTsc.Hook!.Original(Label(a), b, c, d), _ => { });
-        var bTip = new HookBox<V1>();
-        Add("igSetTooltip", bTip, a => bTip.Hook!.Original(Label(a)), _ => { });
+        // ⚠ **不挂 igSetTooltip**：cimgui 对可变参数函数有独立的 `V` 后缀导出（igSetTooltipV），
+        //    说明 `igSetTooltip` 是 varargs（`SetTooltip(const char* fmt, ...)`）。
+        //    用固定签名委托挂 varargs → x64 调用方需预留 XMM 溢出区而托管封送不保证 →
+        //    **栈腐蚀** → 破坏调用方栈帧（实测表现为「Ctrl+V 要按多次才粘贴成功」等输入异常）。
+        //    曾误挂过，2026-09-14 移除。
 
         _appLog.Info($"[钩子] 控件标签桩：{_widgetHooks.Count} 个挂接成功" +
                      (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : ""));
