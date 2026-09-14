@@ -19,7 +19,8 @@ public sealed class SourceExtractWindow : Window
     private readonly SourceExtractService _svc;
     private readonly ReplacementService _replacement;
     private readonly Dictionary<string, (int Total, int Translated, bool Done)> _progressCache = new();
-    private List<(string Name, string RepoUrl)> _plugins = new();
+    private List<(string Name, string DisplayName, string RepoUrl)> _plugins = new();
+    private string _filter = "";   // 搜索过滤（内部名/显示名/仓库地址）
     private bool _listLoaded;
     private string _manualUrl = "";
     private string _summary = "";
@@ -194,6 +195,9 @@ public sealed class SourceExtractWindow : Window
         }
         ImGui.TextDisabled($"已安装且带 GitHub 地址的插件：{_plugins.Count} 个");
         ImGui.SameLine();
+        ImGui.SetNextItemWidth(200f);
+        ImGui.InputTextWithHint("##srcFilter", "搜索插件（内部名/显示名）", ref _filter, 128);
+        ImGui.SameLine();
         if (ImGui.Button("刷新列表##src"))
         {
             RefreshList();
@@ -209,9 +213,20 @@ public sealed class SourceExtractWindow : Window
                 {
                     Ui.Hint("没有找到带 GitHub 地址的已装插件（可在上方手动填写仓库地址）。");
                 }
+                var filter = _filter.Trim();
+                var shown = 0;
                 for (var i = 0; i < _plugins.Count; i++)
                 {
-                    var (name, url) = _plugins[i];
+                    var (name, displayName, url) = _plugins[i];
+                    // 搜索过滤：内部名 / 显示名 / 仓库地址，任一包含即可
+                    if (filter.Length > 0 &&
+                        !name.Contains(filter, StringComparison.OrdinalIgnoreCase) &&
+                        !displayName.Contains(filter, StringComparison.OrdinalIgnoreCase) &&
+                        !url.Contains(filter, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    shown++;
                     ImGui.PushID(i);
                     if (ImGui.Button("提取##go"))
                     {
@@ -219,6 +234,15 @@ public sealed class SourceExtractWindow : Window
                     }
                     ImGui.SameLine();
                     ImGui.TextUnformatted(name);
+                    // 显示名与内部名不同时补注（用户在安装器里看到的是显示名，如 Character Data Sync）
+                    if (displayName.Length > 0 &&
+                        !string.Equals(displayName, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        ImGui.SameLine();
+                        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+                        ImGui.TextUnformatted($"（显示名：{displayName}）");
+                        ImGui.PopStyleColor();
+                    }
                     // 标注三种状态：已装中文版 / 已翻译完成 / 待提取或待翻译
                     ImGui.SameLine();
                     if (_chineseCache.TryGetValue(name, out var zh) && zh > 0)
@@ -258,7 +282,7 @@ public sealed class SourceExtractWindow : Window
         _listLoaded = true;
         _chineseCache.Clear();
         _progressCache.Clear();
-        foreach (var (name, _) in _plugins)
+        foreach (var (name, _, _) in _plugins)
         {
             try
             {

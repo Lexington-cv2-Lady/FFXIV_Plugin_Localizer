@@ -216,9 +216,13 @@ public sealed class SourceExtractService
     }
 
     /// <summary> 已装插件（名称、GitHub 地址）；取不到地址的也列出，便于手工补。 </summary>
-    public List<(string Name, string RepoUrl)> ListPluginsWithRepo()
+    /// <summary>
+    /// 列出已装且带 GitHub 地址的插件：**内含显示名**（清单的 Name 字段，如 `Character Data Sync`），
+    /// 因为用户在安装器里看到的是显示名，而内部名是 `Dalamud.CharacterSync`——两者不同会导致"找不到"。
+    /// </summary>
+    public List<(string Name, string DisplayName, string RepoUrl)> ListPluginsWithRepo()
     {
-        var result = new List<(string, string)>();
+        var result = new List<(string, string, string)>();
         var launcherDir = Path.GetDirectoryName(Path.GetDirectoryName(_configDir()));
         foreach (var rootName in new[] { "installedPlugins", "devPlugins" })
         {
@@ -228,6 +232,7 @@ public sealed class SourceExtractService
             {
                 var name = Path.GetFileName(pluginDir);
                 string url = "";
+                var displayName = "";
                 try
                 {
                     var manifest = Directory.EnumerateFiles(pluginDir, name + ".json", SearchOption.AllDirectories).FirstOrDefault();
@@ -236,12 +241,14 @@ public sealed class SourceExtractService
                         var text = File.ReadAllText(manifest);
                         var m = Regex.Match(text, "\"RepoUrl\"\\s*:\\s*\"([^\"]*)\"");
                         if (m.Success) url = m.Groups[1].Value;
+                        var n = Regex.Match(text, "\"Name\"\\s*:\\s*\"([^\"]*)\"");
+                        if (n.Success) displayName = n.Groups[1].Value;
                     }
                 }
                 catch { /* 清单坏了就留空 */ }
                 if (url.Contains("github.com", StringComparison.OrdinalIgnoreCase))
                 {
-                    result.Add((name, url.TrimEnd('/')));
+                    result.Add((name, displayName, url.TrimEnd('/')));
                 }
             }
         }
