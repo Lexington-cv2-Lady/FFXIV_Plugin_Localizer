@@ -577,7 +577,10 @@ public sealed unsafe class ReplacementService
         {
             var win = _windowSources.TryGetValue(plugin, out var t) ? t : new Dictionary<string, string>();
             translated = win.Select(kv => (kv.Key, kv.Value)).OrderBy(t => t.Item1, StringComparer.Ordinal).ToList();
-            untranslated = candidates.Keys.Where(k => !win.ContainsKey(k)).OrderBy(x => x, StringComparer.Ordinal).ToList();
+            // 待翻列表只列**值得翻译**的（排除 /命令、纯符号、键位名等，避免白送 AI 浪费额度）
+            untranslated = candidates.Keys
+                .Where(k => !win.ContainsKey(k) && TextHeuristics.IsTranslatable(k))
+                .OrderBy(x => x, StringComparer.Ordinal).ToList();
         }
         return (translated, untranslated);
     }
@@ -632,6 +635,29 @@ public sealed unsafe class ReplacementService
                 WriteWindowFile(plugin, table);
         }
         RebuildMerged();
+    }
+
+    /// <summary>
+    /// 某插件的翻译完成情况：返回（候选总数, 已翻译数, 是否已完成）。
+    /// 完成判定：只看**值得翻译**的候选（排除命令、纯符号、键位名等无需翻译项），
+    /// 且它们都在译文表里有非空译文。用于「源码提取」列表标注「已翻译」，避免重复提取。
+    /// </summary>
+    public (int Total, int Translated, bool Done) GetTranslationProgress(string plugin)
+    {
+        var candidates = ReadCandidates(plugin);
+        // 只统计"需要翻译"的条目：像 /tp、纯符号、Ctrl 这类本就不该翻，
+        // 否则插件永远卡在"14/15"显示未完成。
+        var need = candidates.Keys.Where(TextHeuristics.IsTranslatable).ToList();
+        int translatedCount;
+        List<string> missing;
+        lock (_lock)
+        {
+            var win = _windowSources.TryGetValue(plugin, out var t) ? t : new Dictionary<string, string>(StringComparer.Ordinal);
+            translatedCount = need.Count(k => win.ContainsKey(k));
+            missing = need.Where(k => !win.ContainsKey(k)).ToList();
+        }
+        var done = need.Count > 0 && missing.Count == 0;
+        return (need.Count, translatedCount, done);
     }
 
     /// <summary>

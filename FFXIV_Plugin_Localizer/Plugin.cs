@@ -90,7 +90,7 @@ public sealed class Plugin : IDalamudPlugin
         AiSettingsWindow = new AiSettingsWindow(this, Mt);
         WindowReplaceWindow = new WindowReplaceWindow(this, Replacement, Mt);
         SourceExtract = new SourceExtractService(AppLog, Configuration, PluginInterface.GetPluginConfigDirectory);
-        SourceExtractWindow = new SourceExtractWindow(this, SourceExtract);
+        SourceExtractWindow = new SourceExtractWindow(this, SourceExtract, Replacement);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
         WindowSystem.AddWindow(TranslationWindow);

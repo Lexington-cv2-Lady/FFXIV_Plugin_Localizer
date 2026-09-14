@@ -17,6 +17,8 @@ public sealed class SourceExtractWindow : Window
 {
     private readonly Plugin _plugin;
     private readonly SourceExtractService _svc;
+    private readonly ReplacementService _replacement;
+    private readonly Dictionary<string, (int Total, int Translated, bool Done)> _progressCache = new();
     private List<(string Name, string RepoUrl)> _plugins = new();
     private bool _listLoaded;
     private string _manualUrl = "";
@@ -27,11 +29,12 @@ public sealed class SourceExtractWindow : Window
     private bool? _testOk;          // 上次测试结果（null=未测）
     private string _testMessage = "";
 
-    public SourceExtractWindow(Plugin plugin, SourceExtractService svc)
+    public SourceExtractWindow(Plugin plugin, SourceExtractService svc, ReplacementService replacement)
         : base("源码提取###PluginLocalizerSource")
     {
         _plugin = plugin;
         _svc = svc;
+        _replacement = replacement;
         Size = new Vector2(680, 580);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -216,14 +219,23 @@ public sealed class SourceExtractWindow : Window
                     }
                     ImGui.SameLine();
                     ImGui.TextUnformatted(name);
-                    // 预先标注已装 DLL 是否已是中文版（避免白点）
-                    if (_chineseCache.TryGetValue(name, out var zh))
+                    // 标注三种状态：已装中文版 / 已翻译完成 / 待提取或待翻译
+                    ImGui.SameLine();
+                    if (_chineseCache.TryGetValue(name, out var zh) && zh > 0)
                     {
-                        ImGui.SameLine();
-                        if (zh > 0)
-                            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"（已是中文版·{zh} 条，无需提取）");
-                        else
-                            Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), "（原版英文）");
+                        Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"（已是中文版·{zh} 条，无需提取）");
+                    }
+                    else if (_progressCache.TryGetValue(name, out var pg) && pg.Done)
+                    {
+                        Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"【已翻译】{pg.Translated}/{pg.Total} 条（无需重复提取）");
+                    }
+                    else if (pg.Total > 0)
+                    {
+                        Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), $"待翻译 {pg.Translated}/{pg.Total} 条");
+                    }
+                    else
+                    {
+                        Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), "（未提取）");
                     }
                     ImGui.SameLine();
                     ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
@@ -245,6 +257,7 @@ public sealed class SourceExtractWindow : Window
         _plugins = _svc.ListPluginsWithRepo();
         _listLoaded = true;
         _chineseCache.Clear();
+        _progressCache.Clear();
         foreach (var (name, _) in _plugins)
         {
             try
@@ -255,6 +268,14 @@ public sealed class SourceExtractWindow : Window
             catch
             {
                 _chineseCache[name] = 0;
+            }
+            try
+            {
+                _progressCache[name] = _replacement.GetTranslationProgress(name);
+            }
+            catch
+            {
+                _progressCache[name] = (0, 0, false);
             }
         }
     }
