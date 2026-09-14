@@ -228,48 +228,53 @@ public sealed class SourceExtractWindow : Window
                     }
                     shown++;
                     ImGui.PushID(i);
+
+                    // ── 两行式排版，避免单行过长被窗口右缘截断 ──
+                    // 第一行：[提取] 内部名（显示名：X）  状态标注
                     if (ImGui.Button("提取##go"))
                     {
                         StartExtract(name, url);
                     }
                     ImGui.SameLine();
                     ImGui.TextUnformatted(name);
-                    // 显示名与内部名不同时补注（用户在安装器里看到的是显示名，如 Character Data Sync）
                     if (displayName.Length > 0 &&
                         !string.Equals(displayName, name, StringComparison.OrdinalIgnoreCase))
                     {
                         ImGui.SameLine();
                         ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-                        ImGui.TextUnformatted($"（显示名：{displayName}）");
+                        ImGui.TextUnformatted($"＝ {displayName}");
                         ImGui.PopStyleColor();
                     }
-                    // 标注三种状态：已装中文版 / 已翻译完成 / 待提取或待翻译
-                    ImGui.SameLine();
+
+                    // 状态标注：另起一行（不与名字抢宽度）
+                    var pg = _progressCache.TryGetValue(name, out var p0) ? p0 : (Total: 0, Translated: 0, Done: false);
                     if (_chineseCache.TryGetValue(name, out var zh) && zh > 0)
-                    {
-                        Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"（已是中文版·{zh} 条，无需提取）");
-                    }
-                    else if (_progressCache.TryGetValue(name, out var pg) && pg.Done)
-                    {
-                        Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"【已翻译】{pg.Translated}/{pg.Total} 条（无需重复提取）");
-                    }
+                        Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    （已是中文版·{zh} 条，无需提取）");
+                    else if (pg.Done)
+                        Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    【已翻译】{pg.Translated}/{pg.Total} 条（无需重复提取）");
                     else if (pg.Total > 0)
-                    {
-                        Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), $"待翻译 {pg.Translated}/{pg.Total} 条");
-                    }
+                        Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), $"    待翻译 {pg.Translated}/{pg.Total} 条");
                     else
-                    {
-                        Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), "（未提取）");
-                    }
-                    ImGui.SameLine();
+                        Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), "    （未提取）");
+
+                    // 第二行：仓库地址（灰色，自动换行）
                     ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-                    ImGui.TextUnformatted(url);
+                    ImGui.TextWrapped("    " + url);
                     ImGui.PopStyleColor();
+
                     if (_lastResult.TryGetValue(name, out var res))
                     {
                         Ui.ColoredWrapped(new Vector4(0.6f, 0.85f, 0.6f, 1f), "    " + res);
                     }
+                    ImGui.Spacing();
+
                     ImGui.PopID();
+                }
+                if (filter.Length > 0)
+                {
+                    ImGui.TextDisabled(filter.Length > 0 && shown == 0
+                        ? $"没有匹配「{filter}」的插件。"
+                        : $"（筛选后显示 {shown} 个）");
                 }
             }
         }
