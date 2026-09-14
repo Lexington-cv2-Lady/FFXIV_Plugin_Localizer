@@ -54,7 +54,8 @@ public sealed class Plugin : IDalamudPlugin
         Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Replacement.Enabled = Configuration.ReplacementEnabled;
         Replacement.SyncFdcnOnStartup(); // 启动同步：FDCN 文件指纹变了才自动重导；未装 FDCN 用内置翻译包打底
-        Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled, Replacement);
+        Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
+            () => Configuration.WidgetHooks, Replacement);
         Scan = new PluginScanService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         MainWindow = new MainWindow(this);

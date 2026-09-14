@@ -36,6 +36,33 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void TextExDelegate(nint text, nint textEnd, int flags);
 
+    // ── 控件标签桩（**只用 指针/float/int 签名**的控件；含 ImVec2 结构体的 igButton/igSelectable
+    //    与 varargs 的 igText 族**坚决不挂**——这两类是崩溃根源）。全部返回 bool（用 byte 接并原样返回）。──
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte W1(nint a);                                            // igTreeNode_Str
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte W2(nint a, nint b);                                    // igCheckbox
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte W2u(nint a, uint b);                                   // igCollapsingHeader_TreeNodeFlags / igTreeNodeEx_Str
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte W2b(nint a, byte b);                                   // igBeginMenu / igRadioButton_Bool
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte W3u(nint a, nint b, uint c);                           // igBeginCombo / igCollapsingHeader_BoolPtr / igBeginTabItem / igColorEdit3/4
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte W4bb(nint a, nint b, byte c, byte d);                  // igMenuItem_Bool
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WDragFloat(nint label, nint v, float speed, float min, float max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WDragInt(nint label, nint v, float speed, int min, int max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WSliderFloat(nint label, nint v, float min, float max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WSliderInt(nint label, nint v, int min, int max, nint fmt, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WInputText(nint label, nint buf, nuint bufSize, uint flags, nint cb, nint data);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WInputTextHint(nint label, nint hint, nint buf, nuint bufSize, uint flags, nint cb, nint data);
+
     private const int MaxTextLen = 1024;
 
     private readonly AppLog _appLog;
@@ -43,9 +70,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly IGameInteropProvider _interop;
     private readonly ReplacementService _replacement;
     private readonly Func<bool> _hooksEnabled;
+    private readonly Func<bool> _widgetHooksEnabled;
 
     private Hook<TextUnformattedDelegate>? _textHook;
     private Hook<TextExDelegate>? _textExHook;
+    private readonly List<IDisposable> _widgetHooks = new();
 
     /// <summary> 钩子是否挂接成功（替换可用的前提）。 </summary>
     public bool Hooked { get; private set; }
@@ -57,12 +86,13 @@ public sealed unsafe class ImGuiHookService : IDisposable
     public string HookStatus { get; private set; } = "未初始化";
 
     public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop,
-        Func<bool> hooksEnabled, ReplacementService replacement)
+        Func<bool> hooksEnabled, Func<bool> widgetHooksEnabled, ReplacementService replacement)
     {
         _appLog = appLog;
         _log = log;
         _interop = interop;
         _hooksEnabled = hooksEnabled;
+        _widgetHooksEnabled = widgetHooksEnabled;
         _replacement = replacement;
         InstallHooks();
     }
@@ -113,6 +143,18 @@ public sealed unsafe class ImGuiHookService : IDisposable
                          (_textExHook != null ? "igTextEx" : "") +
                          (_textExHook != null && _textHook != null ? " + " : "") +
                          (_textHook != null ? "igTextUnformatted" : "");
+            // ── 控件标签桩（安全子集）：覆盖按钮之外的绝大多数配置控件的标签
+            //    （滑条/拖拽条/复选框/下拉框/折叠头/标签页/树节点/菜单项/单选框/颜色编辑/输入框）。
+            //    这些都是「指针 + 基本类型」签名；含 ImVec2 的 igButton/igSelectable 与 varargs 的 igText 族不挂。──
+            if (_widgetHooksEnabled())
+            {
+                InstallWidgetHooks(baseAddr);
+                HookStatus += $" + 控件标签 {_widgetHooks.Count} 个";
+            }
+            else
+            {
+                _appLog.Info("[钩子] 控件标签桩已按配置关闭");
+            }
             _appLog.Info($"[钩子] {HookStatus}");
         }
         catch (Exception ex)
@@ -183,6 +225,81 @@ public sealed unsafe class ImGuiHookService : IDisposable
         }
     }
 
+    /// <summary> 安装控件标签桩（安全子集：指针 + 基本类型签名，无 ImVec2、非 varargs）。 </summary>
+    private void InstallWidgetHooks(nint baseAddr)
+    {
+        var missing = new List<string>();
+        var backend = IGameInteropProvider.HookBackend.Automatic;
+
+        void Add<T>(string export, HookBox<T> box, T detour, Action<string> record) where T : Delegate
+        {
+            var addr = GetExport(baseAddr, export);
+            if (addr == 0)
+            {
+                missing.Add(export);
+                return;
+            }
+            box.Hook = _interop.HookFromAddress<T>(addr, detour, backend);
+            box.Hook.Enable();
+            _widgetHooks.Add(box.Hook);
+        }
+
+        // 各控件统一模式：把第 1 个参数（label）替换后再转发，返回值原样透传。
+        var bCheck = new HookBox<W2>();
+        Add("igCheckbox", bCheck, (a, b) => bCheck.Hook!.Original(Label(a), b), _ => { });
+        var bTree = new HookBox<W1>();
+        Add("igTreeNode_Str", bTree, a => bTree.Hook!.Original(Label(a)), _ => { });
+        var bTreeEx = new HookBox<W2u>();
+        Add("igTreeNodeEx_Str", bTreeEx, (a, b) => bTreeEx.Hook!.Original(Label(a), b), _ => { });
+        var bCol = new HookBox<W3u>();
+        Add("igCollapsingHeader_BoolPtr", bCol, (a, b, c) => bCol.Hook!.Original(Label(a), b, c), _ => { });
+        var bCol2 = new HookBox<W2u>();
+        Add("igCollapsingHeader_TreeNodeFlags", bCol2, (a, b) => bCol2.Hook!.Original(Label(a), b), _ => { });
+        var bTab = new HookBox<W3u>();
+        Add("igBeginTabItem", bTab, (a, b, c) => bTab.Hook!.Original(Label(a), b, c), _ => { });
+        var bCombo = new HookBox<W3u>();
+        Add("igBeginCombo", bCombo, (a, b, c) => bCombo.Hook!.Original(Label(a), Label(b), c), _ => { });
+        var bMenu = new HookBox<W2b>();
+        Add("igBeginMenu", bMenu, (a, b) => bMenu.Hook!.Original(Label(a), b), _ => { });
+        var bMItem = new HookBox<W4bb>();
+        Add("igMenuItem_Bool", bMItem, (a, b, c, d) => bMItem.Hook!.Original(Label(a), Label(b), c, d), _ => { });
+        var bRadio = new HookBox<W2b>();
+        Add("igRadioButton_Bool", bRadio, (a, b) => bRadio.Hook!.Original(Label(a), b), _ => { });
+        var bSF = new HookBox<WSliderFloat>();
+        Add("igSliderFloat", bSF, (a, b, c, d, e, f) => bSF.Hook!.Original(Label(a), b, c, d, e, f), _ => { });
+        var bSI = new HookBox<WSliderInt>();
+        Add("igSliderInt", bSI, (a, b, c, d, e, f) => bSI.Hook!.Original(Label(a), b, c, d, e, f), _ => { });
+        var bDF = new HookBox<WDragFloat>();
+        Add("igDragFloat", bDF, (a, b, c, d, e, f, g) => bDF.Hook!.Original(Label(a), b, c, d, e, f, g), _ => { });
+        var bDI = new HookBox<WDragInt>();
+        Add("igDragInt", bDI, (a, b, c, d, e, f, g) => bDI.Hook!.Original(Label(a), b, c, d, e, f, g), _ => { });
+        var bCE3 = new HookBox<W3u>();
+        Add("igColorEdit3", bCE3, (a, b, c) => bCE3.Hook!.Original(Label(a), b, c), _ => { });
+        var bCE4 = new HookBox<W3u>();
+        Add("igColorEdit4", bCE4, (a, b, c) => bCE4.Hook!.Original(Label(a), b, c), _ => { });
+        var bIT = new HookBox<WInputText>();
+        Add("igInputText", bIT, (a, b, c, d, e, f) => bIT.Hook!.Original(Label(a), b, c, d, e, f), _ => { });
+        var bITH = new HookBox<WInputTextHint>();
+        Add("igInputTextWithHint", bITH, (a, b, c, d, e, f, g) => bITH.Hook!.Original(Label(a), Label(b), c, d, e, f, g), _ => { });
+
+        _appLog.Info($"[钩子] 控件标签桩：{_widgetHooks.Count} 个挂接成功" +
+                     (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : ""));
+    }
+
+    /// <summary> 控件标签查表：命中返回中文指针，否则原指针。异常绝不外抛。 </summary>
+    private nint Label(nint p)
+    {
+        if (p == 0 || !_replacement.Enabled || SuppressReplacement) return p;
+        var rep = TryLookup(p, 0);
+        return rep != 0 ? rep : p;
+    }
+
+    /// <summary> 控件标签桩的钩子容器：detour 闭包通过它拿到自己的 Hook 实例来调 Original。 </summary>
+    private sealed class HookBox<T> where T : Delegate
+    {
+        public Hook<T>? Hook;
+    }
+
     // ═══════════════════════ cimgui 定位 ═══════════════════════
 
     private static bool TryFindCimgui(out nint baseAddr, out string moduleName)
@@ -241,6 +358,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         try { _textHook?.Dispose(); } catch { }
         try { _textExHook?.Dispose(); } catch { }
+        foreach (var h in _widgetHooks)
+        {
+            try { h.Dispose(); } catch { }
+        }
+        _widgetHooks.Clear();
         _textHook = null;
         _textExHook = null;
         Hooked = false;

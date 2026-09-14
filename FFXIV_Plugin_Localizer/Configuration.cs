@@ -15,6 +15,10 @@ public class Configuration : IPluginConfiguration
     /// <summary> ImGui 钩子总开关（关掉 = 只用静态扫描，对游戏 UI 零干扰；重载插件后生效）。 </summary>
     public bool HooksEnabled { get; set; } = true;
 
+    /// <summary> 控件标签桩（滑条/复选框/下拉框等标签的替换）。
+    /// 只挂「指针+基本类型」签名的安全控件（不含 ImVec2 的 igButton/igSelectable）；界面异常时关它重载可单独排除。 </summary>
+    public bool WidgetHooks { get; set; } = true;
+
     /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
     public bool ReplacementEnabled { get; set; } = true;
 

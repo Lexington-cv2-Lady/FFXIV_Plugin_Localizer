@@ -40,6 +40,15 @@ public sealed class MainWindow : Window
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("关闭后本插件对游戏 UI 零干扰。\n安装器替换依赖钩子，关闭后不可用；静态扫描不受影响。\n改动后需重载插件生效。");
+        ImGui.SameLine();
+        var widgetOn = _plugin.Configuration.WidgetHooks;
+        if (ImGui.Checkbox("控件标签桩（排障开关）", ref widgetOn))
+        {
+            _plugin.Configuration.WidgetHooks = widgetOn;
+            _plugin.Configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("滑条/复选框/下拉框等控件标签的替换（文本之外的另一条通道）。\n若界面异常，先关它重载试试；仍异常再关「全部钩子」。");
 
         ImGui.Separator();
 
