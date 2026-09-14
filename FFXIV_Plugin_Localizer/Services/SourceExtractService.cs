@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Reflection.PortableExecutable;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -91,10 +92,102 @@ public sealed class SourceExtractService
         @"""((?:[^""\\]|\\.)*)""",
         RegexOptions.Compiled);
 
-    /// <summary> 判定「源码已内置中文」的中文字符串条数下限。 </summary>
+    /// <summary> 判定「已汉化」的中文字符串条数下限（对已安装 DLL 与仓库源码通用）。 </summary>
     private const int BilingualZhThreshold = 50;
     /// <summary> 中文占比判据：中文条数 × 该值 ≥ 英文条数（即中文占 1/N 以上）才认定已汉化。 </summary>
     private const int BilingualZhRatioDiv = 3;
+
+    /// <summary>
+    /// 检查**已安装的插件 DLL** 是否已是中文版（如 Glamourer 343 条、Penumbra 641 条中文）。
+    /// ⚠ 这才是用户视角的正确判据：插件安装器给的 RepoUrl 是**原作者仓库**（纯英文），
+    /// 但用户装的可能是一份**中文编译版**（源码英文 + 二进制含中文）。只看仓库会误判成"未汉化"。
+    /// </summary>
+    public (bool IsChinese, int ZhCount, string DllPath) CheckInstalledChinese(string pluginName)
+    {
+        var launcherDir = Path.GetDirectoryName(Path.GetDirectoryName(_configDir()));
+        foreach (var rootName in new[] { "installedPlugins", "devPlugins" })
+        {
+            var dir = Path.Combine(launcherDir ?? "", rootName, pluginName);
+            if (!Directory.Exists(dir)) continue;
+            var dll = Directory.EnumerateFiles(dir, pluginName + ".dll", SearchOption.AllDirectories)
+                .OrderBy(x => x, StringComparer.Ordinal).LastOrDefault();
+            if (dll == null) continue;
+            var n = CountUserStringCjk(dll);
+            return (n >= BilingualZhThreshold, n, dll);
+        }
+        return (false, 0, "");
+    }
+
+    /// <summary> 统计 DLL 的 #US 用户字符串堆里含中日韩字符的条数（手解 CLI 元数据，无需反射）。 </summary>
+    private static int CountUserStringCjk(string dllPath)
+    {
+        try
+        {
+            using var fs = File.OpenRead(dllPath);
+            using var pe = new PEReader(fs);
+            var cor = pe.PEHeaders.CorHeader;
+            if (cor == null) return 0;
+            var md = pe.GetSectionData(cor.MetadataDirectory.RelativeVirtualAddress).GetContent().ToArray();
+            var pos = 0;
+            if (md.Length < 20 || ReadU32(md, ref pos) != 0x424A5342) return 0; // BSJB
+            pos += 6 + 2;
+            var versionLen = (int)ReadU32(md, ref pos);
+            pos += versionLen + 2;
+            var streams = ReadU16(md, ref pos);
+            for (var i = 0; i < streams; i++)
+            {
+                var offset = (int)ReadU32(md, ref pos);
+                var size = (int)ReadU32(md, ref pos);
+                var nameStart = pos;
+                while (pos < md.Length && md[pos] != 0) pos++;
+                var name = Encoding.ASCII.GetString(md, nameStart, pos - nameStart);
+                pos++; // 跳过 \0
+                pos += (4 - (pos - nameStart) % 4) % 4;
+                if (name != "#US") continue;
+                return CountCjkInUserStringHeap(md, offset, size);
+            }
+        }
+        catch { /* 读不了就当非中文版 */ }
+        return 0;
+    }
+
+    private static int CountCjkInUserStringHeap(byte[] b, int start, int size)
+    {
+        var p = start;
+        var end = start + size;
+        if (p < end && b[p] == 0) p++;
+        var count = 0;
+        while (p < end)
+        {
+            uint len;
+            var b0 = b[p++];
+            if ((b0 & 0x80) == 0) len = b0;
+            else if ((b0 & 0xC0) == 0x80) { if (p >= end) break; len = (uint)(((b0 & 0x3F) << 8) | b[p]); p += 1; }
+            else if ((b0 & 0xE0) == 0xC0) { if (p + 2 >= end) break; len = (uint)(((b0 & 0x1F) << 24) | (b[p] << 16) | (b[p + 1] << 8) | b[p + 2]); p += 3; }
+            else break;
+            if (len == 0) continue;
+            var dataBytes = (int)(len & ~1u);
+            if (p + dataBytes > end || dataBytes == 0) { p += dataBytes; continue; }
+            var s = Encoding.Unicode.GetString(b, p, dataBytes);
+            p += dataBytes;
+            if (s.Any(c => c >= 0x4E00 && c <= 0x9FFF)) count++;
+        }
+        return count;
+    }
+
+    private static uint ReadU32(byte[] b, ref int pos)
+    {
+        var v = (uint)(b[pos] | (b[pos + 1] << 8) | (b[pos + 2] << 16) | (b[pos + 3] << 24));
+        pos += 4;
+        return v;
+    }
+
+    private static ushort ReadU16(byte[] b, ref int pos)
+    {
+        var v = (ushort)(b[pos] | (b[pos + 1] << 8));
+        pos += 2;
+        return v;
+    }
 
     /// <summary> 判定"绘制函数"是否为纯文本绘制（决定该句走文字通道还是控件通道）。 </summary>
     private static readonly HashSet<string> TextFuncs = new(StringComparer.OrdinalIgnoreCase)
@@ -169,6 +262,17 @@ public sealed class SourceExtractService
         if (string.IsNullOrWhiteSpace(repoUrl) || !repoUrl.Contains("github.com", StringComparison.OrdinalIgnoreCase))
         {
             return (false, 0, new(), "仓库地址无效（需为 github.com 链接）");
+        }
+
+        // ── 判据①：**已安装的 DLL** 是否已是中文版（用户视角最准）──
+        // 插件安装器给的 RepoUrl 是原作者仓库（纯英文），但用户装的可能是一份中文编译版
+        // （如 Glamourer 已装 DLL 含 343 条中文、Penumbra 641 条）——这种情况无需再翻，直接跳过。
+        var (installedZh, zhInstalled, dllPath) = CheckInstalledChinese(pluginName);
+        if (installedZh)
+        {
+            var msg = $"已安装的插件本身就是中文版（DLL 含 {zhInstalled} 条中文字符串），无需汉化，跳过。";
+            _appLog.Info($"[源码] {pluginName} 跳过：已装 DLL 为中文版（{zhInstalled} 条中文）");
+            return (true, 0, new(), msg);
         }
 
         var repoRoot = Path.Combine(_configDir(), RepoDirName);

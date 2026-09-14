@@ -22,6 +22,7 @@ public sealed class SourceExtractWindow : Window
     private string _manualUrl = "";
     private string _summary = "";
     private readonly Dictionary<string, string> _lastResult = new();
+    private readonly Dictionary<string, int> _chineseCache = new(); // 插件名 → 已装 DLL 的中文字符串条数（0=原版英文）
     private bool _testing;          // 连接测试进行中
     private bool? _testOk;          // 上次测试结果（null=未测）
     private string _testMessage = "";
@@ -186,15 +187,16 @@ public sealed class SourceExtractWindow : Window
         // ── 已装插件列表（带仓库地址的直接提取）──
         if (!_listLoaded)
         {
-            _plugins = _svc.ListPluginsWithRepo();
-            _listLoaded = true;
+            RefreshList();
         }
         ImGui.TextDisabled($"已安装且带 GitHub 地址的插件：{_plugins.Count} 个");
         ImGui.SameLine();
         if (ImGui.Button("刷新列表##src"))
         {
-            _plugins = _svc.ListPluginsWithRepo();
+            RefreshList();
         }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("重新枚举已装插件，并检测各插件当前 DLL 是否已是中文版。");
 
         using (var child = ImRaii.Child("##源码插件列表", new Vector2(-1f, -1f), true))
         {
@@ -214,6 +216,15 @@ public sealed class SourceExtractWindow : Window
                     }
                     ImGui.SameLine();
                     ImGui.TextUnformatted(name);
+                    // 预先标注已装 DLL 是否已是中文版（避免白点）
+                    if (_chineseCache.TryGetValue(name, out var zh))
+                    {
+                        ImGui.SameLine();
+                        if (zh > 0)
+                            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"（已是中文版·{zh} 条，无需提取）");
+                        else
+                            Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), "（原版英文）");
+                    }
                     ImGui.SameLine();
                     ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
                     ImGui.TextUnformatted(url);
@@ -224,6 +235,26 @@ public sealed class SourceExtractWindow : Window
                     }
                     ImGui.PopID();
                 }
+            }
+        }
+    }
+
+    /// <summary> 刷新插件列表 + 检测各插件已装 DLL 的中文情况（用于列表标注与提前跳过）。 </summary>
+    private void RefreshList()
+    {
+        _plugins = _svc.ListPluginsWithRepo();
+        _listLoaded = true;
+        _chineseCache.Clear();
+        foreach (var (name, _) in _plugins)
+        {
+            try
+            {
+                var (isChinese, zh, _) = _svc.CheckInstalledChinese(name);
+                _chineseCache[name] = isChinese ? zh : 0;
+            }
+            catch
+            {
+                _chineseCache[name] = 0;
             }
         }
     }
