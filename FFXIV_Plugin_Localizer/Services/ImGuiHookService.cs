@@ -72,6 +72,26 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private delegate byte DragScalarD(nint label, int dataType, nint pData, float vSpeed, nint pMin, nint pMax, nint format, uint flags);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte DragScalarND(nint label, int dataType, nint pData, int components, float vSpeed, nint pMin, nint pMax, nint format, uint flags);
+
+    // ── 输入框「标量」族（2026-09-14 补齐，与上面 Scalar 族同型）──
+    // ⚠ **实测路由**：托管 `ImGui.InputInt` / `InputFloat` / `InputDouble` 的 IL 都是
+    //    `call ImGui::InputScalar`，最终落到 `ImGuiNative::InputScalar` → cimgui **`igInputScalar`**；
+    //    多分量版（InputInt2/3/4、InputFloat2/3/4）同理落到 `igInputScalarN`。
+    //    也就是说**只挂 igInputText 覆盖不到输入数字的框** —— 而插件配置窗里 InputInt/InputFloat 极常见。
+    //    签名同 SliderScalar 家族：纯指针 + int/uint，安全。
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte InputScalarD(nint label, int dataType, nint pData, nint pStep, nint pStepFast, nint format, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte InputScalarND(nint label, int dataType, nint pData, int components, nint pStep, nint pStepFast, nint format, uint flags);
+    /// <summary> igCombo_Str(label, int* current_item, const char* items_separated_by_zeros, int popup_max_height)
+    /// ——不是 `igBeginCombo`（那是下拉框「展开时」的定义），这个才是**组合框本身**的标签。
+    /// ⚠ 触发条件是调用方使用「以 \0 分隔的选项串」这种 Combo 重载（实测 BTS/多数插件都用）。 </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte ComboStrD(nint label, nint currentItem, nint items, int popupMaxHeight);
+    /// <summary> igColorPicker4(label, float* col, flags, float* ref_col)——颜色选择器的标签
+    /// （`igColorEdit3/4` 是「小色块」，`igColorPicker3/4` 是「大取色器」，是两个不同控件）。 </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte W4uN(nint label, nint col, uint flags, nint refCol);
     /// <summary> igTableSetupColumn(label, flags, float init_width_or_weight, uint user_id)——表格列标题。
     /// ⚠ 精确签名经绑定程序集核实为 **4 参数**（label, ImGuiTableColumnFlags, float, ImGuiID），不是 2 个。 </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -453,6 +473,24 @@ public sealed unsafe class ImGuiHookService : IDisposable
         Add("igDragScalar", bDS, (a, b, c, d, e, f, g, h) => bDS.Hook!.Original(Label(a, "igDragScalar"), b, c, d, e, f, g, h), _ => { });
         var bDSN = new HookBox<DragScalarND>();
         Add("igDragScalarN", bDSN, (a, b, c, d, e, f, g, h, i) => bDSN.Hook!.Original(Label(a, "igDragScalarN"), b, c, d, e, f, g, h, i), _ => { });
+
+        // ── 输入框标量族 + 组合框 + 取色器 + 表头（2026-09-14 补齐「安全但漏挂」的一批）──
+        //    这批的共同点：**标签是画出来的文字**，且签名只有指针/整数/浮点（无按值结构体、非 varargs）。
+        //    对照实验证明同类签名的 igSliderScalar 长期稳定，故风险与既有钩子同级。
+        var bIS = new HookBox<InputScalarD>();
+        Add("igInputScalar", bIS, (a, b, c, d, e, f, g) => bIS.Hook!.Original(Label(a, "igInputScalar"), b, c, d, e, f, g), _ => { });
+        var bISN = new HookBox<InputScalarND>();
+        Add("igInputScalarN", bISN, (a, b, c, d, e, f, g, h) => bISN.Hook!.Original(Label(a, "igInputScalarN"), b, c, d, e, f, g, h), _ => { });
+        var bCmbS = new HookBox<ComboStrD>();
+        Add("igCombo_Str", bCmbS, (a, b, c, d) => bCmbS.Hook!.Original(Label(a, "igCombo_Str"), b, c, d), _ => { });
+        var bCp3 = new HookBox<W3u>();
+        Add("igColorPicker3", bCp3, (a, b, c) => bCp3.Hook!.Original(Label(a, "igColorPicker3"), b, c), _ => { });
+        var bCp4 = new HookBox<W4uN>();
+        Add("igColorPicker4", bCp4, (a, b, c, d) => bCp4.Hook!.Original(Label(a, "igColorPicker4"), b, c, d), _ => { });
+        var bTh = new HookBox<W1>();
+        Add("igTableHeader", bTh, a => bTh.Hook!.Original(Label(a, "igTableHeader")), _ => { });
+        var bSa = new HookBox<WSliderFloat>();   // (label, float* vRad, float min, float max, fmt, flags) 同型
+        Add("igSliderAngle", bSa, (a, b, c, d, e, f) => bSa.Hook!.Original(Label(a, "igSliderAngle"), b, c, d, e, f), _ => { });
         // ⚠ **不挂 igSetTooltip**：cimgui 对可变参数函数有独立的 `V` 后缀导出（igSetTooltipV），
         //    说明 `igSetTooltip` 是 varargs（`SetTooltip(const char* fmt, ...)`）。
         //    用固定签名委托挂 varargs → x64 调用方需预留 XMM 溢出区而托管封送不保证 →
