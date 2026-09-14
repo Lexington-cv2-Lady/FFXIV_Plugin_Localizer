@@ -45,6 +45,8 @@ public sealed unsafe class ReplacementService
     private Dictionary<string, byte[]> _table = new(StringComparer.Ordinal);   // 合并查找：英文 → 中文 UTF-8
     private HashSet<ulong> _hashes = new();                                    // 英文键 FNV（热路径预筛）
     private readonly Dictionary<string, nint> _ptrs = new(StringComparer.Ordinal); // 英文 → 中文指针
+    /// <summary> 带 ##ID 的完整标签 → 保号中文指针（键是**原始完整串**，中文里保留 ##ID 后缀）。 </summary>
+    private readonly Dictionary<string, nint> _idPtrs = new(StringComparer.Ordinal);
     private readonly List<nint> _graveyard = new();                            // 已弃用的中文指针（仅 Dispose 释放，避免渲染线程 use-after-free）
     private Dictionary<string, string>? _wikiTerms;                            // wiki 官方术语（优先级最高，可选）
     // 候选文案缓存（避免每帧读磁盘 + JSON 解析；键=插件名，值=(候选, 目录指纹时间)）
@@ -62,6 +64,8 @@ public sealed unsafe class ReplacementService
             _hashes = new HashSet<ulong>();
             foreach (var ptr in _ptrs.Values) _graveyard.Add(ptr);
             _ptrs.Clear();
+            foreach (var ptr in _idPtrs.Values) _graveyard.Add(ptr);
+            _idPtrs.Clear();
         }
         _appLog.Info("[替换] 已清空生效对照表（界面还原英文；磁盘文件保留，重新载入可恢复）");
     }
@@ -180,6 +184,8 @@ public sealed unsafe class ReplacementService
         {
             foreach (var ptr in _ptrs.Values) _graveyard.Add(ptr);
             _ptrs.Clear();
+            foreach (var ptr in _idPtrs.Values) _graveyard.Add(ptr);
+            _idPtrs.Clear();
             _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             _hashes = new HashSet<ulong>();
             // ① wiki 官方术语最高优先（物品/技能名机翻几乎必错，必须用官方译名）
@@ -259,6 +265,32 @@ public sealed unsafe class ReplacementService
     }
 
     /// <summary>
+    /// 整串精确匹配（**不截断 ##ID**），命中返回 NUL 结尾的中文指针，否则 0。
+    ///
+    /// ⚠ 专供**窗口名**（igBegin）：ImGui 用窗口名（`###Foo` 之后的 ID 部分）算窗口 ID，
+    /// 一旦把 `##/###ID` 截掉再传进去，窗口 ID 就变了——轻则位置/尺寸记忆丢失，
+    /// 重则与其它窗口 ID 撞车、Dalamud 自己的窗口状态错乱。所以窗口名只做整串匹配，
+    /// 带 `##` 的名字（如 `插件安装器###XlPluginInstaller`）一律不动。
+    /// </summary>
+    public nint TryReplaceExact(byte* p, int n)
+    {
+        if (!Enabled || _table.Count == 0 || n < 2 || n > 1024) return 0;
+        unsafe
+        {
+            for (var i = 0; i + 1 < n; i++)
+                if (p[i] == (byte)'#' && p[i + 1] == (byte)'#') return 0; // 含 ID：不碰
+        }
+        ulong h;
+        unsafe { h = FnvBytes(p, n); }
+        lock (_lock)
+        {
+            if (!_hashes.Contains(h)) return 0;
+            var s = Encoding.UTF8.GetString(p, n);
+            return GetOrCreatePtr(s);
+        }
+    }
+
+    /// <summary>
     /// 热路径查表：命中返回 NUL 结尾的中文指针（转发时 text_end 传 0），未命中返回 0。
     /// **双段匹配**：先按整串查（含 <c>##ID</c> 的完整标签）；未命中再按去掉 <c>##ID</c> 的显示部分查。
     /// 原因：采集/源码提取入库时存的是「显示文字」（如 <c>设置</c>），而 ImGui 收到的完整串是 <c>设置##bdp</c>——
@@ -299,11 +331,20 @@ public sealed unsafe class ReplacementService
             // ⚠ 必须**独立判断**（不能嵌在①的命中分支内）：控件标签形如 `显示文字##内部ID`，
             //    而表里存的是 `显示文字`——整串哈希必然不命中，只有截断后才可能命中。
             //    原实现把它嵌在①内部，导致**带 ##ID 的控件标签全部替换不了**（已修）。
+            // ⚠⚠ 返回的译文中**必须把 `##ID` 原样接回去**：ImGui 用 `##` 之后的部分算控件 ID，
+            //    若只返回「别名」而丢掉「tab_id」，控件 ID 就从 `tab_id` 变成 `别名`——
+            //    同一窗口里多个控件可能因此撞到同一个 ID（重复点击/状态互串），移动端布局记忆也会丢。
             if (hashIdx > 0 && _hashes.Contains(hShown))
             {
                 var shown = Encoding.UTF8.GetString(p, hashIdx);
-                var ptr2 = GetOrCreatePtr(shown);
-                if (ptr2 != 0) return ptr2;
+                if (!_table.TryGetValue(shown, out var zhBytes)) return 0;
+                var full = Encoding.UTF8.GetString(p, n);
+                if (_idPtrs.TryGetValue(full, out var cached)) return cached;
+                // 显示部分换成中文，其余（##ID 及其后）原样保留
+                var composed = Encoding.UTF8.GetString(zhBytes) + full.Substring(hashIdx);
+                var p3 = Marshal.StringToCoTaskMemUTF8(composed);
+                _idPtrs[full] = p3;
+                return p3;
             }
             return 0;
         }
@@ -1068,8 +1109,10 @@ public sealed unsafe class ReplacementService
         lock (_lock)
         {
             foreach (var ptr in _ptrs.Values) Marshal.FreeCoTaskMem(ptr);
+            foreach (var ptr in _idPtrs.Values) Marshal.FreeCoTaskMem(ptr);
             foreach (var ptr in _graveyard) Marshal.FreeCoTaskMem(ptr);
             _ptrs.Clear();
+            _idPtrs.Clear();
             _graveyard.Clear();
         }
     }

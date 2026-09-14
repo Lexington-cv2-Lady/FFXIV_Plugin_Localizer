@@ -9,16 +9,21 @@ using Dalamud.Plugin.Services;
 namespace FFXIVPluginLocalizer.Services;
 
 /// <summary>
-/// ImGui 文字钩子（替换层的落点）：只挂 <c>igTextUnformatted(const char*, const char*)</c> 导出——
-/// 托管侧 Text/TextUnformatted 类调用的必经桩，**参数全是指针、非 varargs、无按值结构体**，长期稳定。
+/// ImGui 文字钩子（替换层的落点）：挂 <c>igTextEx</c> / <c>igTextUnformatted</c>（文字族必经桩）
+/// 以及一批**签名安全**（只有指针/整型/浮点，无按值结构体、非 varargs）的控件标签桩，
+/// 例如 <c>igSliderScalar</c>（= 托管 SliderFloat/SliderInt 的真实落点，见下）。
+///
+/// ⚠ 关键事实（2026-09-14 用绑定程序集 IL + 导出表双向核实）：托管绑定是「跳表」式的——
+///   <c>ImGui.SliderFloat(...)</c> → <c>ImGui::SliderScalar&lt;float&gt;</c> → <c>ImGuiNative::SliderScalar</c>
+///   → <c>HexaGen.Runtime.FunctionTable[185]</c>，而索引 185 对应的 cimgui 导出就是
+///   <c>igSliderScalar</c>（**不是 igSliderFloat**）。所以要拦 SliderFloat/DragFloat 这类
+///   「模板化标量」控件，必须挂 <c>igSliderScalar</c>/<c>igDragScalar</c>（本类已挂）。
 ///
 /// ⚠ 本类刻意不挂的（都用血换来，见工作记忆教训⑥⑨⑩）：
 ///   · ImDrawList_AddText_FontPtr / igButton 等含按值 <c>ImVec2</c> 的函数——x64 下 ImVec2 走 XMM 寄存器，
-///     .NET 封送可能按通用寄存器传 → 每次调用 ABImismatch → 弄坏调用方栈/ImGui 内部状态（UI 静默失灵、崩溃）。
+///     .NET 封送可能按通用寄存器传 → ABImismatch → 弄坏调用方栈/ImGui 内部状态（UI 静默失灵、崩溃）。
 ///   · igText / igTextWrapped / igLabelText / igTextColored 等 varargs 函数——x64 要求调用方预留 XMM 溢出区并置 AL，
 ///     固定签名委托不满足 → 栈腐蚀。
-///   · 控件族（按钮/复选框/滑条）桩——历史上崩过游戏。
-/// 要恢复全覆盖，正路是原生跳板（C++ detour）或换钩子后端，不用托管委托挂这些函数。
 /// </summary>
 public sealed unsafe class ImGuiHookService : IDisposable
 {
@@ -48,6 +53,24 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private delegate byte W2b(nint a, byte b);                                   // igBeginMenu / igRadioButton_Bool
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte W3u(nint a, nint b, uint c);                           // igBeginCombo / igCollapsingHeader_BoolPtr / igBeginTabItem / igColorEdit3/4
+    /// <summary> igBegin(name, bool* p_open, ImGuiWindowFlags flags)——窗口开始。
+    /// 双重职责：① **替换窗口标题**（插件窗口标题也是界面文字，如 BigPlayerDebuffs 的
+    /// "BigPlayerDebuffs Config"；只做整串精确匹配、绝不截断 ##ID——见 TryReplaceExact）；
+    /// ② 调试时记录窗口名（排查"某个窗口的文字为什么没被替换"时，先确认它到底有没有被创建）。 </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte BeginWDelegate(nint name, nint pOpen, uint flags);
+
+    // ── 通用「标量」控件（Scalar 版）：所有 SliderXxx/DragXxx 的底层实现。
+    //    绑定层把 `ref float` 传给 ImGui.SliderFloat 时，**有可能**路由到这里（而非 igSliderFloat）。
+    //    签名均为「指针 + int/float + 指针 + uint」，安全可挂。 ──
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte SliderScalarD(nint label, int dataType, nint pData, nint pMin, nint pMax, nint format, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte SliderScalarND(nint label, int dataType, nint pData, int components, nint pMin, nint pMax, nint format, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte DragScalarD(nint label, int dataType, nint pData, float vSpeed, nint pMin, nint pMax, nint format, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte DragScalarND(nint label, int dataType, nint pData, int components, float vSpeed, nint pMin, nint pMax, nint format, uint flags);
     /// <summary> igTableSetupColumn(label, flags, float init_width_or_weight, uint user_id)——表格列标题。
     /// ⚠ 精确签名经绑定程序集核实为 **4 参数**（label, ImGuiTableColumnFlags, float, ImGuiID），不是 2 个。 </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -79,12 +102,17 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private Hook<TextUnformattedDelegate>? _textHook;
     private Hook<TextExDelegate>? _textExHook;
     private readonly List<IDisposable> _widgetHooks = new();
+    private Hook<BeginWDelegate>? _beginDbgHook;
     /// <summary> 实际挂接成功的控件导出名（诊断用：日志会列出，便于确认某控件是否真挂上）。 </summary>
     private readonly List<string> _hookedWidgetNames = new();
+    /// <summary> 实际挂接成功的文字桩名（诊断用，与控件名一起输出调用计数）。 </summary>
+    private readonly List<string> _hookedTextNames = new();
     // ── 调试统计（仅 DebugHookLog 开启时输出）：各钩子调用次数 / 查表命中次数 / 未命中样本 ──
     private readonly Dictionary<string, long> _dbgCalls = new();
     private readonly Dictionary<string, long> _dbgHits = new();
     private readonly List<string> _dbgMissSamples = new();
+    private readonly HashSet<string> _dbgWindowNames = new();   // 调试：累计出现过的窗口名（**不清空**，避免错过只在两个 tick 之间短暂渲染的窗口）
+    private readonly List<string> _dbgWindowNew = new();        // 调试：本 tick 新见到的窗口名（打印后清空）
     private long _dbgFrame;
     public bool DebugStats { get; set; }
 
@@ -151,6 +179,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 _appLog.Error($"[钩子] {HookStatus}");
                 return;
             }
+            _hookedTextNames.Clear();
+            if (_textExHook != null) _hookedTextNames.Add("TextEx");
+            if (_textHook != null) _hookedTextNames.Add("TextUnformatted");
+            // ⚠ 调试统计里文字桩的键名就是这两个（见 TextUnformattedDetour / TextExDetour）——
+            //    必须与实际计数用的 source 字符串一致，否则指针停在 0 次。 
             HookStatus = $"已挂接 {moduleName}：" +
                          (_textExHook != null ? "igTextEx" : "") +
                          (_textExHook != null && _textHook != null ? " + " : "") +
@@ -257,6 +290,49 @@ public sealed unsafe class ImGuiHookService : IDisposable
         }
     }
 
+    /// <summary> igBegin 转发：替换窗口标题（整串精确匹配，不碰 ##ID）+ 调试记录窗口名。异常绝不外抛。 </summary>
+    private byte BeginDbgDetour(nint name, nint pOpen, uint flags)
+    {
+        var use = name;
+        if (name != 0)
+        {
+            if (DebugStats)
+            {
+                try
+                {
+                    var q = (byte*)name;
+                    var n = 0;
+                    while (n < 256 && q[n] != 0) n++;
+                    if (n >= 2)
+                    {
+                        var win = System.Text.Encoding.UTF8.GetString(q, n);
+                        lock (_dbgCalls)
+                        {
+                            _dbgCalls["igBegin"] = _dbgCalls.TryGetValue("igBegin", out var c) ? c + 1 : 1;
+                            // **累计**记录：一个窗口可能只在两次 tick 之间短暂渲染，
+                            // 只看「本 tick 的窗口名」会漏掉它（BigPlayerDebuffs 的配置窗口就是这么 elusive）。
+                            if (_dbgWindowNames.Add(win) && _dbgWindowNew.Count < 60) _dbgWindowNew.Add(win);
+                        }
+                    }
+                }
+                catch { /* 绝不外抛 */ }
+            }
+            if (_replacement.Enabled && !SuppressReplacement)
+            {
+                try
+                {
+                    var q = (byte*)name;
+                    var n = 0;
+                    while (n < 256 && q[n] != 0) n++;
+                    var rep = _replacement.TryReplaceExact(q, n);
+                    if (rep != 0) use = rep;
+                }
+                catch { /* 绝不外抛 */ }
+            }
+        }
+        return _beginDbgHook!.Original(use, pOpen, flags);
+    }
+
     /// <summary> 纯 ASCII（不含中文/日文/全角）——用于过滤"已经是中文"的噪音。 </summary>
     private static bool IsPureAscii(string s)
     {
@@ -275,16 +351,35 @@ public sealed unsafe class ImGuiHookService : IDisposable
         string report;
         lock (_dbgCalls)
         {
-            // ⚠ 即使某钩子 0 调用也要列出（否则无法区分「没注册」与「注册了但没被调用」）
             _dbgFrame++;
+            // 完整要报告的钩子名：文字桩 + 控件桩 + igBegin 诊断（**漏掉哪个就没法判断它是否被调用**）
+            var names = new List<string>(_hookedTextNames.Count + _hookedWidgetNames.Count + 1);
+            names.AddRange(_hookedTextNames);
+            names.AddRange(_hookedWidgetNames);
+            if (_beginDbgHook != null) names.Add("igBegin");
+
             var sb = new System.Text.StringBuilder();
-            // 先列"被调用过"的（按调用次数降序，便于一眼看到主通道）
+            var idle = new List<string>();
+            // 被调用过的（按次数降序，一眼看到主通道）
             foreach (var (k, v) in _dbgCalls.OrderByDescending(kv => kv.Value))
             {
                 _dbgHits.TryGetValue(k, out var h);
                 sb.Append($"{k}: {v}次/{h}命中; ");
             }
             report = sb.ToString();
+            // ⚠ 关键：把「挂了但一次都没被调用」的显式列出来。只列 _dbgCalls 的话，
+            //   0 调用的钩子根本不出现 → 无法区分「钩子没注册」与「注册了但这款插件不走这个导出」，
+            //   而 BigPlayerDebuffs「界面不换」恰恰卡在这个判断上。
+            foreach (var name in names)
+                if (!_dbgCalls.ContainsKey(name)) idle.Add(name);
+            if (idle.Count > 0)
+                report += "\n    0 调用（已挂但没触发）: " + string.Join("、", idle);
+            // 实际创建的窗口名（诊断"窗口到底有没有被渲染"）：**累计**，只打印本 tick 新出现的
+            if (_dbgWindowNew.Count > 0)
+            {
+                report += "\n    新窗口: " + string.Join(" | ", _dbgWindowNew.Take(20));
+                _dbgWindowNew.Clear();
+            }
             // 未命中样本（**只含纯英文**，去重后最多 12 条）——这些才是真正"表里没有、界面仍是英文"的候选
             if (_dbgMissSamples.Count > 0)
             {
@@ -359,11 +454,39 @@ public sealed unsafe class ImGuiHookService : IDisposable
         // 前者是"表格里的列名"（实测 TeleporterPlugin 的 Alias/Aetheryte 就是它），后者是悬停提示。
         var bTsc = new HookBox<V4>();
         Add("igTableSetupColumn", bTsc, (a, b, c, d) => bTsc.Hook!.Original(Label(a, "igTableSetupColumn"), b, c, d), _ => { });
+        // ── 保险：通用标量版（覆盖"ref 参数被路由到 Scalar 实现"的情况）──
+        var bSS = new HookBox<SliderScalarD>();
+        Add("igSliderScalar", bSS, (a, b, c, d, e, f, g) => bSS.Hook!.Original(Label(a, "igSliderScalar"), b, c, d, e, f, g), _ => { });
+        var bSSN = new HookBox<SliderScalarND>();
+        Add("igSliderScalarN", bSSN, (a, b, c, d, e, f, g, h) => bSSN.Hook!.Original(Label(a, "igSliderScalarN"), b, c, d, e, f, g, h), _ => { });
+        var bDS = new HookBox<DragScalarD>();
+        Add("igDragScalar", bDS, (a, b, c, d, e, f, g, h) => bDS.Hook!.Original(Label(a, "igDragScalar"), b, c, d, e, f, g, h), _ => { });
+        var bDSN = new HookBox<DragScalarND>();
+        Add("igDragScalarN", bDSN, (a, b, c, d, e, f, g, h, i) => bDSN.Hook!.Original(Label(a, "igDragScalarN"), b, c, d, e, f, g, h, i), _ => { });
         // ⚠ **不挂 igSetTooltip**：cimgui 对可变参数函数有独立的 `V` 后缀导出（igSetTooltipV），
         //    说明 `igSetTooltip` 是 varargs（`SetTooltip(const char* fmt, ...)`）。
         //    用固定签名委托挂 varargs → x64 调用方需预留 XMM 溢出区而托管封送不保证 →
         //    **栈腐蚀** → 破坏调用方栈帧（实测表现为「Ctrl+V 要按多次才粘贴成功」等输入异常）。
         //    曾误挂过，2026-09-14 移除。
+
+        // ── 诊断用：igBegin（记录实际创建的窗口名）──
+        // ⚠ 曾经写成 `if (DebugStats)` 才挂——**这是死代码**：DebugStats 由 Plugin 在构造之后才赋值
+        //    （Hook.DebugStats = Configuration.DebugHookLog），构造期它必然为 false，于是诊断钩子永远没挂上，
+        //    「窗口到底有没有被渲染」这个最关键的问题反而查不了。正确做法：**钩子照挂**，
+        //    只在记录时看 DebugStats（BeginDbgDetour 内部已判断），开/关调试日志都能立刻生效。
+        {
+            var beginStub = GetExport(baseAddr, "igBegin");
+            if (beginStub != 0)
+            {
+                _beginDbgHook = _interop.HookFromAddress<BeginWDelegate>(beginStub, BeginDbgDetour, IGameInteropProvider.HookBackend.Automatic);
+                _beginDbgHook.Enable();
+                _appLog.Info("[钩子] 已挂 igBegin（诊断：记录窗口名）");
+            }
+            else
+            {
+                missing.Add("igBegin");
+            }
+        }
 
         _appLog.Info($"[钩子] 控件标签桩：{_widgetHooks.Count} 个挂接成功" +
                      (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : "") +
@@ -445,6 +568,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         try { _textHook?.Dispose(); } catch { }
         try { _textExHook?.Dispose(); } catch { }
+        try { _beginDbgHook?.Dispose(); } catch { }
+        _beginDbgHook = null;
         foreach (var h in _widgetHooks)
         {
             try { h.Dispose(); } catch { }
