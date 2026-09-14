@@ -120,7 +120,7 @@ public sealed class SourceExtractService
         if (!bare.Success) return (false, 0, new(), "无法解析仓库地址");
         var dirName = $"{bare.Groups[1].Value}__{bare.Groups[2].Value}".TrimEnd('.');
         var dir = Path.Combine(repoRoot, dirName);
-        var proxy = _cfg.ProxyAddress.Trim();
+        var proxy = _cfg.ProxyAddress;
 
         var gitArgs = dir is not null && Directory.Exists(dir)
             ? new[] { "-C", dir, "pull", "--ff-only" }                                  // 已克隆过 → 更新

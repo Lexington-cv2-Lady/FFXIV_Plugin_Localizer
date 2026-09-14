@@ -20,15 +20,34 @@ public class Configuration : IPluginConfiguration
     public bool WidgetHooks { get; set; } = true;
 
     // ── 源码提取（访问 GitHub）──
-    /// <summary> 是否允许访问 GitHub 拉取插件源码。**必须勾选且填了代理地址才放行**（见 CanAccessGitHub）。 </summary>
+    /// <summary> 是否允许访问 GitHub 拉取插件源码。**必须勾选且填了端口才放行**（见 CanAccessGitHub）。 </summary>
     public bool UseProxy { get; set; }
 
-    /// <summary> 网络代理地址（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）。
-    /// 仅本机保存；未勾选「启用代理」时即使填了也不生效。 </summary>
-    public string ProxyAddress { get; set; } = "";
+    /// <summary> 代理协议（http / socks5）。 </summary>
+    public string ProxyScheme { get; set; } = "http";
 
-    /// <summary> 是否满足访问 GitHub 的条件：**已勾选启用代理 且 代理地址非空**。二者缺一不可。 </summary>
-    public bool CanAccessGitHub => UseProxy && !string.IsNullOrWhiteSpace(ProxyAddress);
+    /// <summary> 代理地址主机（默认本机回环）。 </summary>
+    public string ProxyHost { get; set; } = "127.0.0.1";
+
+    /// <summary> 代理端口（如 Clash 默认 7890）。用户通常只需填这一项。 </summary>
+    public string ProxyPort { get; set; } = "";
+
+    /// <summary> 组装完整代理地址：scheme://host:port。 </summary>
+    public string ProxyAddress
+    {
+        get
+        {
+            var scheme = string.IsNullOrWhiteSpace(ProxyScheme) ? "http" : ProxyScheme.Trim();
+            var host = string.IsNullOrWhiteSpace(ProxyHost) ? "127.0.0.1" : ProxyHost.Trim();
+            return $"{scheme}://{host}:{ProxyPort?.Trim()}";
+        }
+    }
+
+    /// <summary> 旧字段兼容：早期版本直接存完整地址字符串（读取后自动拆解到新字段）。 </summary>
+    public string? ProxyAddressLegacy { get; set; }
+
+    /// <summary> 是否满足访问 GitHub 的条件：**已勾选启用代理 且 端口非空**。二者缺一不可。 </summary>
+    public bool CanAccessGitHub => UseProxy && !string.IsNullOrWhiteSpace(ProxyPort);
 
     /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
     public bool ReplacementEnabled { get; set; } = true;

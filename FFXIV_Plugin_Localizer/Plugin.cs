@@ -41,6 +41,22 @@ public sealed class Plugin : IDalamudPlugin
     public Plugin()
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        // 代理配置由「完整地址字符串」改为「协议+主机+端口」三段：把旧值拆解过来（一次性迁移）
+        if (!string.IsNullOrWhiteSpace(Configuration.ProxyAddressLegacy) &&
+            string.IsNullOrWhiteSpace(Configuration.ProxyPort))
+        {
+            var legacy = Configuration.ProxyAddressLegacy!.Trim();
+            var m = System.Text.RegularExpressions.Regex.Match(legacy, @"^(?<scheme>[a-zA-Z0-9]+)://(?<host>[^:/]+):(?<port>\d+)$");
+            if (m.Success)
+            {
+                Configuration.ProxyScheme = m.Groups["scheme"].Value.ToLowerInvariant();
+                Configuration.ProxyHost = m.Groups["host"].Value;
+                Configuration.ProxyPort = m.Groups["port"].Value;
+                Configuration.Save();
+                Log.Information($"[迁移] 代理配置已拆解：{Configuration.ProxyAddress}");
+            }
+        }
+        Configuration.ProxyAddressLegacy = null;
         // 旧版单一 ZhipuApiKey → 按服务商分存（一次性迁移）
         if (!string.IsNullOrWhiteSpace(Configuration.ZhipuApiKey))
         {
