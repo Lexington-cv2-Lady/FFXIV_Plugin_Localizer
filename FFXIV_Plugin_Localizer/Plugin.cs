@@ -248,12 +248,52 @@ public sealed class Plugin : IDalamudPlugin
                 Configuration.Save();
             }
             Directory.CreateDirectory(Configuration.DictDir);
+            CreateDefaultDictIfMissing(Configuration.DictDir);   // 首次自动生成模板文件
             var n = OldDict.Load(Configuration.DictDir);
             Log.Information($"[预翻译] 本项目词典目录 {Configuration.DictDir}，已载入 {n} 条");
         }
         catch (Exception ex)
         {
             Log.Warning($"[预翻译] 词典目录准备失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 词典目录里没有「我的翻译.json」时**自动生成模板**（含格式说明与示例）。
+    /// 否则用户不知道文件该叫什么、格式怎么写——预翻译就永远命中不了。
+    /// 只在新目录（无任何词典文件）时创建，不覆盖用户已有的文件。
+    /// </summary>
+    private void CreateDefaultDictIfMissing(string dir)
+    {
+        try
+        {
+            // 已有任意已知词典文件就不动
+            foreach (var f in new[] { "我的翻译.json", "个性翻译.json" })
+            {
+                if (File.Exists(Path.Combine(dir, f))) return;
+            }
+
+            var template = """
+            {
+              "_说明": [
+                "这是本插件（翻译插件的插件）的词典文件，供「插件翻译 → 预翻译」使用。",
+                "格式：terms 是通用术语（不限插件），mods 可留空。",
+                "「原文」写界面上的英文（精确匹配，大小写敏感），「译文」写中文。",
+                "改完在「AI 设置 → 本项目词典」点「重载词典」即可生效；不会自动翻译，命中即直接采用。"
+              ],
+              "terms": [
+                { "原文": "Own Buff/Debuff Scale", "译文": "自身增益/减益比例" },
+                { "原文": "Retry Count", "译文": "重试次数" }
+              ],
+              "mods": {}
+            }
+            """;
+            File.WriteAllText(Path.Combine(dir, "我的翻译.json"), template, System.Text.Encoding.UTF8);
+            Log.Information($"[预翻译] 词典目录为空，已生成模板：{Path.Combine(dir, "我的翻译.json")}");
+        }
+        catch (Exception ex)
+        {
+            Log.Warning($"[预翻译] 生成词典模板失败：{ex.Message}");
         }
     }
 
