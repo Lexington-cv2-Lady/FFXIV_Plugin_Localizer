@@ -81,6 +81,12 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private Hook<TextUnformattedDelegate>? _textHook;
     private Hook<TextExDelegate>? _textExHook;
     private readonly List<IDisposable> _widgetHooks = new();
+    // ── 调试统计（仅 DebugHookLog 开启时输出）：各钩子调用次数 / 查表命中次数 / 未命中样本 ──
+    private readonly Dictionary<string, long> _dbgCalls = new();
+    private readonly Dictionary<string, long> _dbgHits = new();
+    private readonly List<string> _dbgMissSamples = new();
+    private long _dbgFrame;
+    public bool DebugStats { get; set; }
 
     /// <summary> 钩子是否挂接成功（替换可用的前提）。 </summary>
     public bool Hooked { get; private set; }
@@ -175,7 +181,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         if (textBegin != 0 && _replacement.Enabled && !SuppressReplacement)
         {
-            var rep = TryLookup(textBegin, textEnd);
+            var rep = TryLookup(textBegin, textEnd, "TextUnformatted");
             if (rep != 0)
             {
                 _textHook!.Original(rep, 0); // 中文按 NUL 结尾，end 传 0
@@ -190,7 +196,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         if (text != 0 && _replacement.Enabled && !SuppressReplacement)
         {
-            var rep = TryLookup(text, textEnd);
+            var rep = TryLookup(text, textEnd, "TextEx");
             if (rep != 0)
             {
                 _textExHook!.Original(rep, 0, flags);
@@ -204,7 +210,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// 公共查表：按调用方给的 text_end（为空则扫到 NUL）取出文案、查对照表；命中返回中文指针，否则 0。
     /// 异常绝不外抛（钩子内异常会中断整个 UI 绘制）。
     /// </summary>
-    private nint TryLookup(nint textBegin, nint textEnd)
+    private nint TryLookup(nint textBegin, nint textEnd, string source = "文字")
     {
         try
         {
@@ -223,12 +229,55 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 n = 0;
                 while (n < MaxTextLen && q[n] != 0) n++;
             }
-            return _replacement.TryReplace(q, n);
+            var hit = _replacement.TryReplace(q, n);
+            if (DebugStats)
+            {
+                lock (_dbgCalls)
+                {
+                    _dbgCalls[source] = _dbgCalls.TryGetValue(source, out var c) ? c + 1 : 1;
+                    if (hit != 0) _dbgHits[source] = _dbgHits.TryGetValue(source, out var h) ? h + 1 : 1;
+                    else if (_dbgMissSamples.Count < 40 && n >= 2)
+                    {
+                        var s = System.Text.Encoding.UTF8.GetString(q, n);
+                        if (s.Length >= 3) _dbgMissSamples.Add($"[{source}] {s}");
+                    }
+                }
+            }
+            return hit;
         }
         catch
         {
             return 0;
         }
+    }
+
+    /// <summary> 周期性输出调试统计（由 Plugin 的框架回调每 5 秒调用一次）。 </summary>
+    public void TickDebugLog()
+    {
+        if (!DebugStats) return;
+        string report;
+        lock (_dbgCalls)
+        {
+            if (_dbgCalls.Count == 0) return;
+            _dbgFrame++;
+            var sb = new System.Text.StringBuilder();
+            foreach (var (k, v) in _dbgCalls)
+            {
+                _dbgHits.TryGetValue(k, out var h);
+                sb.Append($"{k}: 调用 {v} 次, 命中 {h} 次; ");
+            }
+            report = sb.ToString();
+            // 未命中样本（去重后最多 12 条）
+            if (_dbgMissSamples.Count > 0)
+            {
+                var uniq = _dbgMissSamples.Distinct().Take(12).ToList();
+                report += "\n    未命中样本: " + string.Join(" | ", uniq);
+                _dbgMissSamples.Clear();
+            }
+            _dbgCalls.Clear();
+            _dbgHits.Clear();
+        }
+        _appLog.Info($"[钩子调试] {report}");
     }
 
     /// <summary> 安装控件标签桩（安全子集：指针 + 基本类型签名，无 ImVec2、非 varargs）。 </summary>
@@ -302,7 +351,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private nint Label(nint p)
     {
         if (p == 0 || !_replacement.Enabled || SuppressReplacement) return p;
-        var rep = TryLookup(p, 0);
+        var rep = TryLookup(p, 0, "控件");
         return rep != 0 ? rep : p;
     }
 

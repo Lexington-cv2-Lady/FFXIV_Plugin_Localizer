@@ -196,6 +196,21 @@ public sealed class AiSettingsWindow : Window
         ImGui.Separator();
         ImGui.Spacing();
 
+        // ── 钩子调试日志（排查"表里有译文但界面没变"）──
+        var dbg = cfg.DebugHookLog;
+        if (ImGui.Checkbox("钩子调试日志", ref dbg))
+        {
+            cfg.DebugHookLog = dbg;
+            cfg.Save();
+            _plugin.Hook.DebugStats = dbg; // 即时生效
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("开启后每 5 秒在日志里输出：各钩子（文字/控件）的调用次数、查表命中次数、未命中样本。\n用于排查「对照表里有译文、但界面没变成中文」——能看出是钩子没触发、还是触发了但没命中。");
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
         // 测试连接
         if (_testTask != null && !_testTask.IsCompleted)
         {

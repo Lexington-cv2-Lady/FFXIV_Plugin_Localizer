@@ -69,19 +69,16 @@ public sealed class Plugin : IDalamudPlugin
             Configuration.Save();
         }
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
-        // wiki 官方术语表（可选）：加载后作为替换最高优先级词源 + 机翻参考
-        Wiki = new WikiGlossaryService(AppLog);
-        EnsureWikiDir();
+        // ⚠ 顺序要求：Replacement 必须先建（EnsureWikiDir 内部要用它设置术语），否则会抛 NRE 被吞。
         Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
         Replacement.Enabled = Configuration.ReplacementEnabled;
         Replacement.SyncFdcnOnStartup(); // 启动同步：FDCN 文件指纹变了才自动重导；未装 FDCN 用内置翻译包打底
-        if (Configuration.WikiEnabled && !string.IsNullOrWhiteSpace(Configuration.WikiDir))
-        {
-            Wiki.Load(Configuration.WikiDir);
-            Replacement.SetWikiTerms(new Dictionary<string, string>(Wiki.All, StringComparer.Ordinal));
-        }
+        // wiki 官方术语表（可选）：联动旧项目词典目录，加载后作为替换最高优先级词源 + 机翻参考
+        Wiki = new WikiGlossaryService(AppLog);
+        EnsureWikiDir();   // 内部：探测目录 → Wiki.Load → Replacement.SetWikiTerms
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
             () => Configuration.WidgetHooks, Replacement);
+        Hook.DebugStats = Configuration.DebugHookLog;
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         Mt.SetWiki(Wiki); // 机翻时附带官方术语对照，保证专有名词译名一致
         MainWindow = new MainWindow(this);
@@ -145,6 +142,12 @@ public sealed class Plugin : IDalamudPlugin
         {
             _startupCheckDone = true;
             StartupCheck();
+        }
+        // 调试日志（可选）
+        if (Configuration.DebugHookLog && (DateTime.Now - _lastDbgLog).TotalSeconds >= 5)
+        {
+            _lastDbgLog = DateTime.Now;
+            Hook.TickDebugLog();
         }
     }
 
@@ -250,6 +253,7 @@ public sealed class Plugin : IDalamudPlugin
 
     // ── 启动自动检查：加载约 10 秒后扫一次缺口，静默/按配置翻译（插件更新后新文案也走这条） ──
     private readonly DateTime _startupCheckAt = DateTime.Now.AddSeconds(10);
+    private DateTime _lastDbgLog = DateTime.MinValue;
     private bool _startupCheckDone;
 
     private void StartupCheck()

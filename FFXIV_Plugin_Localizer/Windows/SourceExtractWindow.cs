@@ -236,6 +236,16 @@ public sealed class SourceExtractWindow : Window
                         StartExtract(name, url);
                     }
                     ImGui.SameLine();
+                    if (ImGui.Button("复制名##cp"))
+                    {
+                        // 复制**显示名**（安装器里看到的名字），便于搜索/交流/查资料
+                        var copyText = displayName.Length > 0 ? displayName : name;
+                        ImGui.SetClipboardText(copyText);
+                        _summary = $"已复制插件名到剪贴板：{copyText}";
+                    }
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip("复制该插件的显示名（安装器里显示的名字）到剪贴板。");
+                    ImGui.SameLine();
                     // 名称显示：**显示名【内部名】**（用户在安装器里看到的是显示名，故把显示名放前、内部名用【】标注）
                     if (displayName.Length > 0 &&
                         !string.Equals(displayName, name, StringComparison.OrdinalIgnoreCase))
