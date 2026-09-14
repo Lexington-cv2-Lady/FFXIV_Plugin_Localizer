@@ -156,6 +156,8 @@ public sealed class AiSettingsWindow : Window
 
         // ── wiki 官方术语表（术语优先于机翻，物品/技能名必须用官方译名） ──
         ImGui.TextUnformatted("wiki 术语表（官方译名，优先级最高）：");
+        Ui.Hint("与旧项目「FFXIV 模组汉化工具」联动：装了它就直接读取它词典目录下的 wiki 术语，每次启动重新读取，\n" +
+                "故旧项目更新术语后本插件立即用上最新版（不复制文件）。未装旧项目则留空此目录，正常走机翻。");
         var wikiOn = cfg.WikiEnabled;
         if (ImGui.Checkbox("启用 wiki 术语表", ref wikiOn))
         {
@@ -167,28 +169,28 @@ public sealed class AiSettingsWindow : Window
             ImGui.SetTooltip("启用后，命中术语的英文一律用官方译名（如物品名、技能名），\n优先于机翻和普通对照表。中文化界面时更准确统一。");
 
         var wikiDir = cfg.WikiDir;
-        ImGui.SetNextItemWidth(Math.Max(200f, ImGui.GetContentRegionAvail().X - 60f));
-        if (ImGui.InputTextWithHint("##WikiDir", "术语表目录（含 物品.json / 技能_动作.json 等）", ref wikiDir, 512))
+        ImGui.SetNextItemWidth(Math.Max(200f, ImGui.GetContentRegionAvail().X - 140f));
+        if (ImGui.InputTextWithHint("##WikiDir", "术语目录（留空 = 自动探测旧项目的词典目录）", ref wikiDir, 512))
         {
             cfg.WikiDir = wikiDir.Trim();
             cfg.Save();
         }
         ImGui.SameLine();
-        if (ImGui.Button("加载"))
+        if (ImGui.Button("自动探测并加载"))
         {
             var n = _plugin.ReloadWiki();
             _testResult = n > 0
-                ? $"wiki 术语已加载 {n} 条并生效（各类：{string.Join("、", _plugin.Wiki.CategoryCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）"
-                : $"未在目录中找到术语文件：{cfg.WikiDir}";
+                ? $"wiki 术语已加载 {n} 条并生效（来源：{cfg.WikiDir}）"
+                : "未找到术语表：请确认已装旧项目插件（会读其词典目录），或在上方手动填写术语目录。";
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("从该目录读取全部术语 json（旧项目维护的 6 类官方译名对照）。");
+            ImGui.SetTooltip("重新探测旧项目词典目录并加载其 wiki 术语（不复制，直接读取）。");
 
         if (_plugin.Wiki.Loaded)
             Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f),
                 $"【已启用】 已加载 {_plugin.Wiki.Count} 条官方术语（{string.Join("、", _plugin.Wiki.CategoryCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）");
         else
-            Ui.Hint("未加载术语表。可把旧项目的 wiki_术语对照 目录内容放入上方目录后点「加载」。");
+            Ui.Hint("未加载术语表。装了旧项目插件会自动读取其术语；也可在上方手动指定目录后点「自动探测并加载」。");
 
         ImGui.Spacing();
         ImGui.Separator();

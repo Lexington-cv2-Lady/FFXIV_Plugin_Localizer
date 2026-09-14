@@ -18,10 +18,54 @@ namespace FFXIVPluginLocalizer.Services;
 /// </summary>
 public sealed class WikiGlossaryService
 {
-    /// <summary> 默认目录名（相对于插件数据目录）。 </summary>
+    /// <summary> 默认目录名（相对于插件数据目录，用于用户手动放置术语文件）。 </summary>
     public const string DirName = "wiki_术语对照";
     /// <summary> 单条术语的最大长度（过长的不是术语，是描述）。 </summary>
     private const int MaxTermLen = 120;
+
+    /// <summary>
+    /// **自动探测旧项目（FFXIV 模组汉化工具）的 wiki 术语目录**——用于与其联动：
+    /// 用户若装了旧项目插件，就直接读它词典目录下的 wiki 文件（**不复制**），
+    /// 这样老项目更新术语后，本插件下次启动即用最新版本，无需重新内置。
+    ///
+    /// 探测方式：扫描 pluginConfigs 下所有插件配置，找含 <c>DictionaryPath</c> 的，
+    /// 检查其下 <c>wiki_术语对照</c> 目录是否存在且含术语 json。返回可用的 wiki 目录（找不到返回 null）。
+    /// 不依赖旧插件的具体 ID（兼容中英文 ID 的不同版本）。
+    /// </summary>
+    public static string? DetectOldProjectWikiDir(string pluginConfigRoot)
+    {
+        try
+        {
+            if (!Directory.Exists(pluginConfigRoot)) return null;
+            foreach (var cfgFile in Directory.EnumerateFiles(pluginConfigRoot, "*.json"))
+            {
+                // 跳过本插件自己的配置
+                if (Path.GetFileName(cfgFile).StartsWith("FFXIV_Plugin_Localizer", StringComparison.OrdinalIgnoreCase)) continue;
+                if (cfgFile.Contains(".bak", StringComparison.OrdinalIgnoreCase)) continue;
+                string? dictPath = null;
+                try
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(cfgFile));
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        doc.RootElement.TryGetProperty("DictionaryPath", out var dp) &&
+                        dp.ValueKind == JsonValueKind.String)
+                    {
+                        dictPath = dp.GetString();
+                    }
+                }
+                catch { continue; } // 单个配置坏了跳过
+                if (string.IsNullOrWhiteSpace(dictPath)) continue;
+
+                var wikiDir = Path.Combine(dictPath!, DirName);
+                if (Directory.Exists(wikiDir) && Directory.EnumerateFiles(wikiDir, "*.json").Any())
+                {
+                    return wikiDir;
+                }
+            }
+        }
+        catch { /* 探测失败返回 null */ }
+        return null;
+    }
 
     private readonly AppLog _appLog;
 

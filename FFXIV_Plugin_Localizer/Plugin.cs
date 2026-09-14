@@ -174,18 +174,52 @@ public sealed class Plugin : IDalamudPlugin
         AppLog.Info("[还原] 界面已还原为英文（对照表文件未删除）");
     }
 
-    /// <summary> 在插件数据目录下建 wiki 术语目录（放术语 json）；已设置则用设置值。 </summary>
+    /// <summary>
+    /// 决定 wiki 术语目录并加载。**与旧项目联动（不复制文件）**：
+    ///   ① 用户手动指定的目录（存在且含 json）→ 优先；
+    ///   ② 否则**自动探测旧项目插件的词典目录**（读其配置里的 DictionaryPath）→ 直接读它的 wiki_术语对照；
+    ///   ③ 都没有 → 不启用术语（正常走机翻）。
+    /// 每次启动都重新探测/重读，故旧项目更新术语后本插件立即用上最新版，无需重新内置。
+    /// </summary>
     private void EnsureWikiDir()
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(Configuration.WikiDir))
+            string? dir = null;
+            var pluginConfigRoot = Path.GetDirectoryName(PluginInterface.GetPluginConfigDirectory()) ?? "";
+
+            // ① 手动指定
+            var manual = Configuration.WikiDir?.Trim() ?? "";
+            if (manual.Length > 0 && Directory.Exists(manual) && Directory.EnumerateFiles(manual, "*.json").Any())
             {
-                Configuration.WikiDir = Path.Combine(PluginInterface.GetPluginConfigDirectory(), WikiGlossaryService.DirName);
-                Configuration.Save();
-                Log.Information($"[wiki] 术语目录默认为 {Configuration.WikiDir}");
+                dir = manual;
+                Log.Information($"[wiki] 使用手动指定的术语目录：{dir}");
             }
-            Directory.CreateDirectory(Configuration.WikiDir);
+            else
+            {
+                // ② 自动探测旧项目
+                var detected = WikiGlossaryService.DetectOldProjectWikiDir(pluginConfigRoot);
+                if (detected != null)
+                {
+                    dir = detected;
+                    Configuration.WikiDir = detected; // 记住探测结果，便于 UI 展示
+                    Configuration.Save();
+                    Log.Information($"[wiki] 已联动旧项目术语目录：{detected}");
+                }
+            }
+
+            if (dir == null)
+            {
+                Log.Information("[wiki] 未找到术语表（未装旧项目插件或未指定目录）——直接使用机翻");
+                return;
+            }
+
+            var n = Wiki.Load(dir);
+            if (Configuration.WikiEnabled && n > 0)
+            {
+                Replacement.SetWikiTerms(new Dictionary<string, string>(Wiki.All, StringComparer.Ordinal));
+                Log.Information($"[wiki] 已启用 {n} 条官方术语（联动目录：{dir}）");
+            }
         }
         catch (Exception ex)
         {
@@ -193,9 +227,20 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
-    /// <summary> 重新加载 wiki 术语表并让替换层生效（设置目录后调用）。 </summary>
+    /// <summary> 重新加载 wiki 术语表并让替换层生效（UI「加载」按钮调用；含重新探测旧项目目录）。 </summary>
     public int ReloadWiki()
     {
+        // 目录为空时先尝试重新探测旧项目（用户可能刚装/更新了旧插件）
+        if (string.IsNullOrWhiteSpace(Configuration.WikiDir) || !Directory.Exists(Configuration.WikiDir))
+        {
+            var root = Path.GetDirectoryName(PluginInterface.GetPluginConfigDirectory()) ?? "";
+            var detected = WikiGlossaryService.DetectOldProjectWikiDir(root);
+            if (detected != null)
+            {
+                Configuration.WikiDir = detected;
+                Configuration.Save();
+            }
+        }
         var n = Wiki.Load(Configuration.WikiDir);
         Replacement.SetWikiTerms(Configuration.WikiEnabled && n > 0
             ? new Dictionary<string, string>(Wiki.All, StringComparer.Ordinal)
