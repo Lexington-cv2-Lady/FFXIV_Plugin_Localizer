@@ -51,9 +51,9 @@ public sealed class MainWindow : Window
 
         // ── 钩子状态 + 排障开关 ──
         if (hook.Hooked)
-            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), "✔ " + hook.HookStatus);
+            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), "【正常】 " + hook.HookStatus);
         else
-            Ui.ColoredWrapped(new Vector4(1f, 0.45f, 0.4f, 1f), "✘ " + hook.HookStatus);
+            Ui.ColoredWrapped(new Vector4(1f, 0.45f, 0.4f, 1f), "【异常】 " + hook.HookStatus);
 
         var hooksOn = _plugin.Configuration.HooksEnabled;
         if (ImGui.Checkbox("全部钩子（排障开关）", ref hooksOn))
@@ -76,27 +76,27 @@ public sealed class MainWindow : Window
         ImGui.Separator();
 
         // ── 功能入口（按使用流程排序：① 配置 → ② 提取 → ③ 翻译 → ④ 排障；放不下自动换行） ──
-        Ui.Hint("流程：① AI 设置（填 Key） → ② 源码提取（获取英文，需代理） → ③ 插件翻译（翻成中文）；安装器翻译为并行支线，日志随时可看。");
-        if (ImGui.Button("① AI 设置"))
+        Ui.Hint("流程：第 1 步 AI 设置填 Key，第 2 步 源码提取获取英文（需代理），第 3 步 插件翻译翻成中文；安装器翻译为并行支线，日志随时可看。");
+        if (ImGui.Button("AI 设置（第 1 步）"))
         {
             _plugin.ToggleAiSettingsUi();
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("第一步·前置配置：AI 供应商 / API Key / 模型 / 温度 / 批量 / 测试连接。\n填好免费智谱 Key 后，后面两步的机翻才能用。");
-        Ui.SameLineIfFits(Ui.ButtonWidth("② 源码提取"));
-        if (ImGui.Button("② 源码提取"))
+        Ui.SameLineIfFits(Ui.ButtonWidth("源码提取（第 2 步）"));
+        if (ImGui.Button("源码提取（第 2 步）"))
         {
             _plugin.ToggleSourceExtractUi();
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("从插件公开源码提取界面文案（最准：只拿界面文字 + 标出绘制函数）。\n需勾选并填写代理才能访问 GitHub；闭源插件无法翻译。");
-        Ui.SameLineIfFits(Ui.ButtonWidth("③ 插件翻译"));
-        if (ImGui.Button("③ 插件翻译"))
+        Ui.SameLineIfFits(Ui.ButtonWidth("插件翻译（第 3 步）"));
+        if (ImGui.Button("插件翻译（第 3 步）"))
         {
             _plugin.ToggleWindowReplaceUi();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("第三步·翻译：按插件把窗口内文字翻成中文（机翻/手动，候选来自②源码提取），替换层即时生效。");
+            ImGui.SetTooltip("第三步·翻译：按插件把窗口内文字翻成中文（机翻/手动，候选来自源码提取），替换层即时生效。");
         Ui.SameLineIfFits(Ui.ButtonWidth("安装器翻译"));
         if (ImGui.Button("安装器翻译"))
         {

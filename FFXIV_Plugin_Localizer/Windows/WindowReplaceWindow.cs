@@ -116,7 +116,7 @@ public sealed class WindowReplaceWindow : Window
                 {
                     var (name, total, translated) = plugins[i];
                     ImGui.PushID(i);
-                    var label = translated >= total ? $"{name}（已翻译 {translated}/{total}）✔" : $"{name}（已翻 {translated}/共 {total}）";
+                    var label = translated >= total ? $"{name}（已翻译 {translated}/{total}）全部已翻译" : $"{name}（已翻 {translated}/共 {total}）";
                     if (ImGui.CollapsingHeader(label))
                     {
                         if (_openPlugin != name)

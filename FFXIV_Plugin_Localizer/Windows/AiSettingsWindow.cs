@@ -186,7 +186,7 @@ public sealed class AiSettingsWindow : Window
 
         if (_plugin.Wiki.Loaded)
             Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f),
-                $"✔ 已加载 {_plugin.Wiki.Count} 条官方术语（{string.Join("、", _plugin.Wiki.CategoryCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）");
+                $"【已启用】 已加载 {_plugin.Wiki.Count} 条官方术语（{string.Join("、", _plugin.Wiki.CategoryCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）");
         else
             Ui.Hint("未加载术语表。可把旧项目的 wiki_术语对照 目录内容放入上方目录后点「加载」。");
 

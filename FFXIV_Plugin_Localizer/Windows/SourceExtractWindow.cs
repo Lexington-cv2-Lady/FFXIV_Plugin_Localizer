@@ -130,14 +130,14 @@ public sealed class SourceExtractWindow : Window
 
         // 状态：中性色说明填写情况；绿色**只在测试通过后**出现
         if (_testOk == true)
-            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"✔ {_testMessage}");
+            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"【成功】 {_testMessage}");
         else if (_testOk == false)
-            Ui.ColoredWrapped(new Vector4(1f, 0.45f, 0.4f, 1f), $"✘ {_testMessage}");
+            Ui.ColoredWrapped(new Vector4(1f, 0.45f, 0.4f, 1f), $"【失败】 {_testMessage}");
         else if (!cfg.UseProxy)
             Ui.ColoredWrapped(new Vector4(0.75f, 0.8f, 0.85f, 1f),
                 "当前为「直连」模式（未启用代理）——点「测试直连」确认能否访问 GitHub。");
         else if (string.IsNullOrWhiteSpace(cfg.ProxyPort))
-            Ui.ColoredWrapped(new Vector4(1f, 0.6f, 0.35f, 1f), "✘ 已勾选启用代理，但端口为空：请填写端口。");
+            Ui.ColoredWrapped(new Vector4(1f, 0.6f, 0.35f, 1f), "【需填写】 已勾选启用代理，但端口为空：请填写端口。");
         else
             Ui.ColoredWrapped(new Vector4(0.75f, 0.8f, 0.85f, 1f),
                 $"已填写代理 {cfg.ProxyAddress}（尚未验证连通性）——建议先点「测试代理」确认。");
@@ -231,7 +231,7 @@ public sealed class SourceExtractWindow : Window
                     ImGui.PopStyleColor();
                     if (_lastResult.TryGetValue(name, out var res))
                     {
-                        Ui.ColoredWrapped(new Vector4(0.6f, 0.85f, 0.6f, 1f), "　" + res);
+                        Ui.ColoredWrapped(new Vector4(0.6f, 0.85f, 0.6f, 1f), "    " + res);
                     }
                     ImGui.PopID();
                 }
@@ -317,7 +317,7 @@ public sealed class SourceExtractWindow : Window
             try
             {
                 var (ok, count, funcs, msg) = await _svc.ExtractAsync(name, url);
-                _lastResult[name] = (ok ? "✔ " : "✘ ") + msg;
+                _lastResult[name] = (ok ? "【正常】 " : "【异常】 ") + msg;
                 _summary = msg;
                 _plugin.AppLog.Info($"[源码] {name}：{msg}");
             }
