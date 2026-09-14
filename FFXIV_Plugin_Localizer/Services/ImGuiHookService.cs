@@ -271,17 +271,18 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// <summary> 周期性输出调试统计（由 Plugin 的框架回调每 5 秒调用一次）。 </summary>
     public void TickDebugLog()
     {
-        if (!DebugStats) return;
+        if (!DebugStats || _hookedWidgetNames.Count == 0) return;
         string report;
         lock (_dbgCalls)
         {
-            if (_dbgCalls.Count == 0) return;
+            // ⚠ 即使某钩子 0 调用也要列出（否则无法区分「没注册」与「注册了但没被调用」）
             _dbgFrame++;
             var sb = new System.Text.StringBuilder();
-            foreach (var (k, v) in _dbgCalls)
+            // 先列"被调用过"的（按调用次数降序，便于一眼看到主通道）
+            foreach (var (k, v) in _dbgCalls.OrderByDescending(kv => kv.Value))
             {
                 _dbgHits.TryGetValue(k, out var h);
-                sb.Append($"{k}: 调用 {v} 次, 命中 {h} 次; ");
+                sb.Append($"{k}: {v}次/{h}命中; ");
             }
             report = sb.ToString();
             // 未命中样本（**只含纯英文**，去重后最多 12 条）——这些才是真正"表里没有、界面仍是英文"的候选
