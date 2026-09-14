@@ -38,12 +38,23 @@ public static class TextHeuristics
     /// <summary> 代码标识符风格：无空格、含下划线/驼峰混排的点号路径（如 lightless-file-cache-version）。 </summary>
     private static readonly Regex IdentLike = new(@"^[a-z0-9][a-z0-9._\-]*$", RegexOptions.Compiled);
 
+    /// <summary>
+    /// 是否为「聊天命令」：以 <c>/</c> 开头**且不含空格**（如 <c>/tp</c>、<c>/bts</c>）——是命令而非文案。
+    /// 注意：含空格的（如 <c>/bts → Open the configuration window.</c>）是提示文本，**要翻**，不能排除。
+    /// </summary>
+    public static bool IsChatCommand(string s)
+    {
+        var t = (s ?? "").Trim();
+        return t.Length >= 2 && t[0] == '/' && !t.Contains(' ');
+    }
+
     /// <summary> 是否像「非界面的技术字符串」（颜色/格式模板/结构化片段/纯标识符），应排除。 </summary>
     public static bool IsTechnicalNoise(string s)
     {
         var t = (s ?? "").Trim();
         if (t.Length == 0) return true;
         if (t.Length <= 2) return true;
+        if (IsChatCommand(t)) return true;                     // /tp 这类聊天命令
         if (HexColor.IsMatch(t)) return true;                 // #FFFFFF
         if (t.StartsWith("#lightless-")) return true;          // 缓存键前缀（插件特有，通用规则兜底）
         if (FormatTemplate.IsMatch(t)) return true;            // %.0f px
