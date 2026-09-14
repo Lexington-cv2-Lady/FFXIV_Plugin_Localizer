@@ -26,6 +26,16 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void TextUnformattedDelegate(nint textBegin, nint textEnd);
 
+    /// <summary>
+    /// igTextEx(const char* text, const char* text_end, ImGuiTextFlags flags)——**ImGui 文字族的总入口**。
+    /// ⚠ 关键事实（2026-09-14 实测定性）：<c>ImGui::Text/TextWrapped/TextColored/TextDisabled/BulletText</c>
+    /// 都走 <c>TextV → TextEx</c>，**不经过 TextUnformatted**；只钩 TextUnformatted 会漏掉绝大多数段落文字
+    /// （表现为"同一张表里有的翻得了、有的翻不了"）。TextEx 是固定签名（2 指针 + int），安全可挂。
+    /// 注意不能钩 <c>igText</c>/<c>igTextWrapped</c> 本身——它们是 varargs（栈腐蚀）且含 ImVec2（封送错位）。
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void TextExDelegate(nint text, nint textEnd, int flags);
+
     private const int MaxTextLen = 1024;
 
     private readonly AppLog _appLog;
@@ -35,6 +45,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly Func<bool> _hooksEnabled;
 
     private Hook<TextUnformattedDelegate>? _textHook;
+    private Hook<TextExDelegate>? _textExHook;
 
     /// <summary> 钩子是否挂接成功（替换可用的前提）。 </summary>
     public bool Hooked { get; private set; }
@@ -74,19 +85,35 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 return;
             }
 
-            var stub = GetExport(baseAddr, "igTextUnformatted");
-            if (stub == 0)
+            // ── 挂两个文字桩 ──
+            // ① igTextEx：ImGui::Text/TextWrapped/TextColored/TextDisabled/BulletText 的总入口（TextV→TextEx），
+            //    覆盖绝大多数段落/说明文字——只钩 TextUnformatted 会大面积漏（实测"同表内有的翻有的不翻"）。
+            var exStub = GetExport(baseAddr, "igTextEx");
+            if (exStub != 0)
             {
-                HookStatus = $"cimgui（{moduleName}）缺少 igTextUnformatted 导出，替换不可用";
+                _textExHook = _interop.HookFromAddress<TextExDelegate>(exStub, TextExDetour, IGameInteropProvider.HookBackend.Automatic);
+                _textExHook.Enable();
+            }
+            // ② igTextUnformatted：部分代码直接调它（不经 TextEx），补漏
+            var stub = GetExport(baseAddr, "igTextUnformatted");
+            if (stub != 0)
+            {
+                _textHook = _interop.HookFromAddress<TextUnformattedDelegate>(stub, TextUnformattedDetour, IGameInteropProvider.HookBackend.Automatic);
+                _textHook.Enable();
+            }
+
+            Hooked = _textExHook != null || _textHook != null;
+            if (!Hooked)
+            {
+                HookStatus = $"cimgui（{moduleName}）缺少 igTextEx / igTextUnformatted 导出，替换不可用";
                 _appLog.Error($"[钩子] {HookStatus}");
                 return;
             }
-
-            _textHook = _interop.HookFromAddress<TextUnformattedDelegate>(stub, TextUnformattedDetour, IGameInteropProvider.HookBackend.Automatic);
-            _textHook.Enable();
-            Hooked = true;
-            HookStatus = $"已挂接 {moduleName}：igTextUnformatted（文本类）";
-            _appLog.Info($"[钩子] {HookStatus}（桩首字节 {Hex(stub, 12)}）");
+            HookStatus = $"已挂接 {moduleName}：" +
+                         (_textExHook != null ? "igTextEx" : "") +
+                         (_textExHook != null && _textHook != null ? " + " : "") +
+                         (_textHook != null ? "igTextUnformatted" : "");
+            _appLog.Info($"[钩子] {HookStatus}");
         }
         catch (Exception ex)
         {
@@ -100,34 +127,60 @@ public sealed unsafe class ImGuiHookService : IDisposable
     {
         if (textBegin != 0 && _replacement.Enabled && !SuppressReplacement)
         {
-            try
+            var rep = TryLookup(textBegin, textEnd);
+            if (rep != 0)
             {
-                var q = (byte*)textBegin;
-                // ⚠ 必须尊重调用方的 text_end：非空表示这是一个「切片」（未必 NUL 结尾），
-                //   此时绝不能扫 NUL——曾无条件扫到 1024 字节，缓冲区较小就会读到未映射内存 → AV。
-                int n;
-                if (textEnd != 0)
-                {
-                    n = (int)(textEnd - textBegin);
-                    if (n <= 0) { _textHook!.Original(textBegin, textEnd); return; }
-                    if (n > MaxTextLen) n = MaxTextLen;
-                }
-                else
-                {
-                    n = 0;
-                    while (n < MaxTextLen && q[n] != 0) n++;
-                }
-
-                var rep = _replacement.TryReplace(q, n);
-                if (rep != 0)
-                {
-                    _textHook!.Original(rep, 0); // 中文按 NUL 结尾，end 传 0
-                    return;
-                }
+                _textHook!.Original(rep, 0); // 中文按 NUL 结尾，end 传 0
+                return;
             }
-            catch { /* 钩子内异常绝不外抛 */ }
         }
         _textHook!.Original(textBegin, textEnd);
+    }
+
+    /// <summary> igTextEx 转发（Text/TextWrapped 等文字族的总入口，flags 原样透传）。 </summary>
+    private void TextExDetour(nint text, nint textEnd, int flags)
+    {
+        if (text != 0 && _replacement.Enabled && !SuppressReplacement)
+        {
+            var rep = TryLookup(text, textEnd);
+            if (rep != 0)
+            {
+                _textExHook!.Original(rep, 0, flags);
+                return;
+            }
+        }
+        _textExHook!.Original(text, textEnd, flags);
+    }
+
+    /// <summary>
+    /// 公共查表：按调用方给的 text_end（为空则扫到 NUL）取出文案、查对照表；命中返回中文指针，否则 0。
+    /// 异常绝不外抛（钩子内异常会中断整个 UI 绘制）。
+    /// </summary>
+    private nint TryLookup(nint textBegin, nint textEnd)
+    {
+        try
+        {
+            var q = (byte*)textBegin;
+            // ⚠ 必须尊重调用方的 text_end：非空表示「切片」（未必 NUL 结尾），
+            //   此时绝不能扫 NUL——曾无条件扫到 1024 字节，缓冲区较小就会读到未映射内存 → AV。
+            int n;
+            if (textEnd != 0)
+            {
+                n = (int)(textEnd - textBegin);
+                if (n <= 0) return 0;
+                if (n > MaxTextLen) n = MaxTextLen;
+            }
+            else
+            {
+                n = 0;
+                while (n < MaxTextLen && q[n] != 0) n++;
+            }
+            return _replacement.TryReplace(q, n);
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     // ═══════════════════════ cimgui 定位 ═══════════════════════
@@ -187,7 +240,9 @@ public sealed unsafe class ImGuiHookService : IDisposable
     public void Dispose()
     {
         try { _textHook?.Dispose(); } catch { }
+        try { _textExHook?.Dispose(); } catch { }
         _textHook = null;
+        _textExHook = null;
         Hooked = false;
     }
 }
