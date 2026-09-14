@@ -54,9 +54,10 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte W3u(nint a, nint b, uint c);                           // igBeginCombo / igCollapsingHeader_BoolPtr / igBeginTabItem / igColorEdit3/4
     /// <summary> igBegin(name, bool* p_open, ImGuiWindowFlags flags)——窗口开始。
-    /// 双重职责：① **替换窗口标题**（插件窗口标题也是界面文字，如 BigPlayerDebuffs 的
-    /// "BigPlayerDebuffs Config"；只做整串精确匹配、绝不截断 ##ID——见 TryReplaceExact）；
-    /// ② 调试时记录窗口名（排查"某个窗口的文字为什么没被替换"时，先确认它到底有没有被创建）。 </summary>
+    /// **只用于诊断**（开启「钩子调试日志」时记录实际创建的窗口名，回答"某个窗口到底有没有被渲染"）。
+    /// ⚠ 刻意**不做窗口标题替换**（2026-09-14 用户决定）：窗口标题保持原文即可，不必汉化；
+    ///    这样也省掉"必须整串精确匹配、不能截断 ##/###ID"那一整套风险（ImGui 用窗口名算窗口 ID）。
+    /// 该钩子仅在 `DebugStats` 为真时安装（生产环境零开销）。 </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte BeginWDelegate(nint name, nint pOpen, uint flags);
 
@@ -126,7 +127,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
     public string HookStatus { get; private set; } = "未初始化";
 
     public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop,
-        Func<bool> hooksEnabled, Func<bool> widgetHooksEnabled, ReplacementService replacement)
+        Func<bool> hooksEnabled, Func<bool> widgetHooksEnabled, ReplacementService replacement,
+        bool debugStats)
     {
         _appLog = appLog;
         _log = log;
@@ -134,6 +136,10 @@ public sealed unsafe class ImGuiHookService : IDisposable
         _hooksEnabled = hooksEnabled;
         _widgetHooksEnabled = widgetHooksEnabled;
         _replacement = replacement;
+        // ⚠ 必须**从构造函数传入**，不能像以前那样构造后再 `Hook.DebugStats = …` 赋值——
+        //    InstallHooks 在构造期就跑完了，那时 DebugStats 还是 false，导致"按 DebugStats 才装"的
+        //    诊断钩子永远装不上（纯死代码；2026-09-14 踩过，见工作记忆）。
+        DebugStats = debugStats;
         InstallHooks();
     }
 
@@ -290,47 +296,31 @@ public sealed unsafe class ImGuiHookService : IDisposable
         }
     }
 
-    /// <summary> igBegin 转发：替换窗口标题（整串精确匹配，不碰 ##ID）+ 调试记录窗口名。异常绝不外抛。 </summary>
+    /// <summary> igBegin 诊断转发：只读记录窗口名（不修改任何参数）。异常绝不外抛。 </summary>
     private byte BeginDbgDetour(nint name, nint pOpen, uint flags)
     {
-        var use = name;
         if (name != 0)
         {
-            if (DebugStats)
+            try
             {
-                try
+                var q = (byte*)name;
+                var n = 0;
+                while (n < 256 && q[n] != 0) n++;
+                if (n >= 2)
                 {
-                    var q = (byte*)name;
-                    var n = 0;
-                    while (n < 256 && q[n] != 0) n++;
-                    if (n >= 2)
+                    var win = System.Text.Encoding.UTF8.GetString(q, n);
+                    lock (_dbgCalls)
                     {
-                        var win = System.Text.Encoding.UTF8.GetString(q, n);
-                        lock (_dbgCalls)
-                        {
-                            _dbgCalls["igBegin"] = _dbgCalls.TryGetValue("igBegin", out var c) ? c + 1 : 1;
-                            // **累计**记录：一个窗口可能只在两次 tick 之间短暂渲染，
-                            // 只看「本 tick 的窗口名」会漏掉它（BigPlayerDebuffs 的配置窗口就是这么 elusive）。
-                            if (_dbgWindowNames.Add(win) && _dbgWindowNew.Count < 60) _dbgWindowNew.Add(win);
-                        }
+                        _dbgCalls["igBegin"] = _dbgCalls.TryGetValue("igBegin", out var c) ? c + 1 : 1;
+                        // **累计**记录：一个窗口可能只在两次 tick 之间短暂渲染，
+                        // 只看「本 tick 的窗口名」会漏掉它（BigPlayerDebuffs 的配置窗口就是这么 elusive）。
+                        if (_dbgWindowNames.Add(win) && _dbgWindowNew.Count < 60) _dbgWindowNew.Add(win);
                     }
                 }
-                catch { /* 绝不外抛 */ }
             }
-            if (_replacement.Enabled && !SuppressReplacement)
-            {
-                try
-                {
-                    var q = (byte*)name;
-                    var n = 0;
-                    while (n < 256 && q[n] != 0) n++;
-                    var rep = _replacement.TryReplaceExact(q, n);
-                    if (rep != 0) use = rep;
-                }
-                catch { /* 绝不外抛 */ }
-            }
+            catch { /* 绝不外抛 */ }
         }
-        return _beginDbgHook!.Original(use, pOpen, flags);
+        return _beginDbgHook!.Original(name, pOpen, flags);
     }
 
     /// <summary> 纯 ASCII（不含中文/日文/全角）——用于过滤"已经是中文"的噪音。 </summary>
@@ -470,10 +460,9 @@ public sealed unsafe class ImGuiHookService : IDisposable
         //    曾误挂过，2026-09-14 移除。
 
         // ── 诊断用：igBegin（记录实际创建的窗口名）──
-        // ⚠ 曾经写成 `if (DebugStats)` 才挂——**这是死代码**：DebugStats 由 Plugin 在构造之后才赋值
-        //    （Hook.DebugStats = Configuration.DebugHookLog），构造期它必然为 false，于是诊断钩子永远没挂上，
-        //    「窗口到底有没有被渲染」这个最关键的问题反而查不了。正确做法：**钩子照挂**，
-        //    只在记录时看 DebugStats（BeginDbgDetour 内部已判断），开/关调试日志都能立刻生效。
+        // ⚠ 只在开启「钩子调试日志」时安装：这是诊断设施，不做替换（窗口标题不汉化），
+        //    而 igBegin 是**极热**函数（实测每 5 秒数千次），生产环境没必要为它付一次托管往返。
+        if (DebugStats)
         {
             var beginStub = GetExport(baseAddr, "igBegin");
             if (beginStub != 0)

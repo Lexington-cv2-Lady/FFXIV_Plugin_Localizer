@@ -81,8 +81,7 @@ public sealed class Plugin : IDalamudPlugin
         OldDict = new OldDictionaryService(AppLog);
         EnsureDictDir();
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
-            () => Configuration.WidgetHooks, Replacement);
-        Hook.DebugStats = Configuration.DebugHookLog;
+            () => Configuration.WidgetHooks, Replacement, Configuration.DebugHookLog);
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         Mt.SetWiki(Wiki); // 机翻时附带官方术语对照，保证专有名词译名一致
         MainWindow = new MainWindow(this);
@@ -342,7 +341,11 @@ public sealed class Plugin : IDalamudPlugin
                 AppLog.Info("[自动] 启动检查：对照表已覆盖全部已装插件介绍");
                 return;
             }
-            if (string.IsNullOrWhiteSpace(Configuration.ZhipuApiKey))
+            // ⚠ 必须用**解析后**的 Key（按当前服务商从 AiApiKeys 取名，并兼容旧版单一 ZhipuApiKey）——
+            //    旧写法只读 `Configuration.ZhipuApiKey`，而该字段在构造期就被迁移清空了（见上方 Key 迁移），
+            //    于是**明明配了 Key 也会被判成"未配置"** → 静默跳过自动翻译（2026-09-14 实测发现：
+            //    日志说"未配置 API Key"，但机翻其实能用，自相矛盾）。
+            if (string.IsNullOrWhiteSpace(MtTranslateService.GetApiKey(Configuration)))
             {
                 AppLog.Info($"[自动] 检测到 {count} 条介绍缺口，未配置 API Key，跳过（可在「安装器翻译」窗口填写）");
                 Mt.Notify($"检测到 {count} 条新文案待翻译（未填 API Key）");

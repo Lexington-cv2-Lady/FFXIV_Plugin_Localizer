@@ -32,8 +32,11 @@ public static class TextHeuristics
     /// <summary> printf 风格格式模板：%.2f、%d、%s、{0} 等——是代码模板不是可读文案。 </summary>
     private static readonly Regex FormatTemplate = new(@"%[-+ #0-9.]*[diouxXeEfgGsc%]", RegexOptions.Compiled);
 
-    /// <summary> 结构化片段：以 { [ ( 开头且以 } ] ) 结尾，或是 JSON 键值/转义片段。 </summary>
-    private static readonly Regex StructFragment = new(@"^[\{\[\(].*[\}\]\)]$", RegexOptions.Compiled);
+    /// <summary> 结构化片段：以 { [ ( 开头且以 } ] ) 结尾的**紧凑占位符**（{Cids}、[x]、(a)）。
+    /// ⚠ 判据必须要求「括号内不含空白」：旧写法 `^[\{\[\(].*[\}\]\)]$` 会把**方括号包裹的正常文案**
+    ///   一并排除——实测 `[Cone 1]`、`[Cycle Targets]`、`[Lowest Health Target]` 等 BTS 快捷键标签
+    ///   全被误判成"技术噪音"，于是不计入待翻译集合 → 永远不送翻、进度还显示已完成。 </summary>
+    private static readonly Regex StructFragment = new(@"^[\{\[\(][^\s]*[\}\]\)]$", RegexOptions.Compiled);
 
     /// <summary> 代码标识符风格：无空格、含下划线/驼峰混排的点号路径（如 lightless-file-cache-version）。 </summary>
     private static readonly Regex IdentLike = new(@"^[a-z0-9][a-z0-9._\-]*$", RegexOptions.Compiled);

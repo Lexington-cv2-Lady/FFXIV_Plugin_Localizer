@@ -196,6 +196,21 @@ public sealed class SourceExtractService
         "TextUnformatted", "TextV", "TextEx",
     };
 
+    /// <summary>
+    /// 首参是「窗口名 / 内部 ID」而非可见文案的函数：**不作为翻译候选**。
+    /// 依据（2026-09-14 用户决定「窗口标题不必翻译」）：
+    ///   · `Begin` 的字符串是**窗口标题**（画在标题栏）——不翻；
+    ///   · `BeginChild`/`BeginTable`/`BeginTabBar`/`PushID` 的字符串是 ImGui ID（不显示给用户），
+    ///     提出来只会污染待翻清单（如 BTS 的 `BTSConfigTabs`/`SettingsConfigTable`）。
+    /// ⚠ 以下**不在**此列——它们的标签是**画出来的文字**，必须保留为候选：
+    ///     `BeginTabItem`（标签页名）、`BeginCombo`/`BeginMenu`/`BeginPopupModal`（控件标签）、
+    ///     `TableSetupColumn`（**表头列名**，实测 TeleporterPlugin 的 `Alias`/`Aetheryte` 就是它）。
+    /// </summary>
+    private static readonly HashSet<string> IdOnlyFuncs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Begin", "BeginChild", "BeginTable", "BeginTabBar", "PushID",
+    };
+
     private readonly AppLog _appLog;
     private readonly Configuration _cfg;
     private readonly Func<string> _configDir;
@@ -381,6 +396,8 @@ public sealed class SourceExtractService
 
     private static void AddCandidate(SortedSet<string> strings, Dictionary<string, int> funcStats, string func, string raw)
     {
+        // 窗口名 / 内部 ID 不作为翻译候选（用户决定：标题不翻；ID 无显示意义）
+        if (IdOnlyFuncs.Contains(func)) return;
         // ## 是 ImGui 内部 ID 分隔符：只取显示部分（"显示文字##内部ID" → "显示文字"），
         // 与替换层的「截断后匹配」呼应（ImGui 实际收到的是完整串）。
         var s = TextHeuristics.StripIdSuffix(Unescape(raw)).Trim();

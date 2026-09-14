@@ -47,6 +47,8 @@ public sealed unsafe class ReplacementService
     private readonly Dictionary<string, nint> _ptrs = new(StringComparer.Ordinal); // 英文 → 中文指针
     /// <summary> 带 ##ID 的完整标签 → 保号中文指针（键是**原始完整串**，中文里保留 ##ID 后缀）。 </summary>
     private readonly Dictionary<string, nint> _idPtrs = new(StringComparer.Ordinal);
+    /// <summary> 首尾带空白的完整串 → 保留空白的中文指针（键是**原始完整串**，中文里保留原空白）。 </summary>
+    private readonly Dictionary<string, nint> _wsPtrs = new(StringComparer.Ordinal);
     private readonly List<nint> _graveyard = new();                            // 已弃用的中文指针（仅 Dispose 释放，避免渲染线程 use-after-free）
     private Dictionary<string, string>? _wikiTerms;                            // wiki 官方术语（优先级最高，可选）
     // 候选文案缓存（避免每帧读磁盘 + JSON 解析；键=插件名，值=(候选, 目录指纹时间)）
@@ -66,6 +68,8 @@ public sealed unsafe class ReplacementService
             _ptrs.Clear();
             foreach (var ptr in _idPtrs.Values) _graveyard.Add(ptr);
             _idPtrs.Clear();
+            foreach (var ptr in _wsPtrs.Values) _graveyard.Add(ptr);
+            _wsPtrs.Clear();
         }
         _appLog.Info("[替换] 已清空生效对照表（界面还原英文；磁盘文件保留，重新载入可恢复）");
     }
@@ -75,6 +79,7 @@ public sealed unsafe class ReplacementService
     {
         Load();              // 内部会重建
         LoadWindowTables();  // 内部会重建（这次含最新的窗口表，已是最终结果）
+        _windowDirStamp = ComputeWindowDirStamp();   // 已按当前磁盘状态重载，记下指纹免重复触发
     }
 
     /// <summary> 译文目录指纹（文件名+修改时间+大小）。 </summary>
@@ -117,7 +122,7 @@ public sealed unsafe class ReplacementService
     }
 
     private long _lastStampCheckMs;
-    private string _windowDirStamp;
+    private string _windowDirStamp = "";
 
     /// <summary> 设置 wiki 官方术语表（null 或空 = 不启用）。优先级最高，重建生效表。 </summary>
     public void SetWikiTerms(Dictionary<string, string>? terms)
@@ -138,6 +143,8 @@ public sealed unsafe class ReplacementService
         _configDir = configDir;
         Load();
         LoadWindowTables();
+        // 记下启动时的目录指纹，免得 CheckExternalChanges 首次调用误判为"外部改动"而白重载一次
+        _windowDirStamp = ComputeWindowDirStamp();
     }
 
     /// <summary> 对照表文件路径。 </summary>
@@ -228,6 +235,8 @@ public sealed unsafe class ReplacementService
             _ptrs.Clear();
             foreach (var ptr in _idPtrs.Values) _graveyard.Add(ptr);
             _idPtrs.Clear();
+            foreach (var ptr in _wsPtrs.Values) _graveyard.Add(ptr);
+            _wsPtrs.Clear();
             _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             _hashes = new HashSet<ulong>();
             // ① wiki 官方术语最高优先（物品/技能名机翻几乎必错，必须用官方译名）
@@ -307,32 +316,6 @@ public sealed unsafe class ReplacementService
     }
 
     /// <summary>
-    /// 整串精确匹配（**不截断 ##ID**），命中返回 NUL 结尾的中文指针，否则 0。
-    ///
-    /// ⚠ 专供**窗口名**（igBegin）：ImGui 用窗口名（`###Foo` 之后的 ID 部分）算窗口 ID，
-    /// 一旦把 `##/###ID` 截掉再传进去，窗口 ID 就变了——轻则位置/尺寸记忆丢失，
-    /// 重则与其它窗口 ID 撞车、Dalamud 自己的窗口状态错乱。所以窗口名只做整串匹配，
-    /// 带 `##` 的名字（如 `插件安装器###XlPluginInstaller`）一律不动。
-    /// </summary>
-    public nint TryReplaceExact(byte* p, int n)
-    {
-        if (!Enabled || _table.Count == 0 || n < 2 || n > 1024) return 0;
-        unsafe
-        {
-            for (var i = 0; i + 1 < n; i++)
-                if (p[i] == (byte)'#' && p[i + 1] == (byte)'#') return 0; // 含 ID：不碰
-        }
-        ulong h;
-        unsafe { h = FnvBytes(p, n); }
-        lock (_lock)
-        {
-            if (!_hashes.Contains(h)) return 0;
-            var s = Encoding.UTF8.GetString(p, n);
-            return GetOrCreatePtr(s);
-        }
-    }
-
-    /// <summary>
     /// 热路径查表：命中返回 NUL 结尾的中文指针（转发时 text_end 传 0），未命中返回 0。
     /// **双段匹配**：先按整串查（含 <c>##ID</c> 的完整标签）；未命中再按去掉 <c>##ID</c> 的显示部分查。
     /// 原因：采集/源码提取入库时存的是「显示文字」（如 <c>设置</c>），而 ImGui 收到的完整串是 <c>设置##bdp</c>——
@@ -379,18 +362,55 @@ public sealed unsafe class ReplacementService
             if (hashIdx > 0 && _hashes.Contains(hShown))
             {
                 var shown = Encoding.UTF8.GetString(p, hashIdx);
-                if (!_table.TryGetValue(shown, out var zhBytes)) return 0;
-                var full = Encoding.UTF8.GetString(p, n);
-                if (_idPtrs.TryGetValue(full, out var cached)) return cached;
-                // 显示部分换成中文，其余（##ID 及其后）原样保留
-                var composed = Encoding.UTF8.GetString(zhBytes) + full.Substring(hashIdx);
-                var p3 = Marshal.StringToCoTaskMemUTF8(composed);
-                _idPtrs[full] = p3;
-                return p3;
+                // 命中才返回；未命中不 return（继续走下面的首尾空白容错）
+                if (_table.TryGetValue(shown, out var zhBytes))
+                {
+                    var full = Encoding.UTF8.GetString(p, n);
+                    if (_idPtrs.TryGetValue(full, out var cached)) return cached;
+                    // 显示部分换成中文，其余（##ID 及其后）原样保留
+                    var composed = Encoding.UTF8.GetString(zhBytes) + full.Substring(hashIdx);
+                    var p3 = Marshal.StringToCoTaskMemUTF8(composed);
+                    _idPtrs[full] = p3;
+                    return p3;
+                }
+            }
+
+            // ③ 首尾空白容错：源码里常用换行/缩进做间距，如 `ImGui.Text("\n[Cone 1]")`——
+            //    运行时传给 ImGui 的是**带 \n 的整串**，而候选/对照表存的是 Trim 过的 `[Cone 1]`
+            //    （提取侧 Unescape 后 Trim 掉了），整串哈希必然不命中 → 这类「缩进/间距文案」永远翻不了。
+            //    这里按「去掉首尾空白后的核心」再查一次，命中则返回**把原空白原样拼回**的中文（保留排版间距）。
+            int wsStart = 0, wsEnd = n;
+            unsafe
+            {
+                while (wsStart < wsEnd && IsAsciiSpace(p[wsStart])) wsStart++;
+                while (wsEnd > wsStart && IsAsciiSpace(p[wsEnd - 1])) wsEnd--;
+            }
+            if ((wsStart > 0 || wsEnd < n) && wsEnd - wsStart >= 2)
+            {
+                ulong hCore;
+                unsafe { hCore = FnvBytes(p + wsStart, wsEnd - wsStart); }
+                if (_hashes.Contains(hCore))
+                {
+                    var core = Encoding.UTF8.GetString(p + wsStart, wsEnd - wsStart);
+                    if (_table.TryGetValue(core, out var zhB))
+                    {
+                        var full = Encoding.UTF8.GetString(p, n);
+                        if (_wsPtrs.TryGetValue(full, out var cached2)) return cached2;
+                        var composed = Encoding.UTF8.GetString(p, wsStart)
+                                     + Encoding.UTF8.GetString(zhB)
+                                     + Encoding.UTF8.GetString(p + wsEnd, n - wsEnd);
+                        var p4 = Marshal.StringToCoTaskMemUTF8(composed);
+                        _wsPtrs[full] = p4;
+                        return p4;
+                    }
+                }
             }
             return 0;
         }
     }
+
+    /// <summary> 是否 ASCII 空白（替换热路径用，避免调用 char.IsWhiteSpace 的开销/本地化差异）。 </summary>
+    private static bool IsAsciiSpace(byte b) => b is (byte)' ' or (byte)'\t' or (byte)'\n' or (byte)'\r';
 
     /// <summary>
     /// 导入 FuckDalamudCN 的机翻表（installedPlugins\FuckDalamudCN\&lt;版本&gt;\Assets\translations.json，
@@ -559,10 +579,17 @@ public sealed unsafe class ReplacementService
         if (!Directory.Exists(root)) return missing;
         foreach (var manifestPath in Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories))
         {
-            // 清单形如 installedPlugins\<ID>\<版本>\<ID>.json；跳过明显不是清单的文件
+            // ⚠ 清单路径存在两种布局，必须都认：
+            //   · `installedPlugins\<插件ID>\<版本>\<插件ID>.json`  ← 正式安装（绝大多数）
+            //   · `installedPlugins\<插件ID>\<插件ID>.json`          ← 少数/旧布局
+            //   旧实现只比较**直接父目录**（`name != dir`）→ 正式安装的父目录是**版本号**
+            //   （如 `1.1.0.15`），永远不相等 → **29 个已装清单里只有 1 个被读到**，
+            //   于是 CollectMissing 长期"看不见缺口"、启动检查谎报"已覆盖全部介绍"、
+            //   新插件的描述永远不会被自动翻译（2026-09-14 实测发现并修复）。
             var name = Path.GetFileNameWithoutExtension(manifestPath);
             var dir = Path.GetFileName(Path.GetDirectoryName(manifestPath));
-            if (name != dir) continue;
+            var grand = Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(manifestPath)));
+            if (name != dir && name != grand) continue;
             try
             {
                 var m = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(manifestPath));
@@ -572,6 +599,9 @@ public sealed unsafe class ReplacementService
                     if (!m.TryGetValue(field, out var el) || el.ValueKind != JsonValueKind.String) continue;
                     var text = el.GetString()?.Trim();
                     if (string.IsNullOrEmpty(text) || text!.Length < 2) continue;
+                    // 已经是中文的（不少国服/汉化分支插件把 Description 直接写成中文）不必再送翻——
+                    // 否则会白耗机翻配额，还可能把中文"翻译"成别的语言。
+                    if (TextHeuristics.HasCjk(text!)) continue;
                     bool hasLetter = false;
                     foreach (var c in text)
                     {
@@ -881,6 +911,7 @@ public sealed unsafe class ReplacementService
             {
                 _appLog.Warn($"[替换] 删除 {plugin} 的译文文件失败：{ex.Message}");
             }
+            _windowDirStamp = ComputeWindowDirStamp();   // 同 WriteWindowFile：自己的改动不该被当成外部改动
         }
         _appLog.Info($"[替换] 已还原 {plugin} 为英文（清除 {removed} 条译文，候选文件保留）");
         return removed;
@@ -892,6 +923,9 @@ public sealed unsafe class ReplacementService
         {
             Directory.CreateDirectory(WindowTableDir);
             TranslationFile.Save(Path.Combine(WindowTableDir, $"{plugin}.json"), table);
+            // ⚠ 本插件自己写的文件也要刷新指纹：否则 CheckExternalChanges 会把**自己的写入**
+            //    误判成"外部改动"，3 秒后白做一次全量 Reload（每次编辑译文都多付一次重建代价）。
+            _windowDirStamp = ComputeWindowDirStamp();
         }
         catch (Exception ex)
         {
@@ -1152,9 +1186,11 @@ public sealed unsafe class ReplacementService
         {
             foreach (var ptr in _ptrs.Values) Marshal.FreeCoTaskMem(ptr);
             foreach (var ptr in _idPtrs.Values) Marshal.FreeCoTaskMem(ptr);
+            foreach (var ptr in _wsPtrs.Values) Marshal.FreeCoTaskMem(ptr);
             foreach (var ptr in _graveyard) Marshal.FreeCoTaskMem(ptr);
             _ptrs.Clear();
             _idPtrs.Clear();
+            _wsPtrs.Clear();
             _graveyard.Clear();
         }
     }
