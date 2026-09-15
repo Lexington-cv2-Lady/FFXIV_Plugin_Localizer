@@ -29,6 +29,9 @@ public sealed class SourceExtractWindow : Window
     private bool _testing;          // 连接测试进行中
     private bool? _testOk;          // 上次测试结果（null=未测）
     private string _testMessage = "";
+    private bool _batchRunning;     // 「全部提取」进行中（批量任务自己驱动，不走 _svc.Running 判断）
+    private int _batchDone;         // 已完成的插件数
+    private int _batchTotal;        // 本轮批量总数
 
     public SourceExtractWindow(Plugin plugin, SourceExtractService svc, ReplacementService replacement)
         : base("源码提取###PluginLocalizerSource")
@@ -179,7 +182,8 @@ public sealed class SourceExtractWindow : Window
 
         if (_svc.Running)
         {
-            Ui.ColoredWrapped(new Vector4(1f, 0.8f, 0.3f, 1f), _svc.Status);
+            Ui.ColoredWrapped(new Vector4(1f, 0.8f, 0.3f, 1f),
+                _batchRunning ? $"{_svc.Status}（全部提取中，请勿关闭游戏）" : _svc.Status);
         }
         else if (_summary.Length > 0)
         {
@@ -205,6 +209,21 @@ public sealed class SourceExtractWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("重新枚举已装插件，并检测各插件当前 DLL 是否已是中文版。");
 
+        // ── 全部提取（尊重上方搜索框：有筛选时只提取筛选结果）──
+        ImGui.SameLine();
+        {
+            var canBatch = cfg.CanAccessGitHub && !_svc.Running && !_batchRunning;
+            ImGui.BeginDisabled(!canBatch);
+            if (ImGui.Button(_batchRunning ? $"全部提取中 {_batchDone}/{_batchTotal}…" : "全部提取"))
+            {
+                StartExtractAll();
+            }
+            ImGui.EndDisabled();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把列表里的插件**逐个**提取一遍（自动跳过：已是中文版、源码已汉化、已翻译完成的）。\n" +
+                             "有搜索筛选时只处理筛选出的那些；已在别处克隆过的仓库只会 `git pull`，很快。");
+
         using (var child = ImRaii.Child("##源码插件列表", new Vector2(-1f, -1f), true))
         {
             if (child.Success)
@@ -219,10 +238,7 @@ public sealed class SourceExtractWindow : Window
                 {
                     var (name, displayName, url) = _plugins[i];
                     // 搜索过滤：内部名 / 显示名 / 仓库地址，任一包含即可
-                    if (filter.Length > 0 &&
-                        !name.Contains(filter, StringComparison.OrdinalIgnoreCase) &&
-                        !displayName.Contains(filter, StringComparison.OrdinalIgnoreCase) &&
-                        !url.Contains(filter, StringComparison.OrdinalIgnoreCase))
+                    if (!MatchesFilter(_plugins[i], filter))
                     {
                         continue;
                     }
@@ -369,7 +385,8 @@ public sealed class SourceExtractWindow : Window
     }
 
     private void StartExtract(string name, string url)
-    {        if (_svc.Running) return;
+    {
+        if (_svc.Running) return;
         _summary = "";
         _svc.SetStatus($"正在拉取 {name} 的仓库…");
         _svc.Running = true;
@@ -390,6 +407,84 @@ public sealed class SourceExtractWindow : Window
             }
             finally
             {
+                _svc.Running = false;
+            }
+        });
+    }
+
+    /// <summary> 该插件名是否匹配当前搜索框（内部名 / 显示名 / 仓库地址任一命中）。 </summary>
+    private static bool MatchesFilter((string Name, string DisplayName, string RepoUrl) p, string filter)
+        => filter.Length == 0
+           || p.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)
+           || p.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase)
+           || p.RepoUrl.Contains(filter, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 该插件是否**需要**提取：已是中文版的、
+    /// 已翻译完成的（缺口为 0）都不必再联网拉仓库——否则「全部提取」会为几十个插件白跑网络。
+    /// </summary>
+    private bool NeedsExtract(string name)
+    {
+        if (_chineseCache.TryGetValue(name, out var zh) && zh > 0) return false;   // 已装 DLL 就是中文版
+        if (_progressCache.TryGetValue(name, out var pg) && pg.Done) return false; // 候选已全部翻完
+        return true;
+    }
+
+    /// <summary>
+    /// **全部提取**：把（筛选后的）插件逐个提取一遍。
+    /// ⚠ 串行执行 + 温和限速：ExtractAsync 内部要跑 git，并发既无必要也容易触发 GitHub 限流。
+    /// 单个插件失败不影响后续（逐个 try/catch，结果写进各自的 _lastResult）。
+    /// </summary>
+    private void StartExtractAll()
+    {
+        if (_svc.Running || _batchRunning) return;
+        var filter = _filter.Trim();
+        var targets = _plugins
+            .Where(p => MatchesFilter(p, filter) && NeedsExtract(p.Name))
+            .ToList();
+        if (targets.Count == 0)
+        {
+            _summary = filter.Length > 0
+                ? $"筛选出的插件都无需提取（已是中文版 / 已翻译完成）。"
+                : "没有需要提取的插件（都已是中文版或已翻译完成）。";
+            return;
+        }
+
+        _batchRunning = true;
+        _batchDone = 0;
+        _batchTotal = targets.Count;
+        _svc.Running = true;
+        _summary = "";
+        _plugin.AppLog.Info($"[源码] 全部提取开始：{targets.Count} 个插件");
+
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                foreach (var (name, _, url) in targets)
+                {
+                    _svc.SetStatus($"[全部提取] {_batchDone + 1}/{_batchTotal}：{name}");
+                    try
+                    {
+                        var (ok, count, funcs, msg) = await _svc.ExtractAsync(name, url);
+                        _replacement.InvalidateCandidateCache();
+                        _lastResult[name] = (ok ? "【正常】 " : "【异常】 ") + msg;
+                        _plugin.AppLog.Info($"[源码] 全部提取：{name} → {msg}");
+                    }
+                    catch (Exception ex)
+                    {
+                        _lastResult[name] = "【异常】 " + ex.Message;
+                        _plugin.AppLog.Error($"[源码] 全部提取：{name} 失败：{ex.Message}");
+                    }
+                    _batchDone++;
+                    await System.Threading.Tasks.Task.Delay(700);   // 限速，别让 GitHub 判定为滥用
+                }
+                _summary = $"全部提取完成：共处理 {_batchTotal} 个插件（详见各条目结果与日志）。";
+                _plugin.AppLog.Info($"[源码] 全部提取完成：{_batchTotal} 个插件");
+            }
+            finally
+            {
+                _batchRunning = false;
                 _svc.Running = false;
             }
         });

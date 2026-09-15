@@ -163,10 +163,10 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary> 打开/关闭日志窗口（主窗口「日志窗口」按钮入口）。 </summary>
     public void ToggleLogUi() => LogWindow.Toggle();
 
-    /// <summary> 打开/关闭安装器翻译窗口（主窗口「安装器翻译」按钮入口）。 </summary>
+    /// <summary> 打开/关闭后台自动翻译窗口（主窗口「后台自动翻译」按钮入口）。 </summary>
     public void ToggleTranslationUi() => TranslationWindow.Toggle();
 
-    /// <summary> 打开/关闭 AI 设置窗口（安装器翻译窗口「AI 设置」按钮入口）。 </summary>
+    /// <summary> 打开/关闭 AI 设置窗口（后台自动翻译窗口「AI 设置」按钮入口）。 </summary>
     public void ToggleAiSettingsUi() => AiSettingsWindow.Toggle();
 
     /// <summary> 打开/关闭插件翻译窗口（主窗口「插件翻译」按钮入口）。 </summary>
@@ -274,22 +274,31 @@ public sealed class Plugin : IDalamudPlugin
                 if (File.Exists(Path.Combine(dir, f))) return;
             }
 
+            // ⚠ 格式要求（2026-09-15 用户明确指定）：**原文与译文各占一行**，不要写在同一行——
+            //   一行一条虽然紧凑，但原文/译文挤在一起时肉眼难对齐、diff 也难看。
             var template = """
             {
               "_说明": [
-                "这是本插件（翻译插件的插件）的词典文件，供「插件翻译 → 预翻译」使用。",
+                "这是本插件（翻译插件的插件）的词典文件，供「插件翻译 → 全部预翻译」使用。",
                 "格式：terms 是通用术语（不限插件），mods 可留空。",
-                "「原文」写界面上的英文（精确匹配，大小写敏感），「译文」写中文。",
+                "「原文」写界面上的英文（精确匹配，大小写敏感），「译文」写中文；两者各占一行。",
+                "除了手改，也可以在「插件翻译」窗口点「翻译结果写入词典」自动汇总（只新增、不覆盖已有条目）。",
                 "改完在「AI 设置 → 本项目词典」点「重载词典」即可生效；不会自动翻译，命中即直接采用。"
               ],
               "terms": [
-                { "原文": "Own Buff/Debuff Scale", "译文": "自身增益/减益比例" },
-                { "原文": "Retry Count", "译文": "重试次数" }
+                {
+                  "原文": "Own Buff/Debuff Scale",
+                  "译文": "自身增益/减益比例"
+                },
+                {
+                  "原文": "Retry Count",
+                  "译文": "重试次数"
+                }
               ],
               "mods": {}
             }
             """;
-            File.WriteAllText(Path.Combine(dir, "我的翻译.json"), template, System.Text.Encoding.UTF8);
+            File.WriteAllText(Path.Combine(dir, "我的翻译.json"), template, new System.Text.UTF8Encoding(true));
             Log.Information($"[预翻译] 词典目录为空，已生成模板：{Path.Combine(dir, "我的翻译.json")}");
         }
         catch (Exception ex)
@@ -347,7 +356,7 @@ public sealed class Plugin : IDalamudPlugin
             //    日志说"未配置 API Key"，但机翻其实能用，自相矛盾）。
             if (string.IsNullOrWhiteSpace(MtTranslateService.GetApiKey(Configuration)))
             {
-                AppLog.Info($"[自动] 检测到 {count} 条介绍缺口，未配置 API Key，跳过（可在「安装器翻译」窗口填写）");
+                AppLog.Info($"[自动] 检测到 {count} 条介绍缺口，未配置 API Key，跳过（可在「后台自动翻译」窗口填写）");
                 Mt.Notify($"检测到 {count} 条新文案待翻译（未填 API Key）");
                 return;
             }

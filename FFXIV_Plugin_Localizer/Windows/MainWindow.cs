@@ -9,7 +9,7 @@ using FFXIVPluginLocalizer.Services;
 namespace FFXIVPluginLocalizer.Windows;
 
 /// <summary> 主窗口：钩子状态、排障开关、功能入口；日志置底持续显示。
-/// 文案获取 = 「文案扫描」（静态，主来源）+「安装器翻译」（对照表/机翻/手动），运行时采集已移除。 </summary>
+/// 文案获取 = 「源码提取」（静态，主来源）+ 各插件的译文表/对照表，运行时采集已移除。 </summary>
 public sealed class MainWindow : Window
 {
     private readonly Plugin _plugin;
@@ -86,7 +86,7 @@ public sealed class MainWindow : Window
         ImGui.Separator();
 
         // ── 功能入口（按使用流程排序：① 配置 → ② 提取 → ③ 翻译 → ④ 排障；放不下自动换行） ──
-        Ui.Hint("流程：第 1 步 AI 设置填 Key，第 2 步 源码提取获取英文（需代理），第 3 步 插件翻译翻成中文；安装器翻译为并行支线，日志随时可看。");
+        Ui.Hint("流程：第 1 步 AI 设置填 Key，第 2 步 源码提取获取英文（需代理），第 3 步 插件翻译翻成中文；后台自动翻译为并行支线（基本不用管），日志随时可看。");
         if (ImGui.Button("AI 设置（第 1 步）"))
         {
             _plugin.ToggleAiSettingsUi();
@@ -107,13 +107,14 @@ public sealed class MainWindow : Window
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("第三步·翻译：按插件把窗口内文字翻成中文（机翻/手动，候选来自源码提取），替换层即时生效。");
-        Ui.SameLineIfFits(Ui.ButtonWidth("安装器翻译"));
-        if (ImGui.Button("安装器翻译"))
+        Ui.SameLineIfFits(Ui.ButtonWidth("后台自动翻译"));
+        if (ImGui.Button("后台自动翻译"))
         {
             _plugin.ToggleTranslationUi();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("并行支线：插件安装器里插件介绍的中文化。\n基本自动（启动导入现成机翻表 + 自动补缺），随插件更新自动补翻。");
+            ImGui.SetTooltip("插件安装器里各插件介绍（简介/描述）的自动汉化——**基本不用管**：\n" +
+                             "启动约 10 秒自动扫缺口，有 Key 就后台静默补翻，插件更新后下次启动自动覆盖。\n点进来可看进度、手动补译、导出/导入翻译包。");
         Ui.SameLineIfFits(Ui.ButtonWidth("日志窗口"));
         if (ImGui.Button("日志窗口"))
         {

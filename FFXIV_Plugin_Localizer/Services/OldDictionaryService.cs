@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace FFXIVPluginLocalizer.Services;
 
@@ -140,6 +143,95 @@ public sealed class OldDictionaryService
         _entries[k] = v;
         return true;
     }
+
+    /// <summary>
+    /// **把成对译文合并进「我的翻译.json」**（插件翻译窗口的「写入词典」用）。
+    ///
+    /// 写入位置：<c>&lt;词典目录&gt;\我的翻译.json</c> 的 <c>terms</c> 数组（本项目的通用词源）。
+    /// 规则：
+    ///   · **已存在的键不覆盖**（先到先得：词典是用户资产，不应被一次汇总悄悄改掉）；
+    ///   · 值为空、键含中文、键值相同、键长 &lt;2 的条目跳过（与读取口径一致）；
+    ///   · 同一次调用内去重；
+    ///   · **保留原有文件的 _说明 / mods 等字段**（用 JsonNode 局部改，不整个重写用户的文件结构）。
+    /// 返回（新增条数, 跳过条数）。
+    /// </summary>
+    public (int Added, int Skipped) MergeIntoDict(string dir, IEnumerable<(string En, string Zh)> pairs)
+    {
+        var path = Path.Combine(dir, FileName);
+        var added = 0;
+        var skipped = 0;
+        try
+        {
+            Directory.CreateDirectory(dir);
+
+            // 读现有文件（不存在则从空对象开始；损坏则备份后重建，避免直接丢用户数据）
+            System.Text.Json.Nodes.JsonObject root;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    root = JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? new JsonObject();
+                }
+                catch (Exception ex)
+                {
+                    var bak = path + $".损坏备份{DateTime.Now:yyyyMMdd_HHmmss}";
+                    File.Copy(path, bak, overwrite: true);
+                    _appLog.Warn($"[预翻译] 我的翻译.json 解析失败（已备份到 {Path.GetFileName(bak)}）：{ex.Message}");
+                    root = new JsonObject();
+                }
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            if (root["terms"] is not JsonArray terms)
+            {
+                terms = new JsonArray();
+                root["terms"] = terms;
+            }
+
+            // 现有键（含 terms + mods 全部，避免与任何已有译文重复）
+            var existing = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var k in _entries.Keys) existing.Add(k);
+            foreach (var item in terms)
+            {
+                var k = item?["原文"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(k)) existing.Add(k.Trim());
+            }
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (rawEn, rawZh) in pairs)
+            {
+                var k = (rawEn ?? "").Trim();
+                var v = (rawZh ?? "").Trim();
+                if (k.Length < 2 || v.Length == 0 || k == v) { skipped++; continue; }
+                if (TextHeuristics.HasCjk(k)) { skipped++; continue; }
+                if (!seen.Add(k)) { skipped++; continue; }
+                if (existing.Contains(k)) { skipped++; continue; }   // 已有 → 不覆盖
+                terms.Add(new JsonObject { ["原文"] = k, ["译文"] = v });
+                existing.Add(k);
+                added++;
+            }
+
+            if (added > 0)
+            {
+                File.WriteAllText(path,
+                    root.ToJsonString(new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }),
+                    new UTF8Encoding(true));   // 带 BOM：中文 Windows 的记事本才不会把 UTF-8 误判成 GBK
+                _appLog.Info($"[预翻译] 已写入词典：新增 {added} 条（跳过 {skipped} 条）→ {path}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _appLog.Error("[预翻译] 写入词典失败：" + ex.Message);
+            throw;   // 由调用方转成界面提示
+        }
+        return (added, skipped);
+    }
+
+    /// <summary> 词典主文件名（本项目的通用词源）。 </summary>
+    public const string FileName = "我的翻译.json";
 
     /// <summary> 查词（供预翻译）。 </summary>
     public bool TryGet(string en, out string zh) => _entries.TryGetValue(en, out zh!);

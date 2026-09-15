@@ -9,11 +9,12 @@ using FFXIVPluginLocalizer.Services;
 
 namespace FFXIVPluginLocalizer.Windows;
 
-/// <summary> 安装器翻译窗口（独立窗口）：插件安装器里插件介绍的中文化。
-/// 替换层按对照表在文字绘制层换字，「全部插件」和「已安装」两个列表都生效，不改启动器文件。
-/// 自动化：FDCN 机翻表启动即导入；填 Key 后自动翻译缺口；插件更新后的新文案启动时自动扫描翻译（可关）。
-/// 手动翻译：仿旧项目详情区——对照表条目直接内联编辑中文，失焦即存。
-/// 支持导出/导入翻译包（安装器表 + 窗口表），便于备份与用户间分享。 </summary>
+/// <summary> **后台自动翻译**窗口（原「安装器翻译」，2026-09-15 按用户要求改名）：
+/// 自动把**插件安装器里各插件的介绍**（Punchline / Description）翻成中文并就地替换显示。
+/// 替换层在文字绘制层换字，「全部插件」和「已安装」两个列表都生效，不改启动器文件。
+/// 之所以叫「后台自动」：启动后约 10 秒自动扫缺口 → 有 Key 就静默补翻 → 插件更新带来的新文案下次启动自动覆盖，
+/// 用户零操作；本窗口主要用来看进度、手动补译、导出/导入翻译包。
+/// 表来源：FuckDalamudCN 机翻表（启动自动导入）+ 智谱 AI 自动翻译 + 手动编辑。 </summary>
 public sealed class TranslationWindow : Window
 {
     private const int MaxManualRows = 200;
@@ -31,7 +32,7 @@ public sealed class TranslationWindow : Window
     private string _newZh = "";
 
     public TranslationWindow(Plugin plugin, ReplacementService replacement, MtTranslateService mt)
-        : base("安装器翻译###PluginLocalizerInstaller")
+        : base("后台自动翻译###PluginLocalizerInstaller")
     {
         _plugin = plugin;
         _replacement = replacement;
@@ -42,8 +43,10 @@ public sealed class TranslationWindow : Window
 
     public override void Draw()
     {
-        Ui.Hint("让插件安装器里的插件介绍显示中文：替换层按对照表在文字绘制层换字，不修改任何启动器/插件文件，\n" +
-                "「全部插件」和「已安装」两个列表都生效。表来源：FuckDalamudCN 机翻表（启动自动导入）+ 智谱自动翻译 + 手动编辑。");
+        Ui.Hint("**后台自动翻译**：插件安装器里各插件的介绍（简介/描述）自动翻成中文并就地显示，不修改任何启动器/插件文件，\n" +
+                "「全部插件」和「已安装」两个列表都生效。\n" +
+                "自动化流程：启动约 10 秒后自动扫描缺口 → 已填 API Key 就在后台静默补翻（可在下方关掉）→ 插件更新带来的新文案下次启动自动覆盖。\n" +
+                "表来源：FuckDalamudCN 机翻表（启动自动导入）+ 智谱 AI 自动翻译 + 下方手动编辑。");
 
         var enabled = _plugin.Configuration.ReplacementEnabled;
         if (ImGui.Checkbox("启用安装器替换（即时生效，无需重载）", ref enabled))

@@ -87,7 +87,7 @@ public sealed class WindowReplaceWindow : Window
         ImGui.SameLine();
         if (ImGui.Button("全部预翻译"))
         {
-            // 用旧项目词典给**所有插件**的候选套用现成译文（不调 AI、零成本）
+            // 用本项目词典给**所有插件**的候选套用现成译文（不调 AI、零成本）
             PrefillAll();
         }
         if (ImGui.IsItemHovered())
@@ -150,6 +150,15 @@ public sealed class WindowReplaceWindow : Window
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("生成一段完整的翻译提示词（含格式要求与全部英文原文）复制到剪贴板，\n直接粘给任意 AI 对话框即可，无需自己写要求。");
+        ImGui.SameLine();
+        if (ImGui.Button("翻译结果写入词典"))
+        {
+            MergeAllIntoDict();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把**所有插件**已经翻好的「原文/译文」汇总写入 词典目录\\我的翻译.json。\n" +
+                             "写进去之后：①这些译文会参与「全部预翻译」，将来别的插件遇到同一句直接命中，不用再调 AI；\n" +
+                             "②词典只增不改——已存在的键不会被覆盖。");
 
         if (_mt.Running)
         {
@@ -276,6 +285,49 @@ public sealed class WindowReplaceWindow : Window
         }
         _summary = $"全部预翻译完成：{plugins.Count} 个插件共命中 {totalHit} 条（剩余 {totalLeft} 条待机翻）。";
         _plugin.AppLog.Info($"[预翻译] {_summary}");
+    }
+
+    /// <summary>
+    /// **翻译结果写入词典**：把所有插件已翻好的「原文/译文」汇总进 词典目录\我的翻译.json。
+    ///
+    /// 为什么有用：译文表是**按插件**存的，同一个英文串在别的插件里遇到还得重翻一次；
+    /// 沉淀到词典后，「全部预翻译」就能免费命中，且译名前后一致（词典是跨插件的通用词源）。
+    /// ⚠ 词典是用户资产：**只新增、不覆盖已有键**（见 OldDictionaryService.MergeIntoDict）。
+    /// </summary>
+    private void MergeAllIntoDict()
+    {
+        try
+        {
+            var dir = _plugin.Configuration.DictDir;
+            if (string.IsNullOrWhiteSpace(dir))
+            {
+                _summary = "词典目录未设置（可在「AI 设置」里指定）。";
+                return;
+            }
+            var pairs = new List<(string En, string Zh)>();
+            var plugins = _replacement.GetWindowPlugins();
+            foreach (var (name, _, _) in plugins)
+            {
+                var (translated, _) = _replacement.GetWindowEntries(name);
+                foreach (var (en, zh) in translated) pairs.Add((en, zh));
+            }
+            if (pairs.Count == 0)
+            {
+                _summary = "还没有任何已完成的译文可写入。";
+                return;
+            }
+            var (added, skipped) = _plugin.OldDict.MergeIntoDict(dir, pairs);
+            _plugin.OldDict.Load(dir);                                   // 立即重载，新词条马上可用于预翻译
+            _summary = added > 0
+                ? $"已把 {added} 条译文写入 我的翻译.json（跳过 {skipped} 条：已存在/同文/不合格）。"
+                : $"没有新增（{skipped} 条都已存在或不合格）。";
+            _plugin.AppLog.Info($"[预翻译] 写入词典：+{added}，跳过 {skipped}");
+        }
+        catch (Exception ex)
+        {
+            _summary = "写入词典失败：" + ex.Message;
+            _plugin.AppLog.Error("[预翻译] 写入词典失败：" + ex.Message);
+        }
     }
 
     /// <summary> 用资源管理器打开目录（不存在则创建）。 </summary>
