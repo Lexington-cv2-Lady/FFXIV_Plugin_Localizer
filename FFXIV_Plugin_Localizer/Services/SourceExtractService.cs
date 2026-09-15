@@ -495,9 +495,16 @@ public sealed class SourceExtractService
     ///     替换是「按内容精确匹配」，界面没传这串就永远用不到，顶多多花一点机翻配额；
     ///     而**漏采是致命的**（界面保持英文，用户直接看到）。故此处宁可多采。
     ///   · 两道闸门仍然保留：① 函数名黑名单（路径/日志/异常等，见 <see cref="NonUiCallNames"/>）；
-    ///     ② **必须是「多词」文案**（含空格）—— 无空格的串多半是 ImGui ID / 键名 / 标识符
-    ///     （`table`/`stats`/`desc`/`col1` 这类，实测都是 ImRaii.Table 的 ID），误报率高；
-    ///     单词类标签（`None`/`Save`/`Import`）由精确规则（`ImGui.Button("Save")` 等）负责，不依赖此路。
+    ///     ② **函数名 ID 黑名单**（<see cref="IdOnlyFuncs"/>：`Table`/`Child`/`Begin*`/`PushID`… 首参是 ImGui ID 而非文字）。
+    ///
+    /// ⚠ **单词标签也要收，但要挑函数**（2026-09-15 修正两次）：
+    ///   · 早期版本要求字符串「含空格」，理由是避开 ImGui ID（`table`/`stats`/`desc`）。但那把真界面标签一并挡掉——
+    ///     实测 Craftimizer 的 `ImGuiUtils.TextCentered("Crafter")` / `("Recipe")` 都是单词，于是永远采不到、界面一直英文。
+    ///   · 单纯放开单词又会灌进大量噪音（`MacroMate.CreateOrUpdateMacro`、`CRAFT_MAXMS`、`Graphics.icon.png`、
+    ///     `arrayValue` 这类标识符/常量/文件名，实测 +66 条里大半是噪音，会污染待翻清单）。
+    ///   · 最终判据：**单词只在该函数名"像在画文字"时放行**（见 <see cref="TextHintWords"/>：Text*/Label*/Tooltip*/
+    ///     Button*/Title*… 见名知义），并排除文件名形态（含 `.`/`_`）。
+    ///     **判据从"字符串长什么样"（不可靠）换成"它被传给了谁"（可靠）** —— 实测 +21 条、零丢失、无噪音。
     /// </summary>
     private static void AddBareCandidate(SortedSet<string> strings, Dictionary<string, int> funcStats, string func, string raw)
     {
@@ -511,9 +518,16 @@ public sealed class SourceExtractService
         var dot = func.LastIndexOf('.');
         if (dot >= 0 && dot + 1 < func.Length) simple = func[(dot + 1)..];
         if (NonUiCallNames.Contains(simple)) return;
+        // 首参是 ImGui ID 的函数（Table/Child/Begin*/PushID…）不作为文字候选 —— 与精确规则同一份名单
+        if (IdOnlyFuncs.Contains(simple)) return;
 
         var s = TextHeuristics.StripIdSuffix(Unescape(raw)).Trim();
-        if (!s.Contains(' ')) return;                   // 只收"多词"文案，见上方说明
+        if (!s.Contains(' '))
+        {
+            // 单词串：只认"像在画文字"的函数，且排除标识符/文件名；赋值路径的 simple 是「赋值」，自然被排除
+            if (!LooksLikeTextFunc(simple)) return;
+            if (s.Contains('.') || s.Contains('_')) return;
+        }
         if (s.Length < 2 || s.Length > 300) return;
         if (TextHeuristics.HasCjk(s)) return;
         if (TextHeuristics.IsKeyName(s)) return;
@@ -522,6 +536,22 @@ public sealed class SourceExtractService
         if (s.Contains('{') || s.Contains('}')) return;
         strings.Add(s);
         funcStats[simple] = funcStats.TryGetValue(simple, out var c) ? c + 1 : 1;
+    }
+
+    /// <summary> 函数名里出现这些词 → 认为它的首个字符串实参是**画出来的文字**（用于单词标签的放行判定）。 </summary>
+    private static readonly string[] TextHintWords =
+    {
+        "text", "label", "tooltip", "caption", "title", "heading", "note", "help", "button", "menu",
+        "item", "header", "message", "info", "hint", "desc", "stat", "option", "choice", "entry",
+        "bullet", "link", "warn", "error", "notify",
+    };
+
+    private static bool LooksLikeTextFunc(string simpleName)
+    {
+        var f = simpleName.ToLowerInvariant();
+        foreach (var h in TextHintWords)
+            if (f.Contains(h, StringComparison.Ordinal)) return true;
+        return false;
     }
 
     private static string Unescape(string s)

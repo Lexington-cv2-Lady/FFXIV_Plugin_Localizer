@@ -12,14 +12,20 @@ namespace FFXIVPluginLocalizer.Services;
 /// </summary>
 public static class TextHeuristics
 {
-    /// <summary> 单个键位名（整串恰好是其一，大小写不敏感）。短语类如 "Delete mod" 不算——那是真文案。 </summary>
+    /// <summary> 单个键位名（整串恰好是其一，大小写不敏感）。短语类如 "Delete mod" 不算——那是真文案。
+    ///
+    /// ⚠ **只收「不可能同时是普通英文单词」的键名**（2026-09-15 修正）：早期版本把 `control`/`tab`/`enter`/
+    ///   `space`/`home`/`end`/`menu`/`windows` 等**兼具自然语义**的词也当键名排除，结果把真界面文案误杀——
+    ///   实测 Craftimizer 的属性名 **`Control`**（加工精度）就因此永远采不到、界面一直英文。
+    ///   这些词已从此表移除：它们若真是键位标签，也能靠「译文==原文」收尾（同文现在算已翻译），
+    ///   而若是普通文案（如本处的 `Control`），移除后才能正常送翻。**误杀代价 > 多采代价**。 </summary>
     private static readonly HashSet<string> KeyNames = new(StringComparer.OrdinalIgnoreCase)
     {
-        "ctrl", "control", "alt", "shift", "tab", "enter", "return", "escape", "esc", "space", "spacebar",
-        "backspace", "delete", "del", "insert", "ins", "home", "end", "pageup", "pagedown", "pgup", "pgdn",
-        "up", "down", "left", "right", "arrowup", "arrowdown", "arrowleft", "arrowright",
-        "capslock", "numlock", "scrolllock", "printscreen", "prtsc", "pause", "break", "win", "windows",
-        "super", "meta", "command", "cmd", "option", "menu", "apps", "shift+tab", "alt+tab", "ctrl+tab",
+        "ctrl", "alt", "shift", "escape", "esc", "backspace", "del", "ins",
+        "pageup", "pagedown", "pgup", "pgdn",
+        "arrowup", "arrowdown", "arrowleft", "arrowright",
+        "capslock", "numlock", "scrolllock", "printscreen", "prtsc",
+        "shift+tab", "alt+tab", "ctrl+tab",
         "鼠标左键", "鼠标右键", "鼠标中键",
     };
 
