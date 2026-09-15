@@ -32,6 +32,8 @@ public sealed class SourceExtractWindow : Window
     private bool _batchRunning;     // 「全部提取」进行中（批量任务自己驱动，不走 _svc.Running 判断）
     private int _batchDone;         // 已完成的插件数
     private int _batchTotal;        // 本轮批量总数
+    /// <summary>「网络设置」区块是否展开；null = 尚未决定（首次绘制时按"网络是否已配好"自动定）。 </summary>
+    private bool? _netOpen;
 
     public SourceExtractWindow(Plugin plugin, SourceExtractService svc, ReplacementService replacement)
         : base("源码提取###PluginLocalizerSource")
@@ -47,139 +49,17 @@ public sealed class SourceExtractWindow : Window
     {
         var cfg = _plugin.Configuration;
 
-        // ── 说明（用户定稿文案）──
-        Ui.Hint("汉化是获取插件公开源码提取的，闭源的无法翻译。\n需要能访问 GitHub（先点「测试直连」；不通则勾选「启用代理」填端口并点「测试代理」）。");
+        // ── 说明（精简为两行，细节放各区块的折叠里，避免开窗就是一大片文字）──
+        Ui.Hint("从插件**公开源码**提取界面文案（闭源插件无法翻译），需要能访问 GitHub。");
 
-        ImGui.Separator();
+        // 首次打开时：网络尚未配好就把「网络设置」展开，已配好则收起——省掉每次开窗的视觉噪音。
+        if (_netOpen == null)
+            _netOpen = !cfg.CanAccessGitHub || string.IsNullOrWhiteSpace(cfg.ProxyPort);
 
-        // ── 代理设置（铁律：勾选 + 填地址，二者缺一不可）──
-        ImGui.TextUnformatted("访问 GitHub 的代理设置（一般只需填端口）：");
-        var useProxy = cfg.UseProxy;
-        if (ImGui.Checkbox("启用代理", ref useProxy))
-        {
-            cfg.UseProxy = useProxy;
-            cfg.Save();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("只有勾选此项、并填写端口后，本功能才会访问 GitHub。\n未勾选时即使填了端口也不会联网。");
+        DrawNetworkSection(cfg);
+        DrawManualUrlSection(cfg);
 
-        ImGui.SameLine();
-        // 协议下拉（http / socks5）
-        ImGui.SetNextItemWidth(90f);
-        var scheme = cfg.ProxyScheme;
-        if (ImGui.BeginCombo("##ProxyScheme", scheme))
-        {
-            foreach (var s in new[] { "http", "socks5" })
-            {
-                if (ImGui.Selectable(s, s == scheme))
-                {
-                    cfg.ProxyScheme = s;
-                    cfg.Save();
-                }
-            }
-            ImGui.EndCombo();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("代理协议。Clash / v2ray 一般用 http。");
-
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(110f); // 容纳 127.0.0.1 完整显示
-        var host = cfg.ProxyHost;
-        if (ImGui.InputText("##ProxyHost", ref host, 64)) // 默认 127.0.0.1，通常无需改
-        {
-            cfg.ProxyHost = host.Trim();
-            cfg.Save(); // 改动即存（失焦事件在游戏内不可靠，曾导致配置丢失）
-        }
-
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(80f);
-        var port = cfg.ProxyPort;
-        if (ImGui.InputTextWithHint("##ProxyPort", "端口", ref port, 8))
-        {
-            // 只允许数字，防止误填整串地址
-            cfg.ProxyPort = new string(port.Where(char.IsDigit).ToArray());
-            cfg.Save(); // 改动即存（同上：不能依赖失焦事件）
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("只填端口号即可，如 Clash 默认 7890、v2ray 常见 10809（http）或 1080（socks5）。\n只保存在本机配置，不会随插件分发。");
-
-        // 常见端口快捷填充
-        ImGui.SameLine();
-        if (ImGui.SmallButton("7890")) { cfg.ProxyPort = "7890"; cfg.Save(); }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Clash 默认端口");
-        ImGui.SameLine();
-        if (ImGui.SmallButton("10809")) { cfg.ProxyPort = "10809"; cfg.Save(); }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("v2rayN 默认 http 端口");
-        ImGui.SameLine();
-        if (ImGui.SmallButton("1080")) { cfg.ProxyScheme = "socks5"; cfg.ProxyPort = "1080"; cfg.Save(); }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("常见 socks5 端口（会自动切换为 socks5 协议）");
-
-        // 填写状态（中性提示，**不用绿色**——避免让用户误以为代理已通） + 真实连接测试按钮
-        ImGui.SameLine();
-        ImGui.BeginDisabled(_testing);
-        if (ImGui.Button(_testing ? "测试中…" : "测试直连"))
-        {
-            StartTest(useProxy: false);
-        }
-        ImGui.EndDisabled();
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("测试不使用代理时能否访问 GitHub（部分网络环境可直连）。");
-
-        ImGui.SameLine();
-        ImGui.BeginDisabled(_testing || !cfg.CanAccessGitHub || !cfg.UseProxy);
-        if (ImGui.Button("测试代理"))
-        {
-            StartTest(useProxy: true);
-        }
-        ImGui.EndDisabled();
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("测试通过当前代理能否访问 GitHub。\n只有测试成功才说明代理可用。");
-
-        // 状态：中性色说明填写情况；绿色**只在测试通过后**出现
-        if (_testOk == true)
-            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"【成功】 {_testMessage}");
-        else if (_testOk == false)
-            Ui.ColoredWrapped(new Vector4(1f, 0.45f, 0.4f, 1f), $"【失败】 {_testMessage}");
-        else if (!cfg.UseProxy)
-            Ui.ColoredWrapped(new Vector4(0.75f, 0.8f, 0.85f, 1f),
-                "当前为「直连」模式（未启用代理）——点「测试直连」确认能否访问 GitHub。");
-        else if (string.IsNullOrWhiteSpace(cfg.ProxyPort))
-            Ui.ColoredWrapped(new Vector4(1f, 0.6f, 0.35f, 1f), "【需填写】 已勾选启用代理，但端口为空：请填写端口。");
-        else
-            Ui.ColoredWrapped(new Vector4(0.75f, 0.8f, 0.85f, 1f),
-                $"已填写代理 {cfg.ProxyAddress}（尚未验证连通性）——建议先点「测试代理」确认。");
-
-        ImGui.Separator();
-
-        // ── 手动填仓库地址 ──
-        ImGui.TextUnformatted("仓库地址（可手动填写，也可从下方已装插件列表选择）：");
-        ImGui.SetNextItemWidth(Math.Max(200f, ImGui.GetContentRegionAvail().X - 90f));
-        ImGui.InputTextWithHint("##ManualUrl", "https://github.com/作者/仓库", ref _manualUrl, 512);
-        ImGui.SameLine();
-        var canGo = cfg.CanAccessGitHub && !_svc.Running;
-        ImGui.BeginDisabled(!canGo);
-        if (ImGui.Button("提取"))
-        {
-            StartExtract("（手动）", _manualUrl.Trim());
-        }
-        ImGui.EndDisabled();
-
-        // 打开提取结果目录（未翻译 json 所在处）——删掉扫描窗口后曾丢失此入口
-        ImGui.SameLine();
-        if (ImGui.Button("打开提取目录"))
-        {
-            OpenOutputDir();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("在资源管理器打开提取结果目录（数据目录\\文案扫描\\<插件名>_源码提取.json）。\n未翻译清单就放在这里，可交给翻译管线或外部 AI。");
-        ImGui.SameLine();
-        if (ImGui.Button("打开仓库目录"))
-        {
-            OpenRepoDir();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("在资源管理器打开已克隆的源码仓库目录（数据目录\\源码仓库\\）。");
-
+        // ── 运行状态/结果（放在区块下方，任何操作都看得到）──
         if (_svc.Running)
         {
             Ui.ColoredWrapped(new Vector4(1f, 0.8f, 0.3f, 1f),
@@ -192,25 +72,174 @@ public sealed class SourceExtractWindow : Window
 
         ImGui.Separator();
 
-        // ── 已装插件列表（带仓库地址的直接提取）──
+        DrawPluginList(cfg);
+    }
+
+    /// <summary>
+    /// 网络设置区块（可折叠）：代理铁律 = **勾选 + 填端口**，二者缺一不可，未勾选时填了也不联网。
+    /// 折叠起来的理由：配好之后这条基本不用再碰，长期占着半屏只是噪音。
+    /// </summary>
+    private void DrawNetworkSection(Configuration cfg)
+    {
+        var open = _netOpen ?? false;
+        if (ImGui.CollapsingHeader($"网络设置（访问 GitHub）{(cfg.CanAccessGitHub ? "" : "　⚠ 未配好")}##net"))
+        {
+            _netOpen = true;
+            using (var g = ImRaii.Group())
+            {
+                var useProxy = cfg.UseProxy;
+                if (ImGui.Checkbox("启用代理", ref useProxy))
+                {
+                    cfg.UseProxy = useProxy;
+                    cfg.Save();
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("只有勾选此项、并填写端口后，本功能才会走代理访问 GitHub。\n未勾选时即使填了端口也不会用它（直连）。");
+
+                // ── 第一行尾部：协议 / 主机 / 端口 ──
+                Ui.SameLineIfFits(90f + ImGui.GetStyle().ItemSpacing.X + 110f + ImGui.GetStyle().ItemSpacing.X + 80f);
+                ImGui.SetNextItemWidth(90f);
+                var scheme = cfg.ProxyScheme;
+                if (ImGui.BeginCombo("##ProxyScheme", scheme))
+                {
+                    foreach (var s in new[] { "http", "socks5" })
+                    {
+                        if (ImGui.Selectable(s, s == scheme))
+                        {
+                            cfg.ProxyScheme = s;
+                            cfg.Save();
+                        }
+                    }
+                    ImGui.EndCombo();
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("代理协议。Clash / v2ray 一般用 http。");
+
+                Ui.SameLineIfFits(110f + ImGui.GetStyle().ItemSpacing.X + 80f);
+                ImGui.SetNextItemWidth(110f);
+                var host = cfg.ProxyHost;
+                if (ImGui.InputText("##ProxyHost", ref host, 64))
+                {
+                    cfg.ProxyHost = host.Trim();
+                    cfg.Save(); // 改动即存（失焦事件在游戏内不可靠，曾导致配置丢失）
+                }
+
+                Ui.SameLineIfFits(80f);
+                ImGui.SetNextItemWidth(80f);
+                var port = cfg.ProxyPort;
+                if (ImGui.InputTextWithHint("##ProxyPort", "端口", ref port, 8))
+                {
+                    cfg.ProxyPort = new string(port.Where(char.IsDigit).ToArray());
+                    cfg.Save();
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("只填端口号即可，如 Clash 默认 7890、v2ray 常见 10809（http）或 1080（socks5）。\n只保存在本机配置，不会随插件分发。");
+
+                // ── 第二行：端口快捷填充 + 两个连接测试 ──
+                ImGui.TextDisabled("快捷端口：");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("7890")) { cfg.ProxyPort = "7890"; cfg.Save(); }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Clash 默认端口");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("10809")) { cfg.ProxyPort = "10809"; cfg.Save(); }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("v2rayN 默认 http 端口");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("1080")) { cfg.ProxyScheme = "socks5"; cfg.ProxyPort = "1080"; cfg.Save(); }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("常见 socks5 端口（会自动切换为 socks5 协议）");
+
+                Ui.SameLineIfFits(Ui.ButtonWidth("测试代理") + ImGui.GetStyle().ItemSpacing.X + Ui.ButtonWidth("测试直连"));
+                ImGui.BeginDisabled(_testing);
+                if (ImGui.Button(_testing ? "测试中…" : "测试直连"))
+                    StartTest(useProxy: false);
+                ImGui.EndDisabled();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("测试**不使用代理**时能否访问 GitHub（部分网络环境可直连）。");
+                ImGui.SameLine();
+                ImGui.BeginDisabled(_testing || !cfg.CanAccessGitHub || !cfg.UseProxy);
+                if (ImGui.Button("测试代理"))
+                    StartTest(useProxy: true);
+                ImGui.EndDisabled();
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("测试通过当前代理能否访问 GitHub。\n只有测试成功才说明代理可用。");
+
+                // ── 状态：中性色说明填写情况；绿色**只在测试通过后**出现 ──
+                if (_testOk == true)
+                    Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"【成功】 {_testMessage}");
+                else if (_testOk == false)
+                    Ui.ColoredWrapped(new Vector4(1f, 0.45f, 0.4f, 1f), $"【失败】 {_testMessage}");
+                else if (!cfg.UseProxy)
+                    Ui.ColoredWrapped(new Vector4(0.75f, 0.8f, 0.85f, 1f),
+                        "当前为「直连」模式（未启用代理）——点「测试直连」确认能否访问 GitHub。");
+                else if (string.IsNullOrWhiteSpace(cfg.ProxyPort))
+                    Ui.ColoredWrapped(new Vector4(1f, 0.6f, 0.35f, 1f), "【需填写】 已勾选启用代理，但端口为空：请填写端口。");
+                else
+                    Ui.ColoredWrapped(new Vector4(0.75f, 0.8f, 0.85f, 1f),
+                        $"已填写代理 {cfg.ProxyAddress}（尚未验证连通性）——建议先点「测试代理」确认。");
+            }
+            Ui.FrameLastGroup(0.35f);   // 分组边框：让"这一坨是一组"一目了然
+        }
+        else
+        {
+            _netOpen = false;
+            // 收起时给一行摘要，不让人猜当前是什么状态
+            ImGui.SameLine();
+            Ui.Hint(cfg.UseProxy
+                ? (string.IsNullOrWhiteSpace(cfg.ProxyPort) ? "（已勾选但没填端口）" : $"（代理 {cfg.ProxyAddress}）")
+                : "（直连模式）");
+        }
+    }
+
+    /// <summary>
+    /// 手动填写仓库地址区块（可折叠）。默认收起——绝大多数情况直接用下方已装插件列表。
+    /// ⚠ 这里曾出过 UI bug：输入框按"只留 90px 给按钮"算宽度，但后面其实有 3 个按钮，
+    ///   于是按钮被挤出窗口右缘（用户实测"打开按钮都出边框了"）。现改为**输入框占满一行**，
+    ///   按钮另起一行并用 SameLineIfFits 自适应。
+    /// </summary>
+    private void DrawManualUrlSection(Configuration cfg)
+    {
+        if (!ImGui.CollapsingHeader("手动填写仓库地址（可选）##manual"))
+            return;
+        {
+            using var g = ImRaii.Group();
+            ImGui.TextDisabled("用于提取「未装 / 未列在下方」的插件，或想指定某个仓库时。");
+            ImGui.SetNextItemWidth(-1f);   // 占满整行，按钮另起一行 → 绝不再被挤出去
+            ImGui.InputTextWithHint("##ManualUrl", "https://github.com/作者/仓库", ref _manualUrl, 512);
+
+            var canGo = cfg.CanAccessGitHub && !_svc.Running;
+            ImGui.BeginDisabled(!canGo);
+            if (ImGui.Button("提取此仓库"))
+            {
+                StartExtract("（手动）", _manualUrl.Trim());
+            }
+            ImGui.EndDisabled();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("拉取该仓库并按新规则提取界面文案。\n按钮灰掉说明：未配好网络（见上方「网络设置」）或正在提取中。");
+        }
+        Ui.FrameLastGroup(0.35f);
+    }
+
+    /// <summary> 已装插件列表：工具栏（搜索/刷新/全部提取）+ 目录入口 + 列表本体。 </summary>
+    private void DrawPluginList(Configuration cfg)
+    {
         if (!_listLoaded)
         {
             RefreshList();
         }
-        ImGui.TextDisabled($"已安装且带 GitHub 地址的插件：{_plugins.Count} 个");
+
+        // ── 工具栏：计数 + 搜索 + 操作（按钮按需换行，窄窗口不会裁掉）──
+        ImGui.TextDisabled($"已装且带 GitHub 地址：{_plugins.Count} 个");
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(200f);
-        ImGui.InputTextWithHint("##srcFilter", "搜索插件（内部名/显示名）", ref _filter, 128);
+        ImGui.SetNextItemWidth(190f);
+        ImGui.InputTextWithHint("##srcFilter", "搜索（内部名/显示名）", ref _filter, 128);
         ImGui.SameLine();
-        if (ImGui.Button("刷新列表##src"))
+        if (ImGui.Button("刷新##src"))
         {
             RefreshList();
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("重新枚举已装插件，并检测各插件当前 DLL 是否已是中文版。");
 
-        // ── 全部提取（尊重上方搜索框：有筛选时只提取筛选结果）──
-        ImGui.SameLine();
+        Ui.SameLineIfFits(Ui.ButtonWidth("全部提取"));
         {
             var canBatch = cfg.CanAccessGitHub && !_svc.Running && !_batchRunning;
             ImGui.BeginDisabled(!canBatch);
@@ -224,88 +253,89 @@ public sealed class SourceExtractWindow : Window
             ImGui.SetTooltip("把列表里的插件**逐个**提取一遍（自动跳过：已是中文版、源码已汉化、已翻译完成的）。\n" +
                              "有搜索筛选时只处理筛选出的那些；已在别处克隆过的仓库只会 `git pull`，很快。");
 
-        using (var child = ImRaii.Child("##源码插件列表", new Vector2(-1f, -1f), true))
+        // 目录入口（结果相关，跟列表放一起更顺手）
+        Ui.SameLineIfFits(Ui.ButtonWidth("打开提取目录"));
+        if (ImGui.Button("打开提取目录"))
+            OpenOutputDir();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("打开提取结果目录（数据目录\\文案扫描\\<插件名>_源码提取.json）。\n未翻译清单就放在这里，可交给翻译管线或外部 AI。");
+        Ui.SameLineIfFits(Ui.ButtonWidth("打开仓库目录"));
+        if (ImGui.Button("打开仓库目录"))
+            OpenRepoDir();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("打开已克隆的源码仓库目录（数据目录\\源码仓库\\）。");
+
+        DrawList();
+    }
+
+    /// <summary> 插件列表本体（带搜索过滤与三态标注）。 </summary>
+    private void DrawList()
+    {
+        using var child = ImRaii.Child("##源码插件列表", new Vector2(-1f, -1f), true);
+        if (!child.Success) return;
+
+        if (_plugins.Count == 0)
         {
-            if (child.Success)
+            Ui.Hint("没有找到带 GitHub 地址的已装插件（可在上方「手动填写仓库地址」里填）。");
+        }
+        var filter = _filter.Trim();
+        var shown = 0;
+        for (var i = 0; i < _plugins.Count; i++)
+        {
+            var (name, displayName, url) = _plugins[i];
+            if (!MatchesFilter(_plugins[i], filter)) continue;
+            shown++;
+            ImGui.PushID(i);
+
+            // ── 两行式排版，避免单行过长被窗口右缘截断 ──
+            // 第一行：[提取] 内部名（显示名：X）  状态标注
+            if (ImGui.Button("提取##go"))
+                StartExtract(name, url);
+            ImGui.SameLine();
+            if (ImGui.Button("复制名##cp"))
             {
-                if (_plugins.Count == 0)
-                {
-                    Ui.Hint("没有找到带 GitHub 地址的已装插件（可在上方手动填写仓库地址）。");
-                }
-                var filter = _filter.Trim();
-                var shown = 0;
-                for (var i = 0; i < _plugins.Count; i++)
-                {
-                    var (name, displayName, url) = _plugins[i];
-                    // 搜索过滤：内部名 / 显示名 / 仓库地址，任一包含即可
-                    if (!MatchesFilter(_plugins[i], filter))
-                    {
-                        continue;
-                    }
-                    shown++;
-                    ImGui.PushID(i);
-
-                    // ── 两行式排版，避免单行过长被窗口右缘截断 ──
-                    // 第一行：[提取] 内部名（显示名：X）  状态标注
-                    if (ImGui.Button("提取##go"))
-                    {
-                        StartExtract(name, url);
-                    }
-                    ImGui.SameLine();
-                    if (ImGui.Button("复制名##cp"))
-                    {
-                        // 复制**显示名**（安装器里看到的名字），便于搜索/交流/查资料
-                        var copyText = displayName.Length > 0 ? displayName : name;
-                        ImGui.SetClipboardText(copyText);
-                        _summary = $"已复制插件名到剪贴板：{copyText}";
-                    }
-                    if (ImGui.IsItemHovered())
-                        ImGui.SetTooltip("复制该插件的显示名（安装器里显示的名字）到剪贴板。");
-                    ImGui.SameLine();
-                    // 名称显示：**显示名【内部名】**（用户在安装器里看到的是显示名，故把显示名放前、内部名用【】标注）
-                    if (displayName.Length > 0 &&
-                        !string.Equals(displayName, name, StringComparison.OrdinalIgnoreCase))
-                    {
-                        ImGui.TextUnformatted($"{displayName}【{name}】");
-                    }
-                    else
-                    {
-                        ImGui.TextUnformatted(name);
-                    }
-
-                    // 状态标注：另起一行（不与名字抢宽度）
-                    var pg = _progressCache.TryGetValue(name, out var p0) ? p0 : (Total: 0, Translated: 0, Done: false);
-                    if (_chineseCache.TryGetValue(name, out var zh) && zh > 0)
-                        Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    （已是中文版·{zh} 条，无需提取）");
-                    else if (pg.Done)
-                        Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    【已翻译】{pg.Translated}/{pg.Total} 条（无需重复提取）");
-                    else if (pg.Total > 0)
-                        Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), $"    待翻译 {pg.Translated}/{pg.Total} 条");
-                    else
-                        Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), "    （未提取）");
-
-                    // 第二行：仓库地址（灰色，自动换行）
-                    ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-                    ImGui.TextWrapped("    " + url);
-                    ImGui.PopStyleColor();
-
-                    if (_lastResult.TryGetValue(name, out var res))
-                    {
-                        Ui.ColoredWrapped(new Vector4(0.6f, 0.85f, 0.6f, 1f), "    " + res);
-                    }
-                    ImGui.Spacing();
-
-                    ImGui.PopID();
-                }
-                if (filter.Length > 0)
-                {
-                    ImGui.TextDisabled(filter.Length > 0 && shown == 0
-                        ? $"没有匹配「{filter}」的插件。"
-                        : $"（筛选后显示 {shown} 个）");
-                }
+                var copyText = displayName.Length > 0 ? displayName : name;
+                ImGui.SetClipboardText(copyText);
+                _summary = $"已复制插件名到剪贴板：{copyText}";
             }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("复制该插件的显示名（安装器里显示的名字）到剪贴板。");
+            ImGui.SameLine();
+            if (displayName.Length > 0 && !string.Equals(displayName, name, StringComparison.OrdinalIgnoreCase))
+                ImGui.TextUnformatted($"{displayName}【{name}】");
+            else
+                ImGui.TextUnformatted(name);
+
+            // 状态标注：另起一行（不与名字抢宽度）
+            var pg = _progressCache.TryGetValue(name, out var p0) ? p0 : (Total: 0, Translated: 0, Done: false);
+            if (_chineseCache.TryGetValue(name, out var zh) && zh > 0)
+                Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    （已是中文版·{zh} 条，无需提取）");
+            else if (pg.Done)
+                Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    【已翻译】{pg.Translated}/{pg.Total} 条（无需重复提取）");
+            else if (pg.Total > 0)
+                Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), $"    待翻译 {pg.Translated}/{pg.Total} 条");
+            else
+                Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), "    （未提取）");
+
+            // 第二行：仓库地址（灰色，自动换行）
+            ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
+            ImGui.TextWrapped("    " + url);
+            ImGui.PopStyleColor();
+
+            if (_lastResult.TryGetValue(name, out var res))
+                Ui.ColoredWrapped(new Vector4(0.6f, 0.85f, 0.6f, 1f), "    " + res);
+            ImGui.Spacing();
+
+            ImGui.PopID();
+        }
+        if (filter.Length > 0)
+        {
+            ImGui.TextDisabled(shown == 0
+                ? $"没有匹配「{filter}」的插件。"
+                : $"（筛选后显示 {shown} 个）");
         }
     }
+
 
     /// <summary> 刷新插件列表 + 检测各插件已装 DLL 的中文情况（用于列表标注与提前跳过）。 </summary>
     private void RefreshList()
