@@ -52,6 +52,11 @@ public sealed class MtTranslateService
     /// <summary> 进度/结果描述（窗口轮询显示）。 </summary>
     public string Status { get; private set; } = "";
 
+    /// <summary> 翻译进度（供界面画进度条）：已完成 / 总数。Total = 0 表示当前无进度可显示。
+    /// 只做整数值的**单向写入 + 轮询读取**（与旧项目"后台任务只做整串赋值"的约定一致）。 </summary>
+    public volatile int ProgressDone;
+    public volatile int ProgressTotal;
+
     /// <summary> 外部（如启动检查）写入提示，不改运行状态。 </summary>
     public void Notify(string message) => Status = message;
 
@@ -154,6 +159,7 @@ public sealed class MtTranslateService
             return;
         }
         Running = true;
+        ProgressDone = 0; ProgressTotal = 0;   // 新一轮开始，清掉旧进度
         Status = "正在扫描缺失文案…";
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -175,6 +181,9 @@ public sealed class MtTranslateService
                 Running = false;
                 _cts = null;
                 cts.Dispose();
+                // 任务结束：清掉进度条（避免下一轮开始前显示上一轮的旧进度）
+                ProgressDone = 0;
+                ProgressTotal = 0;
             }
         });
     }
@@ -189,6 +198,7 @@ public sealed class MtTranslateService
             return;
         }
         Running = true;
+        ProgressDone = 0; ProgressTotal = 0;   // 新一轮开始，清掉旧进度
         Status = $"[{plugin}] 正在读取缺口…";
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -210,6 +220,9 @@ public sealed class MtTranslateService
                 Running = false;
                 _cts = null;
                 cts.Dispose();
+                // 任务结束：清掉进度条（避免下一轮开始前显示上一轮的旧进度）
+                ProgressDone = 0;
+                ProgressTotal = 0;
             }
         });
     }
@@ -228,6 +241,7 @@ public sealed class MtTranslateService
             return;
         }
         Running = true;
+        ProgressDone = 0; ProgressTotal = 0;   // 新一轮开始，清掉旧进度
         Status = "正在汇总各插件的缺口…";
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -293,6 +307,9 @@ public sealed class MtTranslateService
                 Running = false;
                 _cts = null;
                 cts.Dispose();
+                // 任务结束：清掉进度条（避免下一轮开始前显示上一轮的旧进度）
+                ProgressDone = 0;
+                ProgressTotal = 0;
             }
         });
     }
@@ -344,10 +361,13 @@ public sealed class MtTranslateService
         }
         var batchSize = Math.Clamp(_cfg.AiBatchSize, 1, 200);
         var maxBatchChars = MaxBatchChars(_cfg);   // ⚠ 与条数**双重**限制：只看条数会被超长批次打爆
-        var translated = new Dictionary<string, string>(StringComparer.Ordinal);
+        var total0 = texts.Count;
+        var saved = 0;              // 已**落盘**的条数（进度条据此显示真实进度）
         var failed = 0;
         var cancelled = false;
         var queue = new List<string>(texts);
+        ProgressTotal = total0;     // 供界面画进度条
+        ProgressDone = 0;
         while (queue.Count > 0)
         {
             if (token.IsCancellationRequested) { cancelled = true; break; }
@@ -362,13 +382,17 @@ public sealed class MtTranslateService
                 take++;
             }
             var batch = queue.Take(take).ToDictionary(t => t, _ => "", StringComparer.Ordinal);
-            Status = $"翻译中 {take}/{queue.Count} 条（本批 {chars} 字符）…";
+            var doneNow = total0 - queue.Count;
+            ProgressDone = doneNow;
+            Status = $"翻译中 {doneNow}/{total0} 条（本批 {take} 条 / {chars} 字符）…";
             try
             {
-                foreach (var (en, zh) in await TranslateBatch(batch, token))
-                {
-                    translated[en] = zh;
-                }
+                var got = await TranslateBatch(batch, token);
+                // ⚠ **每批完成立即落盘**（2026-09-15 改进）：原实现把全部批次结果攒在内存、**最后才 merge**，
+                //   于是中途崩溃 / 强退游戏 → 整轮成果**全丢**（用户看不到任何文件）。
+                //   改为每批即写：最多损失"正在飞的这一批"，且进度条上的数字是**真实已落盘**的条数。
+                //   `MergeWindowEntries` 本身是增量的（只写该批），重复调用不覆盖已有译文，安全。
+                if (got.Count > 0) saved += merge(got);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
@@ -407,11 +431,11 @@ public sealed class MtTranslateService
             }
         }
 
-        // ⚠ 即使被停止也**保留已完成的部分**：这些批次已经花掉额度了，丢弃等于白花钱。
-        var added = translated.Count > 0 ? merge(translated) : 0;
+        // ⚠ 即使被停止也**保留已完成的部分**：那些批次已随批落盘（见上），不会丢。
+        ProgressDone = total0 - queue.Count;
         Status = cancelled
-            ? $"已停止：保留已完成 {added} 条（未翻的仍可在缺口里重来；失败 {failed} 条）"
-            : $"完成：新增 {added} 条中文（失败 {failed} 条），已保存";
+            ? $"已停止：保留已完成 {saved} 条（未翻的仍可在缺口里重来；失败 {failed} 条）"
+            : $"完成：新增 {saved} 条中文（失败 {failed} 条），已保存";
         _appLog.Info($"[机翻] {Status}");
     }
 

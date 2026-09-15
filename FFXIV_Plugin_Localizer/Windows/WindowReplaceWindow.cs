@@ -265,7 +265,9 @@ public sealed class WindowReplaceWindow : Window
 
         if (_mt.Running)
         {
+            // ⚠ 文字在前、进度条在其**右侧同一行**（用户要求"保留文字"，进度条只是补充）。
             Ui.ColoredWrapped(new Vector4(1f, 0.8f, 0.3f, 1f), _mt.Status);
+            DrawTranslateProgressBar();
         }
         if (_summary.Length > 0)
         {
@@ -307,6 +309,22 @@ public sealed class WindowReplaceWindow : Window
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// 翻译进度条（配合上方文字，**文字保留不动**）。
+    /// 只在有进度可算（总数 &gt; 0）时画；用 `ProgressBar` 自带覆盖文字显示 "已完成/总数 (百分比)"。
+    /// ⚠ 数值来自 `MtTranslateService.ProgressDone/Total`，是**已落盘**的条数（每批即写，见 TranslateAll）。
+    /// </summary>
+    private void DrawTranslateProgressBar()
+    {
+        var total = _mt.ProgressTotal;
+        if (total <= 0) return;
+        var done = Math.Clamp(_mt.ProgressDone, 0, total);
+        var frac = (float)done / total;
+        // 宽度自适应窗口（窄窗口不会溢出）；高度用默认，跟输入框等高
+        var w = Math.Max(120f, ImGui.GetContentRegionAvail().X);
+        ImGui.ProgressBar(frac, new Vector2(w, 0f), $"{done}/{total}（{frac * 100f:F0}%）");
     }
 
     private void Invalidate(string plugin) => _cache.Remove(plugin);
@@ -606,6 +624,7 @@ public sealed class WindowReplaceWindow : Window
         if (_mt.Running)
         {
             ImGui.TextDisabled($"机翻进行中（{_mt.Status}）——完成后自动刷新。");
+            DrawTranslateProgressBar();
         }
         else
         {
