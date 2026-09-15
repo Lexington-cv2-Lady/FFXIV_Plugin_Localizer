@@ -300,7 +300,9 @@ public sealed unsafe class ReplacementService
         // 不摘 _hashes：防止哈希碰撞误伤同哈希的其它键（多一次未命中，无害）
     }
 
-    /// <summary> 清洗：去空白、去空值、去同文，并剔除 ImGui 内部 ID（<c>##</c> 开头，无显示文字）。 </summary>
+    /// <summary> 清洗：去空白、去空值，并剔除 ImGui 内部 ID（<c>##</c> 开头，无显示文字）。
+    /// ⚠ **保留「译文 == 原文」**（表示"保持原样/无需翻译"）；旧实现把它当噪音丢掉，
+    /// 导致 URL/DPS 这类专有名词永远算未翻译（详见 MergeWindowEntries 的说明）。 </summary>
     private static Dictionary<string, string> Normalize(Dictionary<string, string> data)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -308,7 +310,7 @@ public sealed unsafe class ReplacementService
         {
             var k = en.Trim();
             var v = (zh ?? "").Trim();
-            if (k.Length < 2 || v.Length == 0 || k == v) continue;
+            if (k.Length < 2 || v.Length == 0) continue;
             if (k.StartsWith("##")) continue; // ImGui 内部 ID，不参与替换
             result[k] = v;
         }
@@ -437,7 +439,8 @@ public sealed unsafe class ReplacementService
                     {
                         var en = f.TryGetProperty("Original", out var o) ? o.GetString()?.Trim() : null;
                         var zh = f.TryGetProperty("Translated", out var t) ? t.GetString()?.Trim() : null;
-                        if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh) || en == zh) continue;
+                        // 允许「译文==原文」：这是外部表给出的"保持原样"答案，丢掉会让该条永远算"缺失"（见 MergeWindowEntries 说明）
+                        if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh)) continue;
                         if (_installerSource.ContainsKey(en!)) continue;
                         _installerSource[en!] = zh!;
                         added++;
@@ -651,7 +654,7 @@ public sealed unsafe class ReplacementService
             {
                 var key = en.Trim();
                 var val = (zh ?? "").Trim();
-                if (key.Length < 2 || val.Length == 0 || key == val) continue;
+                if (key.Length < 2 || val.Length == 0) continue;   // 允许「译文==原文」，见 MergeWindowEntries 说明
                 if (_installerSource.ContainsKey(key)) continue;
                 _installerSource[key] = val;
                 added++;
@@ -811,7 +814,11 @@ public sealed unsafe class ReplacementService
             {
                 var key = en.Trim();
                 var val = (zh ?? "").Trim();
-                if (key.Length < 2 || val.Length == 0 || key == val) continue;
+                // ⚠⚠ **必须允许「译文 == 原文」**：像 `URL` 这类专有名词，AI 会原样返回（这本身就是正确答案
+                //    ="界面保持英文即可"）。旧实现在这里丢弃它 → 该条永远存不进译文表 → 进度永久停在
+                //    "46/47 待翻译"，每次点机翻都重送一遍、AI 又返回原文、又被丢弃，形成死循环（2026-09-15
+                //    由 Browsingway 的 `URL` 暴露）。同文不表示失败——**空译文才表示失败**（那才要留着重试）。
+                if (key.Length < 2 || val.Length == 0) continue;
                 table[key] = val;
                 added++;
             }
@@ -1139,7 +1146,8 @@ public sealed unsafe class ReplacementService
                         if (!f.TryGetProperty("Original", out var o) || !f.TryGetProperty("Translated", out var t)) continue;
                         var en = o.GetString()?.Trim();
                         var zh = t.GetString()?.Trim();
-                        if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh) || en == zh) continue;
+                        // 允许「译文==原文」（= 外部表判定"保持原样"），见 MergeWindowEntries 说明
+                        if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh)) continue;
                         if (_installerSource.ContainsKey(en!)) continue;
                         _installerSource[en!] = zh!;
                         added++;

@@ -31,7 +31,7 @@ public static class TranslationFile
 
     private static readonly JsonSerializerOptions Options = JsonFile.Indented;
 
-    /// <summary> 写出为成对数组格式（自动去空白、去空译文、去同文，键去重保序）。 </summary>
+    /// <summary> 写出为成对数组格式（自动去空白、去空译文、键去重保序）。 </summary>
     public static void Save(string path, IEnumerable<KeyValuePair<string, string>> table)
     {
         var doc = new Doc();
@@ -40,7 +40,10 @@ public static class TranslationFile
         {
             var k = (en ?? "").Trim();
             var v = (zh ?? "").Trim();
-            if (k.Length < 1 || v.Length == 0 || k == v) continue;
+            // ⚠ **允许「译文 == 原文」**（表示"保持原样/无需翻译"，如 URL / DPS / HP 等专有名词与缩写）：
+            //    此类条目若被丢弃，就会永远显示"待翻译"、每次机翻都重送一遍（AI 仍返回原文）→ 死循环。
+            //    见 MergeWindowEntries 处同款说明。空译文仍跳过（那是真失败，要留着重试）。
+            if (k.Length < 1 || v.Length == 0) continue;
             if (!seen.Add(k)) continue;
             doc.entries.Add(new Pair { 原文 = k, 译文 = v });
         }
@@ -85,7 +88,7 @@ public static class TranslationFile
                 if (prop.Value.ValueKind != JsonValueKind.String) continue;
                 var k = prop.Name.Trim();
                 var v = prop.Value.GetString()?.Trim() ?? "";
-                if (k.Length >= 1 && v.Length > 0 && k != v) into[k] = v;
+                if (k.Length >= 1 && v.Length > 0) into[k] = v;   // 允许「译文==原文」（保持原样），见 Save 说明
             }
             return;
         }
@@ -106,8 +109,8 @@ public static class TranslationFile
             if (en == null && el.TryGetProperty("Original", out var o2)) en = o2.GetString()?.Trim();
             var zh = el.TryGetProperty("译文", out var t) ? t.GetString()?.Trim() : null;
             if (zh == null && el.TryGetProperty("Translated", out var t2)) zh = t2.GetString()?.Trim();
-            if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh) || en == zh) continue;
-            into[en!] = zh!;
+            if (string.IsNullOrEmpty(en) || string.IsNullOrEmpty(zh)) continue;
+            into[en!] = zh!;   // 允许「译文==原文」（保持原样），见 Save 说明
         }
     }
 
