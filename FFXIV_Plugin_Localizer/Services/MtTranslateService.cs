@@ -229,6 +229,13 @@ public sealed class MtTranslateService
     /// <summary> 是否值得翻译：含 ASCII 字母、不含中日韩字符（已是中文的不送翻）、且不是纯键位名。 </summary>
     private static bool IsTranslatable(string s) => TextHeuristics.IsTranslatable(s);
 
+    /// <summary> 插件卸载时中断进行中的翻译（对齐旧项目 `TranslatePipelineWindow.Dispose`）。
+    /// 否则卸载后后台任务仍会继续跑并向已失效的服务里写数据。 </summary>
+    public void Dispose()
+    {
+        try { _cts?.Cancel(); } catch { /* 已释放则忽略 */ }
+    }
+
     /// <summary>
     /// 在当前译文表里筛出「仍未翻译」的那些（用于翻译过程中重算队列）。
     /// ⚠ 不做**跨插件**判断：这里只关心"这些串现在是否已被任何插件的译文表覆盖"——
@@ -267,10 +274,17 @@ public sealed class MtTranslateService
             Status = $"翻译中 {done}/{queue.Count}…";
             try
             {
-                foreach (var (en, zh) in await TranslateBatch(batch))
+                foreach (var (en, zh) in await TranslateBatch(batch, token))
                 {
                     translated[en] = zh;
                 }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // ⚠ 用户点「停止」导致的取消**不是失败**：不能记进 failed，也不该继续下一批。
+                //    （放在通用 catch 之前，否则会被当成"一批失败"计入失败数、还白等一次 Delay。）
+                cancelled = true;
+                break;
             }
             catch (Exception ex)
             {
@@ -318,7 +332,7 @@ public sealed class MtTranslateService
     /// （实测 40 条失败 30 条）；成对数组里原文是 JSON 的**值**，序列化天然安全。
     /// 发送 <c>[{原文:"...",译文:""}]</c>，要求 AI 只回填译文，按**下标**对应回原文（不依赖 AI 复述原文）。
     /// </summary>
-    private async Task<Dictionary<string, string>> TranslateBatch(Dictionary<string, string> batch)
+    private async Task<Dictionary<string, string>> TranslateBatch(Dictionary<string, string> batch, CancellationToken token = default)
     {
         var (baseUrl, model) = ResolveEndpoint(_cfg);
         var items = batch.Keys.ToList(); // 保持插入顺序
@@ -353,8 +367,10 @@ public sealed class MtTranslateService
         using var req = new HttpRequestMessage(HttpMethod.Post, baseUrl.TrimEnd('/') + "/chat/completions");
         req.Headers.Add("Authorization", "Bearer " + GetApiKey(_cfg).Trim());
         req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
-        using var resp = await _http.SendAsync(req);
-        var body = await resp.Content.ReadAsStringAsync();
+        // ⚠ 把 token 传进 SendAsync（对齐旧项目做法）：点「停止翻译」时**在飞的请求也会被立即中断**，
+        //    而不是傻等它自然返回（本机 HttpClient 超时是 90 秒，用户会以为按钮没反应）。
+        using var resp = await _http.SendAsync(req, token);
+        var body = await resp.Content.ReadAsStringAsync(token);
         if (!resp.IsSuccessStatusCode)
         {
             throw new Exception($"HTTP {(int)resp.StatusCode}：{Truncate(body, 200)}");

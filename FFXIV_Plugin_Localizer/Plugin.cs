@@ -388,6 +388,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleMain;
         CommandManager.RemoveHandler(CommandName);
         WindowSystem.RemoveAllWindows();
+        Mt.Dispose();          // 中断进行中的翻译（否则卸载后后台任务还在跑）
         Hook.Dispose();
         Replacement.Dispose();
         AppLog.Info("[插件] 翻译插件的插件 已卸载");

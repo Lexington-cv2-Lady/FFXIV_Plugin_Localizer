@@ -925,12 +925,37 @@ public sealed unsafe class ReplacementService
     }
 
     /// <summary>
+    /// **删除文件（走系统回收站）**——删译文/删备份**一律用这个**，不要用 `File.Delete`。
+    ///
+    /// ⚠ 为什么（2026-09-15 真实事故 + 旧项目对照）：译文是**花 AI 额度换来的资产**，不是可随手重建的缓存。
+    ///   原实现用 `File.Delete`（**不进回收站**）→ 用户点一次「一键还原英文」就**永久丢掉 416 条译文**，
+    ///   连恢复的余地都没有。旧项目 `BackupManager` 早就用
+    ///   `FileSystem.DeleteFile(..., RecycleOption.SendToRecycleBin)`（`Microsoft.VisualBasic.FileIO`），
+    ///   本处对齐该做法：**误删可从回收站还原**。
+    /// 文件不存在 / 回收站不可用（如网络盘）时回退普通删除，绝不因此抛异常中断流程。
+    /// </summary>
+    private static void DeleteToRecycleBin(string path)
+    {
+        if (!File.Exists(path)) return;
+        try
+        {
+            Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                path,
+                Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+        }
+        catch
+        {
+            try { File.Delete(path); } catch { /* 尽力而为 */ }
+        }
+    }
+
+    /// <summary>
     /// **还原前的自动备份**：把当前译文目录整体复制到
     /// <c>&lt;数据目录&gt;\窗口翻译_还原备份\&lt;时间戳&gt;\</c>，返回备份目录（无内容或失败返回 ""）。
     ///
-    /// ⚠ 为什么要有它（2026-09-15 真实数据丢失事故）：译文是**花 AI 额度换来的**，而「一键还原英文」
-    ///   只做 `File.Delete`（不进回收站）→ 一点下去几百条译文**永久消失**，用户实测已丢过 416 条。
-    ///   现在还原前先留一份，误点也能捞回来（备份目录由用户自行清理，不自动删）。
+    /// ⚠ 双保险：删除本身已走回收站（见 <see cref="DeleteToRecycleBin"/>），此处再留一份**插件内的**快照，
+    ///   便于直接对照找回（回收站容易被清空）。备份目录由用户自行清理，不自动删。
     /// </summary>
     public string BackupWindowTables()
     {
@@ -985,7 +1010,7 @@ public sealed unsafe class ReplacementService
             try
             {
                 var file = Path.Combine(WindowTableDir, $"{plugin}.json");
-                if (File.Exists(file)) File.Delete(file);
+                DeleteToRecycleBin(file);   // ⚠ 走回收站，别用 File.Delete（见方法注释）
             }
             catch (Exception ex)
             {
