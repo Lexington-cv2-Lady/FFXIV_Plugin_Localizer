@@ -122,8 +122,19 @@ public sealed class SourceExtractService
     ///   <c>CopyType.OpenWindow =&gt; "Open a Window",</c>（switch 表达式返回值），**后面没有括号**，
     ///   所以"函数调用式"的两条规则都抓不到，而它最终会被显示成下拉框的选项文字。
     /// </summary>
+    /// <summary>
+    /// 赋值/switch 表达式里的字面量。
+    ///
+    /// ⚠ **两处必须这么写，否则会跨代码误匹配**（2026-09-15 实测事故）：
+    ///   ① 内容里**禁止裸换行** `[^""\\\r\n]`。C# 普通字符串字面量本就不能含裸换行，
+    ///      而放开会让正则从"某个未闭合的引号"一路吃到**后面几百行的代码**。
+    ///   ② `=` 后要 `(?!=)`（排除 `==`），且**不能**用早期的 `=\s*[^=]` 写法——
+    ///      那会吃掉字面量的**开引号**，于是匹配起点从 `""` 的**闭引号**开始，同样跨代码。
+    ///   实测症状：ResizableHUD 采到 `';␍␊ int minDifference = int.MaxValue;␍␊ if (input =='`
+    ///   这种"半截源码"当作文案（源头是 `string closestMatch = "";` 紧接着的代码）。
+    /// </summary>
     private static readonly Regex AssignStringRe = new(
-        @"(?:=>|=\s*[^=]|,\s*|\(\s*|\[\s*)\s*(?:\$)?@?""((?:[^""\\]|\\.)*)""",
+        @"(?:=>|=(?!=)\s*|,\s*|\(\s*|\[\s*)\s*(?:\$)?@?""((?:[^""\\\r\n]|\\.)*)""",
         RegexOptions.Compiled);
 
     /// <summary>
@@ -594,8 +605,36 @@ public sealed class SourceExtractService
         if (s.Contains("://")) return;                  // URL
         // 含 C# 插值残留（{...}）说明是动态拼接，静态值不可靠 → 不采
         if (s.Contains('{') || s.Contains('}')) return;
+        if (IsCodeNoise(s)) return;                     // 字节签名 / 分析器配置 / 半截源码
         strings.Add(s);
         funcStats[func] = funcStats.TryGetValue(func, out var c) ? c + 1 : 1;
+    }
+
+    /// <summary>
+    /// **明显的"代码噪音"**，不该当界面文案（2026-09-15 实测三类，都会白耗机翻额度）：
+    ///   ① **字节签名**：`48 89 5C 24 ?? 57 48 83 EC 20 …`（Dalumud 签名扫描用，是机器码不是文字）
+    ///   ② **分析器/编译配置**：`CA1416:Validate platform compatibility`（GlobalSuppressions.cs）
+    ///   ③ **半截源码**：正则跨行误匹配的产物，特征是含 `;\r\n`、`{\r\n`、`(input ==` 这类代码骨架
+    /// 判据写成"**代码特征**"而不是枚举具体串，这样同类噪音都能挡住。
+    /// </summary>
+    private static bool IsCodeNoise(string s)
+    {
+        // ① 字节签名：大量「两位十六进制 + 空格」的 token
+        var hex = 0;
+        foreach (var tok in s.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            if (tok.Length == 2 && ((tok[0] >= '0' && tok[0] <= '9') || (tok[0] >= 'A' && tok[0] <= 'F')) &&
+                ((tok[1] >= '0' && tok[1] <= '9') || (tok[1] >= 'A' && tok[1] <= 'F'))) hex++;
+        if (hex >= 4) return true;
+
+        // ② 分析器 ID：形如 `CA1416:...`（两个大写字母 + 4 位数字 + 冒号）
+        if (Regex.IsMatch(s, @"^[A-Z]{2}\d{4}:")) return true;
+
+        // ③ 半截源码：真正的界面文案不会含这些代码骨架
+        if (s.Contains(";\r") || s.Contains(";\n") || s.Contains("{\r") || s.Contains("{\n")) return true;
+        if (s.Contains("== \"") || s.Contains("== '") || s.Contains("int.") || s.Contains("string.")) return true;
+        if (s.Contains("public ") || s.Contains("private ") || s.Contains("static ")) return true;
+
+        return false;
     }
 
     /// <summary>
@@ -654,6 +693,7 @@ public sealed class SourceExtractService
         if (!TextHeuristics.HasAsciiLetter(s)) return;
         if (s.Contains("://")) return;
         if (s.Contains('{') || s.Contains('}')) return;
+        if (IsCodeNoise(s)) return;                     // 字节签名 / 分析器配置 / 半截源码
         strings.Add(s);
         funcStats[simple] = funcStats.TryGetValue(simple, out var c) ? c + 1 : 1;
     }
