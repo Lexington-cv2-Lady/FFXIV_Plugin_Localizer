@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Reflection.PortableExecutable;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace FFXIVPluginLocalizer.Services;
@@ -194,8 +195,14 @@ public sealed class SourceExtractService
         {
             var dir = Path.Combine(launcherDir ?? "", rootName, pluginName);
             if (!Directory.Exists(dir)) continue;
+            // ⚠ 按**版本号**排序取最新（2026-09-15 代码审查 M5）：原用字符串 Ordinal 排序，
+            //   而版本目录形如 1.9.0.0 与 1.10.0.0，字典序会把 "1.10" 排在 "1.9" **之前** →
+            //   取 Last 会拿到**旧版本**的 DLL（扫出过时的中文判定/文案）。
+            //   现在先按 Version 解析（失败则退化为 0.0），升序后取最后一个 = 最新。
             var dll = Directory.EnumerateFiles(dir, pluginName + ".dll", SearchOption.AllDirectories)
-                .OrderBy(x => x, StringComparer.Ordinal).LastOrDefault();
+                .OrderBy(x => ParseVersionOrZero(Path.GetFileName(Path.GetDirectoryName(x))!))
+                .ThenBy(x => x, StringComparer.Ordinal)
+                .LastOrDefault();
             if (dll == null) continue;
 
             long dllTicks = 0, dirTicks = 0;
@@ -319,6 +326,10 @@ public sealed class SourceExtractService
         catch { /* 文件坏了当 0 条 */ }
         return count;
     }
+
+    /// <summary> 把版本目录名解析成 Version；解析失败返回 0.0（排在前面，不会误当最新）。 </summary>
+    private static Version ParseVersionOrZero(string? dirName)
+        => Version.TryParse((dirName ?? "").Trim(), out var v) ? v : new Version(0, 0);
 
     /// <summary> 统计 DLL 的 #US 用户字符串堆里含中日韩字符的条数（手解 CLI 元数据，无需反射）。 </summary>
     private static int CountUserStringCjk(string dllPath)
@@ -869,10 +880,23 @@ public sealed class SourceExtractService
 
         try
         {
+            // ⚠ 必须带超时（2026-09-15 代码审查 M1）：网络挂起时 WaitForExitAsync 会**永久等待**，
+            //   「全部提取」会卡死在那个插件上（UI 还显示"进行中"）。120 秒足够大仓库 clone。
             using var p = Process.Start(psi)!;
-            var stdout = await p.StandardOutput.ReadToEndAsync();
-            var stderr = await p.StandardError.ReadToEndAsync();
-            await p.WaitForExitAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            var stdoutTask = p.StandardOutput.ReadToEndAsync(cts.Token);
+            var stderrTask = p.StandardError.ReadToEndAsync(cts.Token);
+            try
+            {
+                await p.WaitForExitAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try { p.Kill(true); } catch { /* 已退出则忽略 */ }
+                return (-1, "git 超时（120 秒未完成，已强制结束）。网络挂起或仓库过大，可重试或换代理。");
+            }
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
             return (p.ExitCode, stdout + "\n" + stderr);
         }
         catch (Exception ex)

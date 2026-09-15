@@ -144,6 +144,19 @@ public sealed class MtTranslateService
         return 12000;
     }
 
+    /// <summary>
+    /// 组装对话补全端点。⚠ 自定义 BaseUrl 可能**已经带** `/chat/completions`
+    /// （2026-09-15 代码审查 M4）：原实现无脑 `TrimEnd('/') + "/chat/completions"`，
+    /// 对完整端点会拼成 `.../chat/completions/chat/completions` → 404。
+    /// 这里先判断结尾，兼容三种填法：根地址 / 带 v1 / 已经是完整端点。
+    /// </summary>
+    private static string Endpoint(string baseUrl)
+    {
+        var b = (baseUrl ?? "").Trim().TrimEnd('/');
+        if (b.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase)) return b;
+        return b + "/chat/completions";
+    }
+
     public MtTranslateService(AppLog appLog, ReplacementService replacement, Configuration cfg)    {        _appLog = appLog;
         _replacement = replacement;
         _cfg = cfg;
@@ -533,7 +546,7 @@ public sealed class MtTranslateService
                 }
             });
 
-            using var req = new HttpRequestMessage(HttpMethod.Post, baseUrl.TrimEnd('/') + "/chat/completions");
+            using var req = new HttpRequestMessage(HttpMethod.Post, Endpoint(baseUrl));
             req.Headers.Add("Authorization", "Bearer " + GetApiKey(_cfg).Trim());
             req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
             // ⚠ 把 token 传进 SendAsync（对齐旧项目做法）：点「停止翻译」时**在飞的请求也会被立即中断**，
@@ -623,7 +636,7 @@ public sealed class MtTranslateService
                 max_tokens = 50,
                 messages = new[] { new { role = "user", content = "你好，请回复：连接成功" } }
             });
-            using var req = new HttpRequestMessage(HttpMethod.Post, baseUrl.TrimEnd('/') + "/chat/completions");
+            using var req = new HttpRequestMessage(HttpMethod.Post, Endpoint(baseUrl));
             req.Headers.Add("Authorization", "Bearer " + apiKey.Trim());
             req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
             using var resp = await _http.SendAsync(req);

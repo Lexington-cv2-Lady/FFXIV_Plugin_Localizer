@@ -72,6 +72,13 @@ public sealed class WikiGlossaryService
     /// <summary> 英文 → 中文（去重后的全量术语表）。 </summary>
     private Dictionary<string, string> _terms = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// **首字母分桶缓存**（2026-09-15 代码审查 M3 修正）：`FindRelevant` 每次调用都要遍历
+    /// **6.2 万条**术语重建分桶并逐桶排序，而机翻每批（10~200 条）就调它一次 →
+    /// **每批白付数百 ms**。分桶只依赖 `_terms`，加载后即固定，故缓存起来（带锁，允许后台读）。
+    /// </summary>
+    private volatile Dictionary<char, List<string>>? _buckets;
+
     /// <summary> 各类术语条数（文件名 → 条数），用于 UI 展示。 </summary>
     public IReadOnlyDictionary<string, int> CategoryCounts => _categoryCounts;
     private readonly Dictionary<string, int> _categoryCounts = new(StringComparer.Ordinal);
@@ -91,6 +98,7 @@ public sealed class WikiGlossaryService
     public int Load(string dir)
     {
         _terms = new Dictionary<string, string>(StringComparer.Ordinal);
+        _buckets = null;   // 词表重建 → 分桶缓存失效（M3）
         _categoryCounts.Clear();
         if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
         {
@@ -168,16 +176,23 @@ public sealed class WikiGlossaryService
         var hits = new Dictionary<string, string>(StringComparer.Ordinal);
         if (_terms.Count == 0) return new();
         // 按首字母分桶（英文术语首字母），只为缩小比较范围
-        var buckets = new Dictionary<char, List<string>>(64);
-        foreach (var en in _terms.Keys)
+        // ⚠ 走缓存（M3）：分桶只依赖 _terms，加载后不变；原实现每次调用重建 6.2 万条 + 排序，
+        //   而机翻**每批**都会调它 → 每批浪费数百毫秒。首次构建后在 Load 时失效。
+        var buckets = _buckets;
+        if (buckets == null)
         {
-            if (en.Length < 3) continue;
-            var c = char.ToUpperInvariant(en[0]);
-            if (!buckets.TryGetValue(c, out var list)) buckets[c] = list = new List<string>();
-            list.Add(en);
+            var b = new Dictionary<char, List<string>>(64);
+            foreach (var en in _terms.Keys)
+            {
+                if (en.Length < 3) continue;
+                var c = char.ToUpperInvariant(en[0]);
+                if (!b.TryGetValue(c, out var list)) b[c] = list = new List<string>();
+                list.Add(en);
+            }
+            // 长术语优先（更具体）
+            foreach (var list in b.Values) list.Sort((a, b2) => b2.Length.CompareTo(a.Length));
+            buckets = _buckets = b;   // 发布（volatile 写；竞态最坏只是重复构建一次，无副作用）
         }
-        // 长术语优先（更具体）
-        foreach (var list in buckets.Values) list.Sort((a, b) => b.Length.CompareTo(a.Length));
 
         foreach (var text in texts)
         {

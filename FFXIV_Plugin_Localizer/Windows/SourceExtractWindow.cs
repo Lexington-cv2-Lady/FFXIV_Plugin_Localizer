@@ -23,14 +23,16 @@ public sealed class SourceExtractWindow : Window
     private string _filter = "";   // 搜索过滤（内部名/显示名/仓库地址）
     private bool _listLoaded;
     private string _manualUrl = "";
-    private string _summary = "";
-    private readonly Dictionary<string, string> _lastResult = new();
+    private volatile string _summary = "";    // 后台任务也写（H2），volatile 保证 UI 线程及时看到新值
+    /// <summary> 后台任务写、UI 读（H2 修正）：普通 Dictionary 跨线程读写属未定义行为，换并发容器。 </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastResult = new();
     private readonly Dictionary<string, int> _chineseCache = new(); // 插件名 → 已装 DLL 的中文字符串条数（0=原版英文）
     private bool _testing;          // 连接测试进行中
     private bool? _testOk;          // 上次测试结果（null=未测）
     private string _testMessage = "";
     private bool _batchRunning;     // 「全部提取」进行中（批量任务自己驱动，不走 _svc.Running 判断）
-    private int _batchDone;         // 已完成的插件数
+    /// <summary> 已完成的插件数（后台任务 ++，UI 读 → 用 Interlocked，H2）。 </summary>
+    private int _batchDone;
     private int _batchTotal;        // 本轮批量总数
     /// <summary>「网络设置」区块是否展开；null = 尚未决定（首次绘制时按"网络是否已配好"自动定）。 </summary>
     private bool? _netOpen;
@@ -524,7 +526,7 @@ public sealed class SourceExtractWindow : Window
                         _lastResult[name] = "【异常】 " + ex.Message;
                         _plugin.AppLog.Error($"[源码] 全部提取：{name} 失败：{ex.Message}");
                     }
-                    _batchDone++;
+                    System.Threading.Interlocked.Increment(ref _batchDone);
                     await System.Threading.Tasks.Task.Delay(700);   // 限速，别让 GitHub 判定为滥用
                 }
                 _summary = $"全部提取完成：共处理 {_batchTotal} 个插件（详见各条目结果与日志）。";

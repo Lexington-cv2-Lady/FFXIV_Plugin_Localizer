@@ -596,8 +596,6 @@ public sealed unsafe class ImGuiHookService : IDisposable
     }
 
     /// <summary> 内存前若干字节的十六进制（诊断日志用）。 </summary>
-    private static string Hex(nint addr, int count)
-        => string.Join(" ", Enumerable.Range(0, count).Select(i => ((byte*)addr)[i].ToString("X2")));
 
     public void Dispose()
     {

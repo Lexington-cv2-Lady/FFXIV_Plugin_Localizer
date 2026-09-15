@@ -273,7 +273,10 @@ public sealed unsafe class ReplacementService
             // ② 安装器对照表
             foreach (var (en, zh) in _installerSource) AddMerged(en, zh);
             // ③ 各插件窗口表（AddMerged 内部已是"已有键跳过"，天然实现优先级）
-            foreach (var table in _windowSources.Values)
+            // ⚠ **按插件名排序遍历**（2026-09-15 审查 M2）：同一英文若出现在多个插件表里，
+            //    原实现依赖 Dictionary.Values 的遍历顺序（增删后可能变），结果不确定。
+            //    排序后规则明确：**插件名靠前者优先**，且与增量路径 ApplyOneWindowEntry 的判定完全一致。
+            foreach (var table in _windowSources.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Value))
             {
                 foreach (var (en, zh) in table) AddMerged(en, zh);
             }
@@ -305,9 +308,24 @@ public sealed unsafe class ReplacementService
     }
 
     /// <summary> 增量更新单条窗口译文（避免写入时全量重建）。调用方须持有 _lock。 </summary>
-    private void ApplyOneWindowEntry(string en, string zh)
+    /// <summary>
+    /// 增量写入单条窗口译文。
+    /// ⚠ 语义必须与全量重建的 <see cref="AddMerged"/> 一致（2026-09-15 代码审查 M2）：
+    ///   全量走 "先写入者优先"（`_table.ContainsKey` 命中即跳过，由 RebuildMerged 的
+    ///   wiki → 安装器表 → 窗口表 顺序决定优先级）；此处原为 "后写入覆盖" → 同一英文跨来源冲突时，
+    ///   **增量与全量结果可能不同**（例如预翻译后再机翻，路径不同结果不同）。
+    ///   现在统一为：**高优先级来源已占该键则不覆盖**；窗口表自己的条目才更新（那是"同一插件改译文"）。
+    /// </summary>
+    private void ApplyOneWindowEntry(string plugin, string en, string zh)
     {
         if (_wikiTerms?.ContainsKey(en) == true || _installerSource.ContainsKey(en)) return; // 高优先级来源已占该键
+        // ⚠ 跨插件同键：与 RebuildMerged 用同一规则（**插件名靠前者优先**），否则增量与全量结果不一致（M2）。
+        //   只比"名字排在我前面"的表——它们在全量重建时会先写入 _table。
+        foreach (var (other, t) in _windowSources)
+        {
+            if (other == plugin) continue;
+            if (string.CompareOrdinal(other, plugin) < 0 && t.ContainsKey(en)) return;
+        }
         if (_ptrs.Remove(en, out var old)) _graveyard.Add(old);   // 旧指针作废（延迟释放）
         _table[en] = Encoding.UTF8.GetBytes(zh);
         _hashes.Add(FnvUtf8(en));
@@ -353,20 +371,6 @@ public sealed unsafe class ReplacementService
     {
         if (!Enabled || _table.Count == 0 || n < 2 || n > 1024) return 0;
 
-        // ⚠ 单词黑名单**最优先**：命中即永不替换（保持英文）。
-        //    放在哈希预筛之前有性能考量，但黑名单通常只有几十条、且这一步只对"表里可能命中"的串做，
-        //    实测开销可忽略；换来的是"拉黑的词绝不会被任何来源改掉"的硬保证。
-        var bl = _isBlacklisted;
-        if (bl != null)
-        {
-            try
-            {
-                var q0 = Encoding.UTF8.GetString(p, n);
-                if (bl(q0)) return 0;
-            }
-            catch { /* 判定失败就按未拉黑处理 */ }
-        }
-
         // 热路径零分配预筛：算整串哈希，并**在字节层面**找 ## 分隔符（不构造字符串）
         ulong h;
         int hashIdx = -1;
@@ -386,10 +390,22 @@ public sealed unsafe class ReplacementService
 
         lock (_lock)
         {
+            // ⚠ 黑名单检查放在**哈希命中之后**（2026-09-15 代码审查 H1 修正）：
+            //   原实现放在预筛之前 → 渲染线程**每帧每条文字**都 `Encoding.UTF8.GetString`
+            //   分配一次字符串，GC 压力随绘制文字量线性涨（且我的注释与代码相反，声称"只对可能命中的做"）。
+            //   移到这里后，只有"表里真的有这个词"才查黑名单——**语义不变**（黑名单词既然拉黑，
+            //   本来就不该有译文；若它因历史原因在表里，在此拦下即可），**分配降为命中才发生（≈0 次/帧）**。
+            var bl = _isBlacklisted;
+
             // ① 整串匹配
             if (_hashes.Contains(h))
             {
                 var s = Encoding.UTF8.GetString(p, n);
+                if (bl != null)
+                {
+                    try { if (bl(s)) return 0; }
+                    catch { /* 判定失败就按未拉黑处理 */ }
+                }
                 var ptr = GetOrCreatePtr(s);
                 if (ptr != 0) return ptr;
             }
@@ -407,6 +423,12 @@ public sealed unsafe class ReplacementService
                 // 命中才返回；未命中不 return（继续走下面的首尾空白容错）
                 if (_table.TryGetValue(shown, out var zhBytes))
                 {
+                    // ② 路径同样要过黑名单（H1 同理：到这里才 GetString，不增加未命中时的分配）
+                    if (bl != null)
+                    {
+                        try { if (bl(shown)) return 0; }
+                        catch { /* 判定失败按未拉黑 */ }
+                    }
                     var full = Encoding.UTF8.GetString(p, n);
                     if (_idPtrs.TryGetValue(full, out var cached)) return cached;
                     // 显示部分换成中文，其余（##ID 及其后）原样保留
@@ -874,7 +896,7 @@ public sealed unsafe class ReplacementService
                     var key = en.Trim();
                     var val = (zh ?? "").Trim();
                     if (key.Length >= 2 && val.Length > 0 && table.ContainsKey(key) && table[key] == val)
-                        ApplyOneWindowEntry(key, val);
+                        ApplyOneWindowEntry(plugin, key, val);
                 }
             }
         }
@@ -914,13 +936,13 @@ public sealed unsafe class ReplacementService
                 {
                     if (cur == val) continue;          // 值相同，不算更新
                     table[key] = val;
-                    ApplyOneWindowEntry(key, val);
+                    ApplyOneWindowEntry(plugin, key, val);
                     updated++;
                 }
                 else
                 {
                     table[key] = val;
-                    ApplyOneWindowEntry(key, val);
+                    ApplyOneWindowEntry(plugin, key, val);
                     added++;
                 }
             }
@@ -945,7 +967,7 @@ public sealed unsafe class ReplacementService
                 table[en] = zh;
             WriteWindowFile(plugin, table);
             if (zh.Length == 0) RemoveOneWindowEntry(en);
-            else ApplyOneWindowEntry(en, zh);
+            else ApplyOneWindowEntry(plugin, en, zh);
         }
     }
 
@@ -1339,7 +1361,11 @@ public sealed unsafe class ReplacementService
                 }
             }
             if (added > 0) { RebuildMerged(); Save(); }
-            return added;
+            // ⚠ 一条都没解析出来 → 视为**不是 FDCN 格式**（返回 -1），让调用方继续尝试通用格式
+            //   （2026-09-15 代码审查 L3）：原来返回 0 会被 `fdAdded >= 0` 判成"FDCN 格式、成功导入 0 条"，
+            //   于是**空对象 `{}` 或结构不符的文件会静默吞掉**，不再走通用格式解析。
+            //   注意区分：真 FDCN 表若内容为空也返回 -1，但那本来就没什么可导入的，代价可接受。
+            return added > 0 ? added : -1;
         }
         catch
         {
