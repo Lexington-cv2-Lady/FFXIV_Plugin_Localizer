@@ -41,7 +41,7 @@ public sealed class WindowReplaceWindow : Window
     /// <summary> 目录指纹（文件名+修改时间+大小），用于检测外部增删改，自动刷新。</summary>
     private string _dirStamp = "";
     private int _stampTick;                     // 目录指纹检查的帧计数（降频用）
-    private readonly Dictionary<string, DateTime> _restoreArmedUntil = new(); // 还原英文的二次确认（键=restore::插件名）
+    private readonly Dictionary<string, DateTime> _restoreArmedUntil = new(); // 破坏性操作（清空译文）的二次确认（键=restore::插件名）
 
     public override void Draw()
     {
@@ -143,7 +143,7 @@ public sealed class WindowReplaceWindow : Window
             ImGui.SetTooltip("把词典里的译文覆盖到**已经翻过的**条目上——改词典后一键生效，不必重新机翻。\n" +
                              "补的是这个死角：某条被 AI 翻错后，光改词典修不好它（预翻译只补缺口）。\n" +
                              "⚠ **会覆盖已翻条目，包括你手动改过的**（无法区分二者——它们在同一张表里）。\n" +
-                             "词典里没有的条目一律不动；想只重翻某插件可先「还原英文」它。");
+                             "词典里没有的条目一律不动；想只重翻某插件，可先对该插件点「清空本插件译文」。");
 
         ImGui.Spacing();
 
@@ -166,7 +166,7 @@ public sealed class WindowReplaceWindow : Window
             if (ImGui.Button("打开还原备份"))
                 OpenDir(Path.Combine(Plugin.PluginInterface.GetPluginConfigDirectory(), ReplacementService.WindowBackupDirName));
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("打开「还原英文」的自动备份目录（每次还原前都会先存一份，按时间戳分文件夹，最多保留最近 10 份）。\n" +
+                ImGui.SetTooltip("打开「清空译文」的自动备份目录（每次还原前都会先存一份，按时间戳分文件夹，最多保留最近 10 份）。\n" +
                                  "误点还原后，把对应时间戳文件夹里的 json 复制回 窗口翻译\\ 即可找回译文。\n" +
                                  "另外删除本身也走**系统回收站**，双保险。");
 
@@ -233,11 +233,16 @@ public sealed class WindowReplaceWindow : Window
 
         ImGui.Spacing();
 
-        // ── ④ 危险操作（单独一行，红色，3 秒二次确认）──
+        // ── ④ 危险操作：**按"动作"命名**（清空/删除），不按"结果"命名（还原英文）──
+        // ⚠ 命名教训（2026-09-15，用户实测撞坑）：原来叫「一键还原英文」，与上方的
+        //   「一键翻译」只差两个字、还共用「一键」前缀，结果被误点 → 删掉整表译文。
+        //   破坏性按钮要**直接说明它做什么**（清空/删除），而不是描述它的副作用（变回英文）。
+        //   同时去掉「一键」前缀，避免与「一键翻译」在视觉上成对。
+        Ui.Hint("危险操作（会删除译文文件）");
         {
             var armedAll = _restoreArmedUntil.TryGetValue("restore::__ALL__", out var untilAll) && DateTime.Now < untilAll;
             if (armedAll) Ui.PushDanger();
-            if (ImGui.Button(armedAll ? "确认全部还原英文" : "一键还原英文"))
+            if (ImGui.Button(armedAll ? "确认清空全部译文" : "清空全部译文（变回英文）"))
             {
                 if (armedAll)
                 {
@@ -247,16 +252,16 @@ public sealed class WindowReplaceWindow : Window
                 else
                 {
                     _restoreArmedUntil["restore::__ALL__"] = DateTime.Now.AddSeconds(3);
-                    _summary = "再次点击「确认全部还原英文」将删除所有插件的译文（3 秒内有效）。";
+                    _summary = "再次点击「确认清空全部译文」将删除所有插件的译文（3 秒内有效）。";
                 }
             }
             if (armedAll) Ui.PopDanger();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("把**所有插件**的界面文字还原为英文：删除每个插件的译文文件。\n" +
-                             "⚠ 双重保护：删除走**系统回收站**，且还原前会先备份到 窗口翻译_还原备份\\<时间戳>\\。\n" +
-                             "候选清单保留，之后仍可「一键翻译」重来（但要重新花 AI 额度）。\n" +
-                             "若只是想临时看英文、不想丢译文，请用主窗口的「还原英文」（只关替换、不动文件）。");
+            ImGui.SetTooltip("删除**所有插件**的译文文件，界面即变回英文（=把这个工具翻的东西清掉）。\n" +
+                             "⚠ 删除走**系统回收站**，且清空前会先备份到 窗口翻译_还原备份\\<时间戳>\\，两种方式都能找回。\n" +
+                             "候选清单保留，之后可重新翻译（但要重新花 AI 额度）。\n" +
+                             "⚠ 只想临时看英文、不丢译文 → 请用**主窗口**的「还原英文」（只关替换开关、不动文件）。");
 
         if (_mt.Running)
         {
@@ -501,7 +506,7 @@ public sealed class WindowReplaceWindow : Window
     }
 
     /// <summary>
-    /// **一键还原英文（全部插件）**：删掉每个插件的译文文件，界面立即回到英文。
+    /// **清空全部译文**（原「一键还原英文」）：删掉每个插件的译文文件，界面立即回到英文。
     /// 候选清单保留（题目仍在），之后还能「一键翻译」重来。
     /// 与主窗口「还原英文」的区别：那个只关替换、**不动文件**（可无损恢复）；这个**真删译文**。
     /// </summary>
@@ -649,32 +654,33 @@ public sealed class WindowReplaceWindow : Window
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("在游戏里打开该插件自己的配置界面（等同插件安装器里的 ⚙ 按钮），方便即时查看翻译效果。\n插件没有配置界面时改开其主界面；两者都没有或未加载则提示。");
 
-            // 单插件还原英文：清空该插件译文（候选保留），二次确认防误点
-            Ui.SameLineIfFits(Ui.ButtonWidth("确认还原英文"));
+            // 单插件清空译文（候选保留），二次确认防误点
+            // ⚠ 命名同全局那个：**说动作（清空）而非结果（还原英文）**，避免与「翻译本插件缺失」看混。
+            Ui.SameLineIfFits(Ui.ButtonWidth("确认清空本插件译文"));
             var restoreKey = "restore::" + plugin;
             var armed = _restoreArmedUntil.TryGetValue(restoreKey, out var until) && DateTime.Now < until;
             if (armed) Ui.PushDanger();
-            if (ImGui.Button(armed ? "确认还原英文" : "还原英文"))
+            if (ImGui.Button(armed ? "确认清空本插件译文" : "清空本插件译文"))
             {
                 if (armed)
                 {
-                    _replacement.BackupWindowTables();   // 还原前先备份（误点可捞回）
+                    _replacement.BackupWindowTables();   // 清空前先备份（误点可捞回）
                     var n = _replacement.ClearPluginTranslations(plugin);
                     _restoreArmedUntil.Remove(restoreKey);
                     Invalidate(plugin);
-                    _summary = $"已把 {plugin} 还原为英文（清除 {n} 条译文；候选保留，可重新翻译）。";
+                    _summary = $"已清空 {plugin} 的 {n} 条译文（界面变回英文；候选保留，可重新翻译）。";
                 }
                 else
                 {
                     _restoreArmedUntil[restoreKey] = DateTime.Now.AddSeconds(3);
-                    _summary = $"再次点击「确认还原英文」将清除 {plugin} 的全部译文（3 秒内有效）。";
+                    _summary = $"再次点击「确认清空本插件译文」将删除 {plugin} 的全部译文（3 秒内有效）。";
                 }
             }
             if (armed) Ui.PopDanger();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("把这个插件的界面文字还原为英文：删除它的译文文件。\n" +
-                                 "⚠ 双重保护：删除走**系统回收站**，且还原前会先备份到 窗口翻译_还原备份\\。\n" +
-                                 "候选清单保留，之后仍可重新翻译；二次确认防误点。");
+                ImGui.SetTooltip("删除这个插件的译文文件，它的界面即变回英文。\n" +
+                                 "⚠ 删除走**系统回收站**，且清空前会先备份到 窗口翻译_还原备份\\，两种方式都能找回。\n" +
+                                 "候选清单保留，之后可重新翻译；二次确认防误点。");
         }
         if (_summary.Length > 0)
         {
