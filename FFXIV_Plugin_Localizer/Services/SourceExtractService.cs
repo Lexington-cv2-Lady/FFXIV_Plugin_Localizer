@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Reflection.PortableExecutable;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -166,9 +167,108 @@ public sealed class SourceExtractService
                 .OrderBy(x => x, StringComparer.Ordinal).LastOrDefault();
             if (dll == null) continue;
             var n = CountUserStringCjk(dll);
+
+            // ── 语言资源文件兜底（2026-09-15 补）──
+            // ⚠ 有些插件把界面文字**不放在 DLL 里**，而是放在独立的语言文件里按语言加载，
+            //   此时 DLL 字符串堆完全是英文 → 只数 DLL 会误判成"未汉化"。
+            //   实测 DailyRoutines：DLL 里 0 条中文，而 `Assets\Langs\ChineseSimplified.json`
+            //   有 2557 条中文（共 2558 条），插件在中文环境下运行时界面本就是中文的。
+            //   这类插件不需要（也不该）再翻——翻了反而与插件自带的翻译打架。
+            n += CountLangsFileCjk(dir);
             return (n >= BilingualZhThreshold, n, dll);
         }
         return (false, 0, "");
+    }
+
+    /// <summary>
+    /// 统计「语言资源文件」里的中文条数：扫描插件目录下的语言目录
+    /// （常见名 `Langs`/`Languages`/`Localization`/`i18n`/`locales`/`Translations`）中的
+    /// 简体中文文件（`ChineseSimplified`/`zh-CN`/`zh_Hans`/`chs`/`简体` 等），
+    /// 递归数出**所有 JSON 字符串值**里含中日韩字符的条数。
+    /// 找不到语言目录或中文文件时返回 0（不影响原有"数 DLL"的判定）。
+    /// </summary>
+    private static int CountLangsFileCjk(string pluginRoot)
+    {
+        try
+        {
+            string[] langDirNames = { "Langs", "Languages", "Localization", "Localisation", "i18n", "locales", "Translations" };
+            foreach (var dir in Directory.EnumerateDirectories(pluginRoot, "*", SearchOption.AllDirectories))
+            {
+                var name = Path.GetFileName(dir);
+                if (!langDirNames.Any(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                foreach (var file in Directory.EnumerateFiles(dir, "*.json", SearchOption.TopDirectoryOnly))
+                {
+                    // 判定"这是简体中文文件"：按文件名标识，或（名字无语言标识时）按**内容**——
+                    // 内容里中文占比高就算。⚠ 要排除繁体：`ChineseTraditional` 也含 "chinese"。
+                    if (!IsSimplifiedChineseFile(file)) continue;
+                    return CountJsonCjkValues(file);
+                }
+            }
+        }
+        catch { /* 目录结构异常就放弃这条兜底，不影响主判定 */ }
+        return 0;
+    }
+
+    /// <summary>
+    /// 该文件是否是**简体中文**语言文件：
+    ///   ① 文件名明确标识简中（`ChineseSimplified`/`zh-Hans`/`zh_CN`/`chs`…）→ 是；
+    ///   ② 文件名明确标识非简中（`English`/`Japanese`/`Korean`/`French`/`Traditional`/`zh-Hant`…）→ 否；
+    ///   ③ 名字没有语言标识（有些插件用 `data.json` 或按语言分目录）→ **按内容判**：
+    ///      中文占比 ≥ 30%（且至少 20 条）即认为是中文本地化文件。
+    /// ⚠ 必须先判"排除"再判"按内容"：否则 `English.json` 里若偶然夹了少量中文，
+    ///   会被误当成中文语言文件，导致整个插件被错误跳过。
+    /// </summary>
+    private static bool IsSimplifiedChineseFile(string path)
+    {
+        var fn = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
+        if (fn.Contains("traditional") || fn.Contains("hant") || fn.Contains("cht") ||
+            fn.Contains("english") || fn.Contains("japanese") || fn.Contains("korean") || fn.Contains("french") ||
+            fn.Contains("german") || fn.Contains("spanish") || fn.Contains("russian") || fn.Contains("thai"))
+            return false;
+        if (fn.Contains("chinesesimplified") || fn.Contains("simplified") || fn.Contains("hans") ||
+            fn.Contains("zh-cn") || fn.Contains("zh_cn") || fn.Contains("zhcn") || fn.Contains("chs"))
+            return true;
+        // 名字无语言标识 → 按内容判：中文条目数达到阈值即认为是中文本地化文件
+        try
+        {
+            return CountJsonCjkValues(path) >= 20;
+        }
+        catch { return false; }
+    }
+
+    /// <summary> 统计一段 JSON 里（任意嵌套）含中日韩字符的**字符串值或键**的条数。 </summary>
+    private static int CountJsonCjkValues(string path)
+    {
+        var count = 0;
+        try
+        {
+            var raw = File.ReadAllText(path);
+            if (raw.Length == 0) return 0;
+            using var doc = JsonDocument.Parse(raw);
+            void Walk(JsonElement el)
+            {
+                switch (el.ValueKind)
+                {
+                    case JsonValueKind.Object:
+                        foreach (var p in el.EnumerateObject())
+                        {
+                            if (TextHeuristics.HasCjk(p.Name)) count++;
+                            Walk(p.Value);
+                        }
+                        break;
+                    case JsonValueKind.Array:
+                        foreach (var item in el.EnumerateArray()) Walk(item);
+                        break;
+                    case JsonValueKind.String:
+                        if (TextHeuristics.HasCjk(el.GetString() ?? "")) count++;
+                        break;
+                }
+            }
+            Walk(doc.RootElement);
+        }
+        catch { /* 文件坏了当 0 条 */ }
+        return count;
     }
 
     /// <summary> 统计 DLL 的 #US 用户字符串堆里含中日韩字符的条数（手解 CLI 元数据，无需反射）。 </summary>
