@@ -226,6 +226,14 @@ public sealed class AiSettingsWindow : Window
         else
             Ui.Hint($"本项目词典为空（{cfg.DictDir}）。把「我的翻译.json」放进去再点「重载词典」即可用于预翻译。");
 
+        // 单词黑名单（命中词永远保持英文）——搬自旧项目同名字段
+        if (_plugin.OldDict.BlacklistCount > 0)
+            Ui.ColoredWrapped(new Vector4(0.7f, 0.85f, 1f, 1f),
+                $"单词黑名单 {_plugin.OldDict.BlacklistCount} 条（这些词永远保持英文，不翻译也不替换）");
+        else
+            Ui.Hint($"没有单词黑名单（{OldDictionaryService.BlacklistFileName}）。想让某些词永远保持英文（如 URL、DPS），\n" +
+                    "在词典目录里建该文件、一行一个词，再点「重载词典」。");
+
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();

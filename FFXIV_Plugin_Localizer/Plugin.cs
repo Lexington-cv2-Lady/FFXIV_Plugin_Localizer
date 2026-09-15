@@ -251,7 +251,10 @@ public sealed class Plugin : IDalamudPlugin
             Directory.CreateDirectory(Configuration.DictDir);
             CreateDefaultDictIfMissing(Configuration.DictDir);   // 首次自动生成模板文件
             var n = OldDict.Load(Configuration.DictDir);
-            Log.Information($"[预翻译] 本项目词典目录 {Configuration.DictDir}，已载入 {n} 条");
+            Replacement.SetBlacklist(OldDict.IsBlacklisted);   // 单词黑名单交给替换层（黑名单优先级最高）
+            Mt.SetBlacklist(OldDict.BlacklistWords);           // 机翻侧也拉黑：这类词不送翻（省额度）
+            Log.Information($"[预翻译] 本项目词典目录 {Configuration.DictDir}，已载入 {n} 条，" +
+                            $"单词黑名单 {OldDict.BlacklistCount} 条");
         }
         catch (Exception ex)
         {
@@ -299,7 +302,23 @@ public sealed class Plugin : IDalamudPlugin
             }
             """;
             File.WriteAllText(Path.Combine(dir, "我的翻译.json"), template, new System.Text.UTF8Encoding(true));
-            Log.Information($"[预翻译] 词典目录为空，已生成模板：{Path.Combine(dir, "我的翻译.json")}");
+
+            // 单词黑名单模板（命中词保持英文）——搬自旧项目同名字段
+            var blTemplate = """
+            # 单词黑名单：这里列的英文**永远保持原样**，不翻译、也不参与替换。
+            # 一行一个词，支持逗号分隔；以 # 开头的是注释。
+            # 用途：① 插件名/专有缩写（乱译更糟）；② 被插件当标识符用的词（改了会影响显示或逻辑）。
+            # 单独成行的词 = 整串精确匹配（大小写不敏感），不会误伤含该词的整句。
+            # 改完在「AI 设置 → 本项目词典」点「重载词典」生效。
+            URL
+            DPS
+            GCD
+            """;
+            var blPath = Path.Combine(dir, OldDictionaryService.BlacklistFileName);
+            if (!File.Exists(blPath))
+                File.WriteAllText(blPath, blTemplate, new System.Text.UTF8Encoding(true));
+
+            Log.Information($"[预翻译] 词典目录为空，已生成模板：我的翻译.json / 单词黑名单.json");
         }
         catch (Exception ex)
         {
@@ -311,7 +330,10 @@ public sealed class Plugin : IDalamudPlugin
     public int ReloadOldDict()
     {
         EnsureDictDir();
-        return OldDict.Load(Configuration.DictDir);
+        var n = OldDict.Load(Configuration.DictDir);
+        Replacement.SetBlacklist(OldDict.IsBlacklisted);   // 黑名单同步刷新
+        Mt.SetBlacklist(OldDict.BlacklistWords);
+        return n;
     }
 
     /// <summary> 重新加载 wiki 术语表并让替换层生效（UI「加载」按钮调用；含重新探测旧项目目录）。 </summary>

@@ -67,8 +67,42 @@ public sealed class MtTranslateService
         _appLog.Info("[机翻] 用户请求停止翻译");
     }
 
-    public MtTranslateService(AppLog appLog, ReplacementService replacement, Configuration cfg)    {
-        _appLog = appLog;
+    /// <summary>
+    /// 单请求输出上限 max_tokens——**按平台给安全值**（搬自旧项目 `AiTranslateService.MaxTokensForModel`）。
+    ///
+    /// ⚠ 为什么要按平台分：不传 max_tokens 时各家用自家默认值，批量大时**响应会被中途截断**，
+    ///   JSON 不完整 → 整批解析失败（用户看到的现象是"总有一批翻不出来"）。而各平台上限差异巨大
+    ///   （DeepSeek 可到 38 万，其余多为 1.6 万左右），一刀切要么被拒、要么被截。
+    ///   判断必须用**解析后的生效端点/模型**（选了预设服务商时 AiBaseUrl/AiModel 覆盖字段是空的）。
+    /// </summary>
+    public static long MaxTokensForModel(Configuration cfg)
+    {
+        var (url, model) = ResolveEndpoint(cfg);
+        var m = (model ?? "").ToLowerInvariant();
+        var b = (url ?? "").ToLowerInvariant();
+        if (b.Contains("deepseek") || m.Contains("deepseek")) return 384000;
+        if (b.Contains("bigmodel") || b.Contains("moonshot")) return 64000;   // 智谱/Kimi：思考链吃 token，放宽
+        if (b.Contains("dashscope") || b.Contains("aliyuncs")) return 32000;
+        return 16384;
+    }
+
+    /// <summary>
+    /// 单批**输入字符**上限——与"条数上限"**双重生效**（搬自旧项目 `MaxBatchChars`）。
+    ///
+    /// ⚠ 只按条数分批是不够的：200 条长句子可能几万字符，照样超上下文被拒。
+    ///   故分批时同时看"条数"和"累计字符数"，任一超限就拆批。
+    /// </summary>
+    public static int MaxBatchChars(Configuration cfg)
+    {
+        var (url, model) = ResolveEndpoint(cfg);
+        var m = (model ?? "").ToLowerInvariant();
+        var b = (url ?? "").ToLowerInvariant();
+        if (b.Contains("deepseek") || m.Contains("deepseek")) return 30000;
+        if (b.Contains("bigmodel") || b.Contains("moonshot") || b.Contains("dashscope") || b.Contains("aliyuncs")) return 20000;
+        return 12000;
+    }
+
+    public MtTranslateService(AppLog appLog, ReplacementService replacement, Configuration cfg)    {        _appLog = appLog;
         _replacement = replacement;
         _cfg = cfg;
     }
@@ -226,6 +260,13 @@ public sealed class MtTranslateService
         });
     }
 
+    /// <summary> 单词黑名单（命中词不送翻、也不替换）。由 Plugin 在词典加载后注入。 </summary>
+    private HashSet<string>? _blacklist;
+
+    /// <summary> 注入单词黑名单集合（大小写不敏感）。 </summary>
+    public void SetBlacklist(IEnumerable<string>? words)
+        => _blacklist = words == null ? null : new HashSet<string>(words, StringComparer.OrdinalIgnoreCase);
+
     /// <summary> 是否值得翻译：含 ASCII 字母、不含中日韩字符（已是中文的不送翻）、且不是纯键位名。 </summary>
     private static bool IsTranslatable(string s) => TextHeuristics.IsTranslatable(s);
 
@@ -255,6 +296,9 @@ public sealed class MtTranslateService
         }
         // 只送**英文**文案：某些插件字符串堆含中文（或已部分汉化），把它们送翻只会得到回声/解析失败。
         texts = texts.Where(IsTranslatable).ToList();
+        // 单词黑名单不送翻：这类词要求"永远保持英文"，送翻既浪费额度、回来还会被替换层拦掉。
+        if (_blacklist is { Count: > 0 })
+            texts = texts.Where(t => !_blacklist.Contains(t)).ToList();
         if (texts.Count == 0)
         {
             Status = "没有需要翻译的英文文案（缺口均为非英文，已跳过）";
@@ -262,6 +306,7 @@ public sealed class MtTranslateService
             return;
         }
         var batchSize = Math.Clamp(_cfg.AiBatchSize, 1, 200);
+        var maxBatchChars = MaxBatchChars(_cfg);   // ⚠ 与条数**双重**限制：只看条数会被超长批次打爆
         var translated = new Dictionary<string, string>(StringComparer.Ordinal);
         var failed = 0;
         var cancelled = false;
@@ -269,9 +314,18 @@ public sealed class MtTranslateService
         while (queue.Count > 0)
         {
             if (token.IsCancellationRequested) { cancelled = true; break; }
-            var batch = queue.Take(batchSize).ToDictionary(t => t, _ => "", StringComparer.Ordinal);
-            var done = Math.Min(batch.Count, queue.Count);
-            Status = $"翻译中 {done}/{queue.Count}…";
+            // 按「条数」与「累计字符数」取本批（任一超限即截断）
+            var take = 0;
+            var chars = 0;
+            while (take < queue.Count && take < batchSize)
+            {
+                var len = queue[take].Length;
+                if (take > 0 && chars + len > maxBatchChars) break;   // 至少留一条，避免死循环
+                chars += len;
+                take++;
+            }
+            var batch = queue.Take(take).ToDictionary(t => t, _ => "", StringComparer.Ordinal);
+            Status = $"翻译中 {take}/{queue.Count} 条（本批 {chars} 字符）…";
             try
             {
                 foreach (var (en, zh) in await TranslateBatch(batch, token))
@@ -357,6 +411,10 @@ public sealed class MtTranslateService
         {
             model,
             temperature = Math.Clamp(_cfg.AiTemperature, 0f, 2f),
+            // ⚠ **必须显式给 max_tokens**（搬自旧项目）：不传就用平台默认值，批量稍大时
+            //    返回会被**中途截断** → JSON 不完整 → 整批解析失败（表现为"总有一批翻不出来"）。
+            //    各平台上限差异很大，按平台给安全值。
+            max_tokens = MaxTokensForModel(_cfg),
             messages = new[]
             {
                 new { role = "system", content = system },

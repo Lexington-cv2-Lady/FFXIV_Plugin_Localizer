@@ -32,6 +32,26 @@ public sealed class OldDictionaryService
     public IReadOnlyDictionary<string, int> SourceCounts => _sourceCounts;
     private readonly Dictionary<string, int> _sourceCounts = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// **单词黑名单**（`词典目录\单词黑名单.json`）：命中词**一律保持英文**，不参与翻译。
+    ///
+    /// 搬自旧项目 `DictionaryService` 的"单词黑名单 > 个性翻译 > 我的翻译 > wiki"优先级链首层。
+    /// 用途（2026-09-15 用户实际需要）：
+    ///   · 插件名/专有缩写（URL、DPS、GCD、Craftimizer…）机翻会乱译或译得别扭，拉黑即保持原文；
+    ///   · 某些单词被插件**当标识符用**（改了会影响逻辑/显示），需要"永远不要动它"的硬保证。
+    /// ⚠ 与「译文 == 原文」的区别：那是"这一条**这次**不用翻"，这是"这个名字**永远**不要翻"，
+    ///   且**优先级最高**——即使词典/机翻给出了译文，也会被黑名单拦下。
+    /// </summary>
+    private readonly HashSet<string> _blacklist = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary> 黑名单条数（供界面显示）。 </summary>
+    public int BlacklistCount => _blacklist.Count;
+
+    /// <summary> 该词是否在黑名单里（应保持英文）。 </summary>
+    public bool IsBlacklisted(string word) => _blacklist.Contains((word ?? "").Trim());
+
+    /// <summary> 黑名单全部词条（供机翻侧过滤：拉黑的词不送翻）。 </summary>
+    public IReadOnlyCollection<string> BlacklistWords => _blacklist;
+
     public int Count => _entries.Count;
     public bool Loaded => _entries.Count > 0;
 
@@ -47,7 +67,11 @@ public sealed class OldDictionaryService
     {
         _entries.Clear();
         _sourceCounts.Clear();
+        _blacklist.Clear();
         if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir)) return 0;
+
+        // 0) 单词黑名单**先加载**：后续所有词表都要用它过滤（防止黑名单词被译成中文）
+        _blacklist.UnionWith(LoadWordList(Path.Combine(dir, BlacklistFileName)));
 
         foreach (var file in KnownFiles)
         {
@@ -63,8 +87,40 @@ public sealed class OldDictionaryService
                 _appLog.Warn($"[预翻译] 读取 {file} 失败：{ex.Message}");
             }
         }
-        _appLog.Info($"[预翻译] 已加载旧项目词典：{_entries.Count} 条（{_sourceCounts.Count} 个文件）");
+        _appLog.Info($"[预翻译] 已加载本项目词典：{_entries.Count} 条（{_sourceCounts.Count} 个文件），" +
+                     $"单词黑名单 {_blacklist.Count} 条");
         return _entries.Count;
+    }
+
+    /// <summary>
+    /// 读取**词单**文件（每行一个词，支持 `#` 注释、逗号分隔、BOM）。
+    /// 格式与旧项目 `TextListFile` 一致，便于用户直接从旧项目拷贝该文件过来用。
+    /// </summary>
+    private static List<string> LoadWordList(string path)
+    {
+        var words = new List<string>();
+        if (!File.Exists(path)) return words;
+        try
+        {
+            var text = File.ReadAllText(path, Encoding.UTF8);
+            if (text.Length >= 1 && text[0] == '\uFEFF') text = text[1..];
+            foreach (var rawLine in text.Split('\n'))
+            {
+                var line = rawLine.TrimEnd('\r');
+                var trimmed = line.TrimStart(' ', '\t');
+                if (trimmed.Length == 0 || trimmed[0] == '#') continue;
+                foreach (var rawToken in line.Split(','))
+                {
+                    var token = rawToken;
+                    var hash = token.IndexOf('#');
+                    if (hash >= 0) token = token[..hash];
+                    token = token.Trim();
+                    if (token.Length > 0) words.Add(token);
+                }
+            }
+        }
+        catch { /* 读不动就当空表 */ }
+        return words;
     }
 
     private int LoadFile(string path)
@@ -139,6 +195,7 @@ public sealed class OldDictionaryService
         var v = (zh ?? "").Trim();
         if (k.Length < 2 || v.Length == 0 || k == v) return false;
         if (TextHeuristics.HasCjk(k)) return false;      // 原文不该含中文（旧数据偶有脏值）
+        if (IsBlacklisted(k)) return false;               // ⚠ 黑名单词一律不进词表（永远保持英文）
         if (_entries.ContainsKey(k)) return false;        // 先到先得
         _entries[k] = v;
         return true;
@@ -232,6 +289,9 @@ public sealed class OldDictionaryService
 
     /// <summary> 词典主文件名（本项目的通用词源）。 </summary>
     public const string FileName = "我的翻译.json";
+
+    /// <summary> 单词黑名单文件名（命中词保持英文）。 </summary>
+    public const string BlacklistFileName = "单词黑名单.json";
 
     /// <summary> 查词（供预翻译）。 </summary>
     public bool TryGet(string en, out string zh) => _entries.TryGetValue(en, out zh!);

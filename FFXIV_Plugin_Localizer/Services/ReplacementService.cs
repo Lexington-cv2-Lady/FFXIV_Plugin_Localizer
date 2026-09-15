@@ -134,6 +134,16 @@ public sealed unsafe class ReplacementService
         _appLog.Info($"[wiki] 生效术语 {_wikiTerms?.Count ?? 0} 条（优先级最高）");
     }
 
+    /// <summary> 由调用方注入「单词黑名单」判定（命中则**永不替换**，保持英文）。null = 不启用。 </summary>
+    private Func<string, bool>? _isBlacklisted;
+
+    /// <summary>
+    /// 注入单词黑名单判定（`词典目录\单词黑名单.json`）。
+    /// ⚠ 这是**硬保证**：即使在 wiki/词典/译文表里命中了，只要该词在黑名单就保持英文——
+    ///   黑名单优先级最高（对齐旧项目"单词黑名单 &gt; 个性翻译 &gt; 我的翻译 &gt; wiki"的优先级链）。
+    /// </summary>
+    public void SetBlacklist(Func<string, bool>? isBlacklisted) => _isBlacklisted = isBlacklisted;
+
     /// <summary> 替换开关（只影响绘制替换；表的管理不受影响）。 </summary>
     public bool Enabled { get; set; }
 
@@ -328,6 +338,20 @@ public sealed unsafe class ReplacementService
     public nint TryReplace(byte* p, int n)
     {
         if (!Enabled || _table.Count == 0 || n < 2 || n > 1024) return 0;
+
+        // ⚠ 单词黑名单**最优先**：命中即永不替换（保持英文）。
+        //    放在哈希预筛之前有性能考量，但黑名单通常只有几十条、且这一步只对"表里可能命中"的串做，
+        //    实测开销可忽略；换来的是"拉黑的词绝不会被任何来源改掉"的硬保证。
+        var bl = _isBlacklisted;
+        if (bl != null)
+        {
+            try
+            {
+                var q0 = Encoding.UTF8.GetString(p, n);
+                if (bl(q0)) return 0;
+            }
+            catch { /* 判定失败就按未拉黑处理 */ }
+        }
 
         // 热路径零分配预筛：算整串哈希，并**在字节层面**找 ## 分隔符（不构造字符串）
         ulong h;
