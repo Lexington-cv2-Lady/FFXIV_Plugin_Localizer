@@ -34,6 +34,10 @@ public sealed class SourceExtractWindow : Window
     private int _batchTotal;        // 本轮批量总数
     /// <summary>「网络设置」区块是否展开；null = 尚未决定（首次绘制时按"网络是否已配好"自动定）。 </summary>
     private bool? _netOpen;
+    /// <summary> 上次绘制时间（用于判断"窗口刚被打开"：间隔 &gt;1 秒即视为重新打开，触发自动刷新）。 </summary>
+    private DateTime _lastDrawUtc = DateTime.MinValue;
+    /// <summary> 上次自动刷新列表的时间（窗口开着时每 5 秒轻量重扫一次）。 </summary>
+    private DateTime _lastAutoRefreshUtc = DateTime.MinValue;
 
     public SourceExtractWindow(Plugin plugin, SourceExtractService svc, ReplacementService replacement)
         : base("源码提取###PluginLocalizerSource")
@@ -221,10 +225,21 @@ public sealed class SourceExtractWindow : Window
     /// <summary> 已装插件列表：工具栏（搜索/刷新/全部提取）+ 目录入口 + 列表本体。 </summary>
     private void DrawPluginList(Configuration cfg)
     {
-        if (!_listLoaded)
+        // ── 自动刷新（2026-09-15 用户："列表需要手动刷新，很麻烦，能自动检测自动刷新吗"）──
+        //    两种情况都自动重扫：
+        //      ① **刚打开窗口**（两次 Draw 间隔 >1 秒 ⇒ 中间窗口是关闭的）——覆盖"装了新插件后开窗"；
+        //      ② **窗口开着时**每 5 秒轻量重扫——覆盖"边开着边装插件 / 边翻译"。
+        //    ⚠ 成本已压到很低：`SourceExtractService.CheckInstalledChinese` 加了"按 DLL + 版本目录
+        //      时间戳"的缓存，重复刷新只做 stat（实测 28 个插件约 3ms；无缓存时才 137ms 解析元数据）。
+        var now = DateTime.UtcNow;
+        var reopened = (now - _lastDrawUtc).TotalSeconds > 1.0;
+        var due = (now - _lastAutoRefreshUtc).TotalSeconds >= 5.0;
+        if (!_listLoaded || reopened || due)
         {
             RefreshList();
+            _lastAutoRefreshUtc = now;
         }
+        _lastDrawUtc = now;
 
         // ── 工具栏：计数 + 搜索 + 操作（按钮按需换行，窄窗口不会裁掉）──
         ImGui.TextDisabled($"已装且带 GitHub 地址：{_plugins.Count} 个");
@@ -235,9 +250,12 @@ public sealed class SourceExtractWindow : Window
         if (ImGui.Button("刷新##src"))
         {
             RefreshList();
+            _lastAutoRefreshUtc = DateTime.UtcNow;
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("重新枚举已装插件，并检测各插件当前 DLL 是否已是中文版。");
+            ImGui.SetTooltip("立即重新枚举已装插件，并检测各插件当前 DLL 是否已是中文版。\n" +
+                             "列表本身会自动刷新（每次打开窗口、以及开着时每 5 秒一次），\n" +
+                             "所以装了新插件后通常不必手动点这里。");
 
         Ui.SameLineIfFits(Ui.ButtonWidth("全部提取"));
         {

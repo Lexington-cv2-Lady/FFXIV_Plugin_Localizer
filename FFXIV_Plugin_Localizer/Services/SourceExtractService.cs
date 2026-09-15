@@ -172,6 +172,21 @@ public sealed class SourceExtractService
     /// ⚠ 这才是用户视角的正确判据：插件安装器给的 RepoUrl 是**原作者仓库**（纯英文），
     /// 但用户装的可能是一份**中文编译版**（源码英文 + 二进制含中文）。只看仓库会误判成"未汉化"。
     /// </summary>
+    /// <summary>
+    /// 「已装 DLL 的中文条数」缓存：DLL 路径 → (最后写入时间, 版本目录写入时间, 中文条数)。
+    ///
+    /// ⚠ **为什么必须缓存**（2026-09-15 实测）：完整解析 28 个插件的 DLL 元数据约 **137ms**
+    ///   （DailyRoutines.dll 单个就 9.4MB），加上枚举目录共约 187ms。列表要能"自动刷新"就
+    ///   必须每几秒重算一次，187ms 的帧内尖峰会让输入丢事件（本项目在 Ctrl+V 那次已定性过）。
+    ///   加上这层缓存后，重复刷新只需 **stat 两次约 3ms**：只有**DLL 或版本目录的时间戳变了**
+    ///   （= 插件被更新/重装）才重新解析。
+    /// 同时缓存版本目录时间：光看 DLL 不够——语言文件（`Assets\Langs\*.json`）在版本目录里，
+    /// 插件更新时可能只换语言文件。
+    /// </summary>
+    private static readonly Dictionary<string, (long DllTicks, long DirTicks, int Zh)> _cjkCache =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object _cjkCacheLock = new();
+
     public (bool IsChinese, int ZhCount, string DllPath) CheckInstalledChinese(string pluginName)
     {
         var launcherDir = Path.GetDirectoryName(Path.GetDirectoryName(_configDir()));
@@ -182,6 +197,22 @@ public sealed class SourceExtractService
             var dll = Directory.EnumerateFiles(dir, pluginName + ".dll", SearchOption.AllDirectories)
                 .OrderBy(x => x, StringComparer.Ordinal).LastOrDefault();
             if (dll == null) continue;
+
+            long dllTicks = 0, dirTicks = 0;
+            try
+            {
+                dllTicks = File.GetLastWriteTimeUtc(dll).Ticks;
+                var verDir = Path.GetDirectoryName(dll);
+                if (!string.IsNullOrEmpty(verDir)) dirTicks = Directory.GetLastWriteTimeUtc(verDir).Ticks;
+            }
+            catch { /* 取不到时间就每次都重算 */ }
+
+            lock (_cjkCacheLock)
+            {
+                if (_cjkCache.TryGetValue(dll, out var c) && c.DllTicks == dllTicks && c.DirTicks == dirTicks)
+                    return (c.Zh >= BilingualZhThreshold, c.Zh, dll);
+            }
+
             var n = CountUserStringCjk(dll);
 
             // ── 语言资源文件兜底（2026-09-15 补）──
@@ -191,6 +222,8 @@ public sealed class SourceExtractService
             //   有 2557 条中文（共 2558 条），插件在中文环境下运行时界面本就是中文的。
             //   这类插件不需要（也不该）再翻——翻了反而与插件自带的翻译打架。
             n += CountLangsFileCjk(dir);
+
+            lock (_cjkCacheLock) { _cjkCache[dll] = (dllTicks, dirTicks, n); }
             return (n >= BilingualZhThreshold, n, dll);
         }
         return (false, 0, "");
