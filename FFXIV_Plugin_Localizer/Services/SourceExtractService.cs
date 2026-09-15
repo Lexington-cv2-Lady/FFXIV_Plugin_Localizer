@@ -132,8 +132,13 @@ public sealed class SourceExtractService
     /// </summary>
     private static readonly HashSet<string> NonUiCallNames = new(StringComparer.Ordinal)
     {
+        // ── 日志/控制台/异常：这些字面量是**内部消息**，永远不在界面上显示 ──
+        //    ⚠ 实测 Browsingway 靠这条挡掉一串噪音（`Device is null`、`Render process running.`、
+        //    `Failed to restart render process`…）。它们若进候选，AI 白翻、还挤占"待翻译"计数。
+        //    ⚠ `throw new Exception("…")` 这类**不是函数调用**（没有括号紧跟字面量）→ 归 AssignStringRe 管，
+        //    在那里有 `IsLikelyUiText` 兜底（无空格/技术味重的词进不来）。
+        "PluginLog", "Log", "Logger", "Console", "Debug", "Trace", "WriteLine", "Write",
         "Path", "File", "Directory", "FileInfo", "DirectoryInfo", "FileStream", "StreamReader", "StreamWriter",
-        "Console", "Debug", "Log", "Logger", "Trace",
         "string", "String", "Format", "Join", "Concat", "Equals", "Compare", "IsNullOrEmpty", "IsNullOrWhiteSpace",
         "Exception", "ArgumentException", "ArgumentNullException", "InvalidOperationException", "NotImplementedException",
         "Convert", "Enum", "Type", "Activator", "Guid", "Uri", "Regex", "Encoding",
@@ -557,8 +562,16 @@ public sealed class SourceExtractService
                     AddBareCandidate(strings, funcStats, m.Groups[1].Value, m.Groups[2].Value);
                 }
                 // ③ 赋值式 / switch 表达式（`=> "Open a Window"`、`Name = "Foo Bar"`）——没有括号，上面两条抓不到
+                //    ⚠ 这条**同时是"误采数据默认值/日志文本"的主要来源**，规则要收得更紧（见 AddBareCandidate）：
+                //    · `throw new Exception("Device is null")` → 异常消息，只在日志里出现（IsInsideThrow 排除）
+                //    · `Name = "New overlay"`（对象初始化器）→ **数据默认值**，用户可改；提取器抓到的只是
+                //      "首次创建时的初始名字"，而运行时那串来自**配置数据**，替换表根本碰不到它
+                //    · `Url = "about:blank"` → 技术值
+                //    故赋值路径要求 `IsLikelyUiText`（自然语言样），宁可漏采也不误采。
                 foreach (Match m in AssignStringRe.Matches(text))
                 {
+                    if (IsInsideThrow(text, m.Index)) continue;          // 异常消息（只在日志里）
+                    if (IsDataFieldAssignment(text, m.Groups[1].Index)) continue;  // 数据字段默认值（如 Name = "New overlay"）
                     AddBareCandidate(strings, funcStats, "赋值", m.Groups[1].Value);
                 }
             }
@@ -628,6 +641,13 @@ public sealed class SourceExtractService
             if (!LooksLikeTextFunc(simple)) return;
             if (s.Contains('.') || s.Contains('_')) return;
         }
+        else if (simple == "赋值")
+        {
+            // ⚠ 赋值路径收紧（见 IsLikelyUiText 的说明）：排除数据默认值/技术值/命令名。
+            //    宁可漏采（可用「手动填写仓库地址」或手填译文补），也不要让"用户可改的数据默认值"
+            //    与日志文本挤进待翻清单——它们占了额度、还让进度显示不准确。
+            if (!IsLikelyUiText(s)) return;
+        }
         if (s.Length < 2 || s.Length > 300) return;
         if (TextHeuristics.HasCjk(s)) return;
         if (TextHeuristics.IsKeyName(s)) return;
@@ -652,6 +672,88 @@ public sealed class SourceExtractService
         foreach (var h in TextHintWords)
             if (f.Contains(h, StringComparison.Ordinal)) return true;
         return false;
+    }
+
+    /// <summary>
+    /// 判断 <paramref name="pos"/> 处的字符串是否落在 `throw new XxxException("…")` 的实参位置。
+    /// ——异常消息只在日志里出现，永不上界面，采进来只会污染候选、白耗机翻额度。
+    /// 做法：向回找最近的 `throw`，若其间没有语句结束符（`;`）且出现了 `new …Exception`，即认定。
+    /// </summary>
+    private static bool IsInsideThrow(string text, int pos)
+    {
+        var start = Math.Max(0, pos - 200);
+        var window = text[start..pos];
+        var t = window.LastIndexOf("throw", StringComparison.Ordinal);
+        if (t < 0) return false;
+        var seg = window[t..];
+        if (seg.Contains(';')) return false;                 // 已跨过语句边界 → 不是这次 throw
+        return seg.Contains("Exception", StringComparison.Ordinal);   // new XxxException("…")
+    }
+
+    /// <summary>
+    /// 该串是否**像界面文案**（用于赋值路径的严格过滤）。
+    ///
+    /// 赋值路径（对象初始化器 / switch 表达式）里混着大量**非界面**文本：
+    /// 数据默认值（`Name = "New overlay"`）、技术值（`Url = "about:blank"`）、
+    /// 标识符（`Command = "overlay"`）。它们的共同点是**不像自然语言**。
+    /// 判据（任一不满足即拒绝）：
+    ///   · 至少两个单词（界面标签多为短语；单词标签由精确规则与函数调用路径负责）
+    ///   · 只含字母/数字/常见标点与空格（排除 `about:blank` 的 `:`、`camelCase` 的粘连）
+    ///   · 含至少一个长词（≥3 字母），排除 `cmd`、`opts` 这类缩写标识符
+    ///   · 不是全小写连写（排除 `notify`、`overlay` 这类命令名/键名）
+    /// </summary>
+    private static bool IsLikelyUiText(string s)
+    {
+        if (!s.Contains(' ')) return false;                       // 多词
+        if (s.Contains(':') || s.Contains('/') || s.Contains('\\')) return false;
+        var words = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length < 2) return false;
+        if (words.Any(w => w.Length >= 3 && w.Any(char.IsLetter))) { /* ok */ } else return false;
+        // 全小写（且无大写/标点分隔）更像命令名/键名
+        var letters = s.Where(char.IsLetter).ToList();
+        if (letters.Count > 0 && letters.All(char.IsLower) && !s.EndsWith(".")) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// 赋值式正则：**捕获属性/变量名** + 字面量。用于识别"这是数据字段默认值"。
+    /// 形如 <c>Name = "New overlay"</c>、<c>Url = "about:blank"</c>、<c>Guid = "…"</c>。
+    /// </summary>
+    private static readonly Regex PropAssignRe = new(
+        @"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\$)?@?""((?:[^""\\]|\\.)*)""",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// **数据字段名**：这些属性/变量被赋值时，字面量是**数据**而非界面文案，不作为候选。
+    ///
+    /// ⚠ 实测用例（2026-09-15 用户问"New overlay 是什么"引出）：
+    ///   Browsingway `new() { Guid = …, Name = "New overlay", Url = "about:blank" }`
+    ///   —— `Name` 是**该 overlay 的名字**，存在用户配置里、可在插件自己的输入框里改；
+    ///   运行时 список 里显示的是**配置数据**，不是这个字面量。
+    ///   把 `"New overlay"` 采进候选的后果：白翻一条、且替换层永远碰不到它（显示的是数据值）。
+    /// ⚠ 注意与"界面标签"的区别：`ImGui.InputText("Name", …)` 里的 `"Name"` 是**槽位标签**（会画出来），
+    ///   它走函数调用路径、不经过本条；只有 `Xxx = "…"` 这种**赋值**才按数据字段跳过。
+    /// </summary>
+    private static readonly HashSet<string> DataFieldNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Name", "Url", "URL", "Uri", "Path", "FilePath", "Dir", "Directory", "Folder",
+        "Id", "Ids", "Guid", "Key", "Token", "Secret", "Hash", "Type", "Kind", "Tag", "Tags",
+        "Command", "Cmd", "Version", "Encoding", "Extension", "Ext", "Scheme", "Host", "Port",
+    };
+
+    /// <summary> 该串是否是「数据字段的默认值」（形如 `Name = "New overlay"`），不该翻译。
+    /// <paramref name="litIndex"/> 必须是**字面量内容**的起始下标（正则的 group(1).Index）。 </summary>
+    private static bool IsDataFieldAssignment(string text, int litIndex)
+    {
+        // 只取字面量**紧邻左侧**的一小段（要能看到 `Ident = "`），且不许跨过 `,` / `;` / `(` / `{`
+        //   ——否则对象初始化器里前一个赋值（`Guid = Guid.NewGuid(),`）会干扰判定。
+        var from = Math.Max(0, litIndex - 60);
+        var pre = text[from..litIndex];
+        var cut = pre.LastIndexOfAny(new[] { ',', ';', '(', '{', '}' });
+        if (cut >= 0) pre = pre[(cut + 1)..];
+        // `pre` 现在结尾是 `Ident = "`（含开引号），故允许结尾有引号
+        var m = Regex.Match(pre, @"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*""?\s*$");
+        return m.Success && DataFieldNames.Contains(m.Groups[1].Value);
     }
 
     private static string Unescape(string s)

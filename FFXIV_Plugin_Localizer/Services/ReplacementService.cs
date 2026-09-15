@@ -144,6 +144,20 @@ public sealed unsafe class ReplacementService
     /// </summary>
     public void SetBlacklist(Func<string, bool>? isBlacklisted) => _isBlacklisted = isBlacklisted;
 
+    /// <summary>
+    /// 该条目**是否需要翻译**：可翻译（非命令/非技术噪音…）**且未被单词黑名单拉黑**。
+    ///
+    /// ⚠ 必须把黑名单算进来（2026-09-15 自查发现的 bug）：黑名单词会被机翻跳过、也进不了词典，
+    ///   若仍计入"待翻译"，进度就**永远到不了 100%**（显示 68/69 这种）——与早期 `[Cone 1]`
+    ///   永远算未翻译是同一类问题。黑名单词的语义是"**本就不该翻**"，故与 `/命令`、纯符号同等待遇。
+    /// </summary>
+    private bool NeedsTranslation(string key)
+    {
+        if (!TextHeuristics.IsTranslatable(key)) return false;
+        var bl = _isBlacklisted;
+        return bl == null || !bl(key);
+    }
+
     /// <summary> 替换开关（只影响绘制替换；表的管理不受影响）。 </summary>
     public bool Enabled { get; set; }
 
@@ -822,7 +836,7 @@ public sealed unsafe class ReplacementService
             translated = win.Select(kv => (kv.Key, kv.Value)).OrderBy(t => t.Item1, StringComparer.Ordinal).ToList();
             // 待翻列表只列**值得翻译**的（排除 /命令、纯符号、键位名等，避免白送 AI 浪费额度）
             untranslated = candidates.Keys
-                .Where(k => !win.ContainsKey(k) && TextHeuristics.IsTranslatable(k))
+                .Where(k => !win.ContainsKey(k) && NeedsTranslation(k))
                 .OrderBy(x => x, StringComparer.Ordinal).ToList();
         }
         return (translated, untranslated);
@@ -958,7 +972,7 @@ public sealed unsafe class ReplacementService
         var candidates = ReadCandidates(plugin);
         // 只统计"需要翻译"的条目：像 /tp、纯符号、Ctrl 这类本就不该翻，
         // 否则插件永远卡在"14/15"显示未完成。
-        var need = candidates.Keys.Where(TextHeuristics.IsTranslatable).ToList();
+        var need = candidates.Keys.Where(NeedsTranslation).ToList();
         int translatedCount;
         List<string> missing;
         lock (_lock)
