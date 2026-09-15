@@ -293,6 +293,50 @@ public sealed class WindowReplaceWindow : Window
         }
     }
 
+    /// <summary>
+    /// 在游戏里打开目标插件**自己的**配置界面（精确到该插件，等同插件安装器里每行的 ⚙ 按钮），
+    /// 方便翻完立刻看效果。
+    /// 官方正路（反射 Dalamud 15.0.3.4 核实）：`IDalamudPluginInterface.InstalledPlugins`
+    /// → `IExposedPlugin.OpenConfigUi()`；无配置界面则退 `OpenMainUi()`。
+    /// </summary>
+    private void OpenPluginConfigUi(string plugin)
+    {
+        try
+        {
+            var target = Plugin.PluginInterface.InstalledPlugins
+                .FirstOrDefault(p => string.Equals(p.InternalName, plugin, StringComparison.OrdinalIgnoreCase));
+            if (target == null)
+            {
+                _summary = $"未找到已安装的 {plugin}（可能只提取过源码、本机未装或未启用）。";
+                return;
+            }
+            if (!target.IsLoaded)
+            {
+                _summary = $"{target.Name} 当前未加载（被禁用了？），无法打开配置界面。";
+                return;
+            }
+            if (target.HasConfigUi)
+            {
+                target.OpenConfigUi();
+                _summary = $"已打开 {target.Name} 的配置界面。";
+            }
+            else if (target.HasMainUi)
+            {
+                target.OpenMainUi();
+                _summary = $"{target.Name} 没有配置界面，已打开其主界面。";
+            }
+            else
+            {
+                _summary = $"{target.Name} 未提供配置/主界面入口，无法打开。";
+            }
+        }
+        catch (Exception ex)
+        {
+            _summary = "打开插件配置失败：" + ex.Message;
+            _plugin.AppLog.Error($"[窗口] 打开插件配置失败（{plugin}）：{ex.Message}");
+        }
+    }
+
     private void DrawPluginEditor(string plugin)
     {
         var (translated, untranslated) = GetCached(plugin);
@@ -332,6 +376,13 @@ public sealed class WindowReplaceWindow : Window
             }
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("重新读取该插件的译文文件与候选清单。\n在外部删除/编辑 json 后点它同步，无需重载插件。");
+            ImGui.SameLine();
+            if (ImGui.Button("打开插件配置"))
+            {
+                OpenPluginConfigUi(plugin);
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("在游戏里打开该插件自己的配置界面（等同插件安装器里的 ⚙ 按钮），方便即时查看翻译效果。\n插件没有配置界面时改开其主界面；两者都没有或未加载则提示。");
 
             // 单插件还原英文：清空该插件译文（候选保留），二次确认防误点
             ImGui.SameLine();
