@@ -85,6 +85,53 @@ public sealed class WindowReplaceWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("打开候选文案目录（源码提取产出的未翻译清单）。");
         ImGui.SameLine();
+        // ── 一键翻译：把所有插件的窗口文字缺口一次翻完 ──
+        {
+            var canMt = !_mt.Running;
+            ImGui.BeginDisabled(!canMt);
+            if (ImGui.Button(_mt.Running ? "翻译中…" : "一键翻译"))
+            {
+                if (string.IsNullOrWhiteSpace(MtTranslateService.GetApiKey(_plugin.Configuration)))
+                {
+                    _summary = "请先在「AI 设置」填写 API Key。";
+                }
+                else
+                {
+                    _summary = "";
+                    _mt.StartAllWindowPlugins();
+                }
+            }
+            ImGui.EndDisabled();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把所有插件的**窗口内文字**缺口一次翻完（调 AI，需先在「AI 设置」填 Key）。\n" +
+                             "同一句原文只送翻一次，结果分别落回各插件自己的译文表。\n" +
+                             "建议先点「全部预翻译」用现成词典白嫖一批，剩下的再交给它。");
+        ImGui.SameLine();
+        // ── 一键还原英文：删除**所有插件**的译文（与单插件按钮同语义），3 秒二次确认防误点 ──
+        {
+            var armedAll = _restoreArmedUntil.TryGetValue("restore::__ALL__", out var untilAll) && DateTime.Now < untilAll;
+            if (armedAll) ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.72f, 0.24f, 0.2f, 1f));
+            if (ImGui.Button(armedAll ? "确认全部还原英文" : "一键还原英文"))
+            {
+                if (armedAll)
+                {
+                    _restoreArmedUntil.Remove("restore::__ALL__");
+                    RestoreAll();
+                }
+                else
+                {
+                    _restoreArmedUntil["restore::__ALL__"] = DateTime.Now.AddSeconds(3);
+                    _summary = "再次点击「确认全部还原英文」将删除所有插件的译文（3 秒内有效）。";
+                }
+            }
+            if (armedAll) ImGui.PopStyleColor();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把**所有插件**的界面文字还原为英文：删除每个插件的译文文件。\n" +
+                             "候选清单保留，之后仍可「一键翻译」重来（但要重新花 AI 额度）。\n" +
+                             "⚠ 若只是想临时看英文、不想丢译文，请用主窗口的「还原英文」（只关替换、不动文件）。");
+        ImGui.SameLine();
         if (ImGui.Button("全部预翻译"))
         {
             // 用本项目词典给**所有插件**的候选套用现成译文（不调 AI、零成本）
@@ -327,6 +374,38 @@ public sealed class WindowReplaceWindow : Window
         {
             _summary = "写入词典失败：" + ex.Message;
             _plugin.AppLog.Error("[预翻译] 写入词典失败：" + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// **一键还原英文（全部插件）**：删掉每个插件的译文文件，界面立即回到英文。
+    /// 候选清单保留（题目仍在），之后还能「一键翻译」重来。
+    /// 与主窗口「还原英文」的区别：那个只关替换、**不动文件**（可无损恢复）；这个**真删译文**。
+    /// </summary>
+    private void RestoreAll()
+    {
+        try
+        {
+            var plugins = _replacement.GetWindowPlugins();
+            var totalRemoved = 0;
+            var affected = 0;
+            foreach (var (name, _, _) in plugins)
+            {
+                var n = _replacement.ClearPluginTranslations(name);
+                if (n > 0) { affected++; totalRemoved += n; }
+                Invalidate(name);
+            }
+            _openPlugin = "";
+            _replacement.Reload();
+            _summary = affected > 0
+                ? $"已把 {affected} 个插件还原为英文（共删除 {totalRemoved} 条译文；候选保留，可重新翻译）。"
+                : "没有可还原的译文（各插件当前都没有译文）。";
+            _plugin.AppLog.Info($"[还原] 全部还原英文：{affected} 个插件、{totalRemoved} 条");
+        }
+        catch (Exception ex)
+        {
+            _summary = "还原失败：" + ex.Message;
+            _plugin.AppLog.Error("[还原] 全部还原失败：" + ex.Message);
         }
     }
 

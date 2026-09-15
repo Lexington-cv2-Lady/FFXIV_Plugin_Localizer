@@ -118,6 +118,85 @@ public sealed class MtTranslateService
         });
     }
 
+    /// <summary>
+    /// **一键翻译：把所有插件的窗口文字缺口一次翻完**（插件翻译窗口的「一键翻译」）。
+    /// 逐个插件收集缺口 → 合并成一批送翻（不是每个插件各发一次请求，省额度也更快）→
+    /// 结果按插件分别并入各自的窗口表（译文表保持**按插件**组织，不做跨插件串味）。
+    /// </summary>
+    public void StartAllWindowPlugins()
+    {
+        if (Running) return;
+        if (string.IsNullOrWhiteSpace(GetApiKey(_cfg)))
+        {
+            Status = "请先在「AI 设置」填写当前服务商的 API Key";
+            return;
+        }
+        Running = true;
+        Status = "正在汇总各插件的缺口…";
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // ① 逐插件收集缺口，记录"这句原文属于哪些插件"（同一句可能被多个插件用到）
+                var perPlugin = new List<(string Plugin, List<string> Missing)>();
+                var owners = new Dictionary<string, List<string>>(StringComparer.Ordinal);   // 原文 → 插件列表
+                var all = new List<string>();
+                foreach (var (name, _, _) in _replacement.GetWindowPlugins())
+                {
+                    var (_, untranslated) = _replacement.GetWindowEntries(name);
+                    var texts = untranslated.Where(t => t.Length <= MaxTextLen).ToList();
+                    if (texts.Count == 0) continue;
+                    perPlugin.Add((name, texts));
+                    foreach (var t in texts)
+                    {
+                        if (!owners.TryGetValue(t, out var list)) owners[t] = list = new List<string>();
+                        if (!list.Contains(name)) list.Add(name);
+                        all.Add(t);
+                    }
+                }
+                var uniq = all.Distinct().ToList();
+                if (uniq.Count == 0)
+                {
+                    Status = "没有需要翻译的窗口文字（各插件都已翻完）。";
+                    _appLog.Info("[机翻] 一键翻译：无缺口");
+                    return;
+                }
+                Status = $"共 {perPlugin.Count} 个插件、{uniq.Count} 条待翻，正在翻译…";
+
+                // ② 整批送翻，再按"归属插件"分发回各自的窗口表
+                await TranslateAll(uniq, translated =>
+                {
+                    var total = 0;
+                    var byPlugin = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+                    foreach (var (en, zh) in translated)
+                    {
+                        if (!owners.TryGetValue(en, out var list)) continue;
+                        foreach (var p in list)
+                        {
+                            if (!byPlugin.TryGetValue(p, out var d))
+                                byPlugin[p] = d = new Dictionary<string, string>(StringComparer.Ordinal);
+                            d[en] = zh;
+                        }
+                    }
+                    foreach (var (p, d) in byPlugin)
+                    {
+                        total += _replacement.MergeWindowEntries(p, d);
+                    }
+                    return total;
+                });
+            }
+            catch (Exception ex)
+            {
+                Status = "翻译失败：" + ex.Message;
+                _appLog.Error("[机翻] " + Status);
+            }
+            finally
+            {
+                Running = false;
+            }
+        });
+    }
+
     /// <summary> 是否值得翻译：含 ASCII 字母、不含中日韩字符（已是中文的不送翻）、且不是纯键位名。 </summary>
     private static bool IsTranslatable(string s) => TextHeuristics.IsTranslatable(s);
 
