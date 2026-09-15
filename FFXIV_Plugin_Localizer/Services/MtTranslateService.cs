@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace FFXIVPluginLocalizer.Services;
@@ -44,11 +45,27 @@ public sealed class MtTranslateService
     /// <summary> 翻译任务是否在跑（窗口据此禁用按钮）。 </summary>
     public volatile bool Running;
 
+    /// <summary> 当前任务的取消源（「停止翻译」用）。null = 没有任务在跑。 </summary>
+    private volatile CancellationTokenSource? _cts;
+
     /// <summary> 进度/结果描述（窗口轮询显示）。 </summary>
     public string Status { get; private set; } = "";
 
     /// <summary> 外部（如启动检查）写入提示，不改运行状态。 </summary>
     public void Notify(string message) => Status = message;
+
+    /// <summary>
+    /// **中止当前翻译任务**：不再发起新的批次请求；**已经翻完的批次会保留**（那是花了额度的成果，
+    /// 丢弃等于白花钱）。正在飞行中的那一批请求无法取消，但它返回后不会继续下一批。
+    /// </summary>
+    public void Stop()
+    {
+        var cts = _cts;
+        if (cts == null) return;
+        try { cts.Cancel(); } catch { /* 已释放则忽略 */ }
+        Status = "正在停止…（已完成的批次会保留）";
+        _appLog.Info("[机翻] 用户请求停止翻译");
+    }
 
     public MtTranslateService(AppLog appLog, ReplacementService replacement, Configuration cfg)    {
         _appLog = appLog;
@@ -67,13 +84,15 @@ public sealed class MtTranslateService
         }
         Running = true;
         Status = "正在扫描缺失文案…";
+        var cts = new CancellationTokenSource();
+        _cts = cts;
         _ = Task.Run(async () =>
         {
             try
             {
                 var missing = _replacement.CollectMissing();
                 var texts = missing.Values.Distinct().Where(t => t.Length <= MaxTextLen).ToList();
-                await TranslateAll(texts, t => _replacement.MergeTranslations(t));
+                await TranslateAll(texts, t => _replacement.MergeTranslations(t), cts.Token);
             }
             catch (Exception ex)
             {
@@ -83,6 +102,8 @@ public sealed class MtTranslateService
             finally
             {
                 Running = false;
+                _cts = null;
+                cts.Dispose();
             }
         });
     }
@@ -98,13 +119,15 @@ public sealed class MtTranslateService
         }
         Running = true;
         Status = $"[{plugin}] 正在读取缺口…";
+        var cts = new CancellationTokenSource();
+        _cts = cts;
         _ = Task.Run(async () =>
         {
             try
             {
                 var (_, untranslated) = _replacement.GetWindowEntries(plugin);
                 var texts = untranslated.Where(t => t.Length <= MaxTextLen).ToList();
-                await TranslateAll(texts, t => _replacement.MergeWindowEntries(plugin, t));
+                await TranslateAll(texts, t => _replacement.MergeWindowEntries(plugin, t), cts.Token);
             }
             catch (Exception ex)
             {
@@ -114,6 +137,8 @@ public sealed class MtTranslateService
             finally
             {
                 Running = false;
+                _cts = null;
+                cts.Dispose();
             }
         });
     }
@@ -133,6 +158,8 @@ public sealed class MtTranslateService
         }
         Running = true;
         Status = "正在汇总各插件的缺口…";
+        var cts = new CancellationTokenSource();
+        _cts = cts;
         _ = Task.Run(async () =>
         {
             try
@@ -183,7 +210,7 @@ public sealed class MtTranslateService
                         total += _replacement.MergeWindowEntries(p, d);
                     }
                     return total;
-                });
+                }, cts.Token);
             }
             catch (Exception ex)
             {
@@ -193,6 +220,8 @@ public sealed class MtTranslateService
             finally
             {
                 Running = false;
+                _cts = null;
+                cts.Dispose();
             }
         });
     }
@@ -200,8 +229,16 @@ public sealed class MtTranslateService
     /// <summary> 是否值得翻译：含 ASCII 字母、不含中日韩字符（已是中文的不送翻）、且不是纯键位名。 </summary>
     private static bool IsTranslatable(string s) => TextHeuristics.IsTranslatable(s);
 
+    /// <summary>
+    /// 在当前译文表里筛出「仍未翻译」的那些（用于翻译过程中重算队列）。
+    /// ⚠ 不做**跨插件**判断：这里只关心"这些串现在是否已被任何插件的译文表覆盖"——
+    ///   只要有一处已有译文，本次就不必再送翻（同一句译名相同，省额度）。
+    /// </summary>
+    private List<string> GetCurrentMissing(IEnumerable<string> candidates)
+        => _replacement.FilterStillMissing(candidates);
+
     /// <summary> 批量循环：分批送翻 → 汇总 → merge 落盘。 </summary>
-    private async Task TranslateAll(List<string> texts, Func<Dictionary<string, string>, int> merge)
+    private async Task TranslateAll(List<string> texts, Func<Dictionary<string, string>, int> merge, CancellationToken token)
     {
         if (texts.Count == 0)
         {
@@ -220,12 +257,14 @@ public sealed class MtTranslateService
         var batchSize = Math.Clamp(_cfg.AiBatchSize, 1, 200);
         var translated = new Dictionary<string, string>(StringComparer.Ordinal);
         var failed = 0;
-        for (var i = 0; i < texts.Count; i += batchSize)
+        var cancelled = false;
+        var queue = new List<string>(texts);
+        while (queue.Count > 0)
         {
-            var batch = texts.Skip(i).Take(batchSize)
-                .ToDictionary(t => t, _ => "", StringComparer.Ordinal);
-            var done = Math.Min(i + batchSize, texts.Count);
-            Status = $"翻译中 {done}/{texts.Count}…";
+            if (token.IsCancellationRequested) { cancelled = true; break; }
+            var batch = queue.Take(batchSize).ToDictionary(t => t, _ => "", StringComparer.Ordinal);
+            var done = Math.Min(batch.Count, queue.Count);
+            Status = $"翻译中 {done}/{queue.Count}…";
             try
             {
                 foreach (var (en, zh) in await TranslateBatch(batch))
@@ -238,11 +277,36 @@ public sealed class MtTranslateService
                 failed += batch.Count;
                 _appLog.Warn($"[机翻] 一批 {batch.Count} 条失败：{ex.Message}");
             }
-            await Task.Delay(400); // 免费/低配额档限速，留出间隔
+            queue.RemoveRange(0, batch.Count);
+
+            try { await Task.Delay(400, token); }   // 免费/低配额档限速，留出间隔；停止时立即抛出让循环结束
+            catch (OperationCanceledException) { cancelled = true; break; }
+
+            // ⚠ 每批结束后**把已被别人解决掉的条目移出队列**（2026-09-15 并发修复）：
+            //    机翻是长任务，期间用户可能点「全部预翻译」把词典里更权威的现成译名套了进来。
+            //    那些条目若还留在队列里就会被**白翻一遍**（花掉额度，结果还会因 MergeWindowEntries
+            //    的"已有译文优先"被丢弃）。故按"当前实际缺口"重算队列。
+            //    ⚠ 只在**批次边界**做（不是每批都全量读盘），且失败不影响主流程。
+            if (queue.Count > 0)
+            {
+                try
+                {
+                    var still = GetCurrentMissing(queue);
+                    if (still.Count < queue.Count)
+                    {
+                        _appLog.Info($"[机翻] 跳过 {queue.Count - still.Count} 条（期间已被预翻译/手动译完），剩余 {still.Count} 条");
+                        queue = still;
+                    }
+                }
+                catch { /* 重算失败就按原队列继续 */ }
+            }
         }
 
-        var added = merge(translated);
-        Status = $"完成：新增 {added} 条中文（失败 {failed} 条），已保存";
+        // ⚠ 即使被停止也**保留已完成的部分**：这些批次已经花掉额度了，丢弃等于白花钱。
+        var added = translated.Count > 0 ? merge(translated) : 0;
+        Status = cancelled
+            ? $"已停止：保留已完成 {added} 条（未翻的仍可在缺口里重来；失败 {failed} 条）"
+            : $"完成：新增 {added} 条中文（失败 {failed} 条），已保存";
         _appLog.Info($"[机翻] {Status}");
     }
 

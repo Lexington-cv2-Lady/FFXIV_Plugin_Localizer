@@ -85,11 +85,33 @@ public sealed class WindowReplaceWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("打开候选文案目录（源码提取产出的未翻译清单）。");
         ImGui.SameLine();
-        // ── 一键翻译：把所有插件的窗口文字缺口一次翻完 ──
+        if (ImGui.Button("打开还原备份"))
         {
-            var canMt = !_mt.Running;
-            ImGui.BeginDisabled(!canMt);
-            if (ImGui.Button(_mt.Running ? "翻译中…" : "一键翻译"))
+            OpenDir(Path.Combine(Plugin.PluginInterface.GetPluginConfigDirectory(), ReplacementService.WindowBackupDirName));
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("打开「还原英文」的自动备份目录（每次还原前都会先存一份，按时间戳分文件夹，最多保留最近 10 份）。\n" +
+                             "误点还原后，把对应时间戳文件夹里的 json 复制回 窗口翻译\\ 即可找回译文。");
+        ImGui.SameLine();
+        // ── 一键翻译 / 停止：把所有插件的窗口文字缺口一次翻完 ──
+        if (_mt.Running)
+        {
+            // 翻译中：主按钮变「停止翻译」（色标醒目，且这是长任务时唯一需要的操作）
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.7f, 0.28f, 0.22f, 1f));
+            if (ImGui.Button("停止翻译"))
+            {
+                _mt.Stop();
+                _summary = "已请求停止：不再发起新批次，**已翻完的部分会保留**。";
+            }
+            ImGui.PopStyleColor();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("停止翻译：不再发送新的批次请求。\n" +
+                                 "⚠ 已翻完的批次会保留并写入译文表（那些已经花掉额度了，不浪费）；\n" +
+                                 "正在请求中的那一批无法取消，返回后不会再继续下一批。");
+        }
+        else
+        {
+            if (ImGui.Button("一键翻译"))
             {
                 if (string.IsNullOrWhiteSpace(MtTranslateService.GetApiKey(_plugin.Configuration)))
                 {
@@ -101,12 +123,12 @@ public sealed class WindowReplaceWindow : Window
                     _mt.StartAllWindowPlugins();
                 }
             }
-            ImGui.EndDisabled();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("把所有插件的**窗口内文字**缺口一次翻完（调 AI，需先在「AI 设置」填 Key）。\n" +
+                                 "同一句原文只送翻一次，结果分别落回各插件自己的译文表。\n" +
+                                 "建议先点「全部预翻译」用现成词典白嫖一批，剩下的再交给它。\n" +
+                                 "翻译中可以再点它变成的「停止翻译」中断。");
         }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("把所有插件的**窗口内文字**缺口一次翻完（调 AI，需先在「AI 设置」填 Key）。\n" +
-                             "同一句原文只送翻一次，结果分别落回各插件自己的译文表。\n" +
-                             "建议先点「全部预翻译」用现成词典白嫖一批，剩下的再交给它。");
         ImGui.SameLine();
         // ── 一键还原英文：删除**所有插件**的译文（与单插件按钮同语义），3 秒二次确认防误点 ──
         {
@@ -129,8 +151,9 @@ public sealed class WindowReplaceWindow : Window
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("把**所有插件**的界面文字还原为英文：删除每个插件的译文文件。\n" +
+                             "⚠ 还原前会**自动备份**到 窗口翻译_还原备份\\<时间戳>\\（可用「打开还原备份」取回）。\n" +
                              "候选清单保留，之后仍可「一键翻译」重来（但要重新花 AI 额度）。\n" +
-                             "⚠ 若只是想临时看英文、不想丢译文，请用主窗口的「还原英文」（只关替换、不动文件）。");
+                             "若只是想临时看英文、不想丢译文，请用主窗口的「还原英文」（只关替换、不动文件）。");
         ImGui.SameLine();
         if (ImGui.Button("全部预翻译"))
         {
@@ -386,6 +409,8 @@ public sealed class WindowReplaceWindow : Window
     {
         try
         {
+            // ⚠ 先备份再删：译文的代价是 AI 额度，误点不可接受（2026-09-15 已真实丢过 416 条）
+            var backup = _replacement.BackupWindowTables();
             var plugins = _replacement.GetWindowPlugins();
             var totalRemoved = 0;
             var affected = 0;
@@ -397,8 +422,9 @@ public sealed class WindowReplaceWindow : Window
             }
             _openPlugin = "";
             _replacement.Reload();
+            var bak = string.IsNullOrEmpty(backup) ? "" : $"\n（已自动备份到 {ReplacementService.WindowBackupDirName}\\{Path.GetFileName(backup)}，可从「打开翻译目录」的上级找回）";
             _summary = affected > 0
-                ? $"已把 {affected} 个插件还原为英文（共删除 {totalRemoved} 条译文；候选保留，可重新翻译）。"
+                ? $"已把 {affected} 个插件还原为英文（共删除 {totalRemoved} 条译文；候选保留，可重新翻译）。{bak}"
                 : "没有可还原的译文（各插件当前都没有译文）。";
             _plugin.AppLog.Info($"[还原] 全部还原英文：{affected} 个插件、{totalRemoved} 条");
         }
@@ -524,6 +550,7 @@ public sealed class WindowReplaceWindow : Window
             {
                 if (armed)
                 {
+                    _replacement.BackupWindowTables();   // 还原前先备份（误点可捞回）
                     var n = _replacement.ClearPluginTranslations(plugin);
                     _restoreArmedUntil.Remove(restoreKey);
                     Invalidate(plugin);

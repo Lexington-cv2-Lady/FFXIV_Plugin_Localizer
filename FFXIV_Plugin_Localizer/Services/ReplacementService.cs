@@ -23,6 +23,8 @@ public sealed unsafe class ReplacementService
     public const string MissingFileName = "安装器未翻译.json";
     /// <summary> 窗口文字表目录（每插件一份 &lt;插件名&gt;.json）。 </summary>
     public const string WindowTableDirName = "窗口翻译";
+    /// <summary> 「还原英文」前的自动备份目录名（回收站性质，用户可自行取回）。 </summary>
+    public const string WindowBackupDirName = "窗口翻译_还原备份";
     /// <summary> 窗口文字的未翻译候选来源目录（文案扫描输出）。 </summary>
     public const string CandidateDirName = "文案扫描"; // 候选文案目录（源码提取 + 历史 DLL 扫描都写这里）
     /// <summary> 随插件分发的内置翻译包（构建时从 FDCN 表生成，未装 FDCN 的用户也有底子）。 </summary>
@@ -819,6 +821,10 @@ public sealed unsafe class ReplacementService
                 //    "46/47 待翻译"，每次点机翻都重送一遍、AI 又返回原文、又被丢弃，形成死循环（2026-09-15
                 //    由 Browsingway 的 `URL` 暴露）。同文不表示失败——**空译文才表示失败**（那才要留着重试）。
                 if (key.Length < 2 || val.Length == 0) continue;
+                // ⚠ **不覆盖「已有译文」**（2026-09-15 并发修复）：机翻是长任务（可能几分钟），期间用户
+                //    可能用「全部预翻译」套了词典里更权威的译名，或手动改过某条。若机翻结束一把覆盖回去，
+                //    用户刚做的编辑就白做了（且无提示）。故**已有译文优先**，机翻只补空缺。
+                if (table.ContainsKey(key)) continue;
                 table[key] = val;
                 added++;
             }
@@ -829,7 +835,8 @@ public sealed unsafe class ReplacementService
                 {
                     var key = en.Trim();
                     var val = (zh ?? "").Trim();
-                    if (key.Length >= 2 && val.Length > 0) ApplyOneWindowEntry(key, val);
+                    if (key.Length >= 2 && val.Length > 0 && table.ContainsKey(key) && table[key] == val)
+                        ApplyOneWindowEntry(key, val);
                 }
             }
         }
@@ -890,6 +897,72 @@ public sealed unsafe class ReplacementService
         }
         var done = need.Count > 0 && missing.Count == 0;
         return (need.Count, translatedCount, done);
+    }
+
+    /// <summary>
+    /// 从给定候选里筛出**当前仍未被任何译文表覆盖**的那些（顺序保持）。
+    /// 供机翻在**翻译过程中**重算队列：若某条在这期间已被「全部预翻译」或手动编辑解决，
+    /// 就不必再花额度送翻（结果也会被"已有译文优先"丢弃）。
+    /// </summary>
+    public List<string> FilterStillMissing(IEnumerable<string> candidates)
+    {
+        var result = new List<string>();
+        lock (_lock)
+        {
+            foreach (var raw in candidates)
+            {
+                var key = (raw ?? "").Trim();
+                if (key.Length == 0) continue;
+                var covered = false;
+                foreach (var t in _windowSources.Values)
+                {
+                    if (t.ContainsKey(key)) { covered = true; break; }
+                }
+                if (!covered) result.Add(raw!);
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// **还原前的自动备份**：把当前译文目录整体复制到
+    /// <c>&lt;数据目录&gt;\窗口翻译_还原备份\&lt;时间戳&gt;\</c>，返回备份目录（无内容或失败返回 ""）。
+    ///
+    /// ⚠ 为什么要有它（2026-09-15 真实数据丢失事故）：译文是**花 AI 额度换来的**，而「一键还原英文」
+    ///   只做 `File.Delete`（不进回收站）→ 一点下去几百条译文**永久消失**，用户实测已丢过 416 条。
+    ///   现在还原前先留一份，误点也能捞回来（备份目录由用户自行清理，不自动删）。
+    /// </summary>
+    public string BackupWindowTables()
+    {
+        try
+        {
+            var src = WindowTableDir;
+            if (!Directory.Exists(src)) return "";
+            var files = Directory.GetFiles(src, "*.json");
+            if (files.Length == 0) return "";
+            var dst = Path.Combine(_configDir(), WindowBackupDirName, DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+            Directory.CreateDirectory(dst);
+            foreach (var f in files)
+            {
+                try { File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), overwrite: true); }
+                catch { /* 单个文件拷不动就跳过，尽力而为 */ }
+            }
+            // 只保留最近 10 份，避免无限堆积
+            try
+            {
+                var root = Path.Combine(_configDir(), WindowBackupDirName);
+                foreach (var old in Directory.GetDirectories(root).OrderByDescending(x => x).Skip(10))
+                    Directory.Delete(old, recursive: true);
+            }
+            catch { /* 清理失败无所谓 */ }
+            _appLog.Info($"[替换] 还原前已备份 {files.Length} 个译文文件 → {dst}");
+            return dst;
+        }
+        catch (Exception ex)
+        {
+            _appLog.Warn("[替换] 还原前备份失败（继续执行还原）：" + ex.Message);
+            return "";
+        }
     }
 
     /// <summary>
