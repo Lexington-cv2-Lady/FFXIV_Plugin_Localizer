@@ -50,7 +50,7 @@ public sealed class SourceExtractWindow : Window
         var cfg = _plugin.Configuration;
 
         // ── 说明（精简为两行，细节放各区块的折叠里，避免开窗就是一大片文字）──
-        Ui.Hint("从插件**公开源码**提取界面文案（闭源插件无法翻译），需要能访问 GitHub。");
+        Ui.Hint("从插件的公开源码提取界面文案；闭源插件无法翻译。需要能访问 GitHub。");
 
         // 首次打开时：网络尚未配好就把「网络设置」展开，已配好则收起——省掉每次开窗的视觉噪音。
         if (_netOpen == null)
@@ -153,7 +153,7 @@ public sealed class SourceExtractWindow : Window
                     StartTest(useProxy: false);
                 ImGui.EndDisabled();
                 if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("测试**不使用代理**时能否访问 GitHub（部分网络环境可直连）。");
+                    ImGui.SetTooltip("测试不使用代理时能否访问 GitHub（部分网络环境可直连）。");
                 ImGui.SameLine();
                 ImGui.BeginDisabled(_testing || !cfg.CanAccessGitHub || !cfg.UseProxy);
                 if (ImGui.Button("测试代理"))
@@ -250,8 +250,8 @@ public sealed class SourceExtractWindow : Window
             ImGui.EndDisabled();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("把列表里的插件**逐个**提取一遍（自动跳过：已是中文版、源码已汉化、已翻译完成的）。\n" +
-                             "有搜索筛选时只处理筛选出的那些；已在别处克隆过的仓库只会 `git pull`，很快。");
+            ImGui.SetTooltip("把列表里的插件逐个提取一遍（自动跳过：已是中文版、源码已汉化、已翻译完成的）。\n" +
+                             "有搜索筛选时只处理筛选出的那些；已克隆过的仓库只会做一次 git pull，很快。");
 
         // 目录入口（结果相关，跟列表放一起更顺手）
         Ui.SameLineIfFits(Ui.ButtonWidth("打开提取目录"));

@@ -103,7 +103,7 @@ public sealed class WindowReplaceWindow : Window
             }
             Ui.PopAccent();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("把所有插件的**窗口内文字**缺口一次翻完（调 AI，需先在「AI 设置」填 Key）。\n" +
+                ImGui.SetTooltip("把所有插件的窗口内文字缺口一次翻完（需要先在「AI 设置」填 Key）。\n" +
                                  "同一句原文只送翻一次，结果分别落回各插件自己的译文表。\n" +
                                  "建议先点「全部预翻译」用现成词典白嫖一批，剩下的再交给它。");
         }
@@ -115,7 +115,7 @@ public sealed class WindowReplaceWindow : Window
             PrefillAll();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("用本项目词典（我的翻译.json 等）给所有插件的候选套用已有译文——**不调 AI、零成本**。\n已翻译过的不动；命中才填，剩下的再交给「一键翻译」。\n建议每次翻新插件都先点它。");
+            ImGui.SetTooltip("用本项目词典（我的翻译.json 等）给所有插件的候选套用已有译文，不调用 AI、不花额度。\n已翻译过的不动；命中才填，剩下的再交给「一键翻译」。\n建议每次翻新插件都先点它。");
 
         Ui.SameLineIfFits(Ui.ButtonWidth("确认用词典刷新"));
         {
@@ -134,16 +134,16 @@ public sealed class WindowReplaceWindow : Window
                 else
                 {
                     _restoreArmedUntil["refresh::__DICT__"] = DateTime.Now.AddSeconds(3);
-                    _summary = "⚠ 此操作会把词典译文**覆盖到已翻条目上**（含你手改过的）。3 秒内再点一次确认。";
+                    _summary = "注意：此操作会覆盖已翻译的条目（包括手动改过的）。3 秒内再点一次确认。";
                 }
             }
             if (armedDict) Ui.PopAccent();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("把词典里的译文覆盖到**已经翻过的**条目上——改词典后一键生效，不必重新机翻。\n" +
+            ImGui.SetTooltip("把词典里的译文覆盖到已经翻过的条目上，改词典后一键生效，不必重新机翻。\n" +
                              "补的是这个死角：某条被 AI 翻错后，光改词典修不好它（预翻译只补缺口）。\n" +
-                             "⚠ **会覆盖已翻条目，包括你手动改过的**（无法区分二者——它们在同一张表里）。\n" +
-                             "词典里没有的条目一律不动；想只重翻某插件，可先对该插件点「清空本插件译文」。");
+                             "注意：会覆盖已翻译的条目，包括手动改过的那些。\n" +
+                             "词典里没有的条目一律不动。想只重翻某插件，可先对该插件点「清空本插件译文」。");
 
         ImGui.Spacing();
 
@@ -168,7 +168,7 @@ public sealed class WindowReplaceWindow : Window
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("打开「清空译文」的自动备份目录（每次还原前都会先存一份，按时间戳分文件夹，最多保留最近 10 份）。\n" +
                                  "误点还原后，把对应时间戳文件夹里的 json 复制回 窗口翻译\\ 即可找回译文。\n" +
-                                 "另外删除本身也走**系统回收站**，双保险。");
+                                 "另外删除本身也走系统回收站，双保险。");
 
             Ui.SameLineIfFits(Ui.ButtonWidth("重新扫描"));
             if (ImGui.Button("重新扫描"))
@@ -225,7 +225,7 @@ public sealed class WindowReplaceWindow : Window
             if (ImGui.Button("翻译结果写入词典"))
                 MergeAllIntoDict();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("把**所有插件**已经翻好的「原文/译文」汇总写入 词典目录\\我的翻译.json。\n" +
+                ImGui.SetTooltip("把所有插件已经翻好的「原文/译文」汇总写入 词典目录\\我的翻译.json。\n" +
                                  "写进去之后：①这些译文会参与「全部预翻译」，将来别的插件遇到同一句直接命中，不用再调 AI；\n" +
                                  "②词典只增不改——已存在的键不会被覆盖。");
         }
@@ -258,10 +258,10 @@ public sealed class WindowReplaceWindow : Window
             if (armedAll) Ui.PopDanger();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("删除**所有插件**的译文文件，界面即变回英文（=把这个工具翻的东西清掉）。\n" +
-                             "⚠ 删除走**系统回收站**，且清空前会先备份到 窗口翻译_还原备份\\<时间戳>\\，两种方式都能找回。\n" +
-                             "候选清单保留，之后可重新翻译（但要重新花 AI 额度）。\n" +
-                             "⚠ 只想临时看英文、不丢译文 → 请用**主窗口**的「还原英文」（只关替换开关、不动文件）。");
+            ImGui.SetTooltip("删除所有插件的译文文件，界面即变回英文。\n" +
+                             "删除走系统回收站，且清空前会先备份到 窗口翻译_还原备份\\，两种方式都能找回。\n" +
+                             "候选清单保留，之后可重新翻译，但会重新花 AI 额度。\n" +
+                             "只想临时看英文、不想丢译文：请用主窗口的「还原英文」（只关替换开关、不动文件）。");
 
         if (_mt.Running)
         {
@@ -644,7 +644,7 @@ public sealed class WindowReplaceWindow : Window
             }
             Ui.PopAccent();
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("只翻**这一个插件**的缺口（调 AI）。\n已翻译的不覆盖；缺口为 0 时按钮上会显示 0 条。");
+                ImGui.SetTooltip("只翻这一个插件的缺口。已翻译的不覆盖；缺口为 0 时按钮上会显示 0 条。");
 
             Ui.SameLineIfFits(Ui.ButtonWidth("预翻译本插件"));
             if (ImGui.Button("预翻译本插件"))
@@ -652,7 +652,7 @@ public sealed class WindowReplaceWindow : Window
                 PrefillOne(plugin);
             }
             if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("用本项目词典给该插件的候选文案套用已有译文（**不调 AI、零成本**）。\n已翻译过的不覆盖；剩下的可再点「翻译本插件缺失」机翻。");
+                ImGui.SetTooltip("用本项目词典给该插件的候选文案套用已有译文，不调用 AI、不花额度。\n已翻译过的不覆盖；剩下的可再点「翻译本插件缺失」机翻。");
 
             Ui.SameLineIfFits(Ui.ButtonWidth("重读本插件"));
             if (ImGui.Button("重读本插件"))
@@ -698,7 +698,7 @@ public sealed class WindowReplaceWindow : Window
             if (armed) Ui.PopDanger();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("删除这个插件的译文文件，它的界面即变回英文。\n" +
-                                 "⚠ 删除走**系统回收站**，且清空前会先备份到 窗口翻译_还原备份\\，两种方式都能找回。\n" +
+                                 "删除走系统回收站，且清空前会先备份到 窗口翻译_还原备份\\，两种方式都能找回。\n" +
                                  "候选清单保留，之后可重新翻译；二次确认防误点。");
         }
         if (_summary.Length > 0)

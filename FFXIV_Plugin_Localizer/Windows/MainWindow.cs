@@ -113,7 +113,7 @@ public sealed class MainWindow : Window
             _plugin.ToggleTranslationUi();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("插件安装器里各插件介绍（简介/描述）的自动汉化——**基本不用管**：\n" +
+            ImGui.SetTooltip("插件安装器里各插件介绍（简介/描述）的自动汉化，基本不用管：\n" +
                              "启动约 10 秒自动扫缺口，有 Key 就后台静默补翻，插件更新后下次启动自动覆盖。\n点进来可看进度、手动补译、导出/导入翻译包。");
         Ui.SameLineIfFits(Ui.ButtonWidth("日志窗口"));
         if (ImGui.Button("日志窗口"))
