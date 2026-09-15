@@ -72,9 +72,10 @@ public sealed class SourceExtractService
     /// <summary> 提取结果子目录（产出的对照表放此处）。 </summary>
     public const string OutputDirName = "文案扫描";
 
-    /// <summary> 界面文案调用：ImGui.Xxx("…") / Im.Xxx("…") / ImRaii.Xxx("…") 等常见封装。 </summary>
+    /// <summary> 界面文案调用：ImGui.Xxx("…") / Im.Xxx("…") / ImRaii.Xxx("…") 等常见封装。
+    /// ⚠ `ImRaii2` 要显式列出（Craftimizer 的包装库叫这名，而 `ImRaii` 前缀后要求跟 `.`，匹配不到 `ImRaii2.`）。 </summary>
     private static readonly Regex CallRe = new(
-        @"\b(?:ImGui|ImGuiHelpers|ImRaii|Im|Luna)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(?:\$)?@?""((?:[^""\\]|\\.)*)""(?:\s*u8)?",
+        @"\b(?:ImGui|ImGuiHelpers|ImRaii2?|Im|Luna)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(?:\$)?@?""((?:[^""\\]|\\.)*)""(?:\s*u8)?",
         RegexOptions.Compiled);
 
     /// <summary> Dalamud 官方本地化：Loc.Localize("Key", "默认英文")，取第二个参数。 </summary>
@@ -91,6 +92,58 @@ public sealed class SourceExtractService
     private static readonly Regex StringLiteralRe = new(
         @"""((?:[^""\\]|\\.)*)""",
         RegexOptions.Compiled);
+
+    /// <summary>
+    /// **自定义封装函数**的文字实参：<c>DrawOption("Enable Synthesis Helper", …)</c>、
+    /// <c>TabItem("General")</c>、<c>ImGuiUtils.Tooltip("Open Settings")</c> 等。
+    ///
+    /// ⚠ 为什么必须加这条（2026-09-15 Craftimizer 血泪）：该插件的配置窗**几乎全部**文案都这么写——
+    ///   自定义封装 + **跨行调用**：
+    ///   <code>
+    ///   DrawOption(
+    ///       "Enable Synthesis Helper",
+    ///       "Adds a helper next to your synthesis window…",
+    ///       Config.EnableSynthHelper, …);
+    ///   </code>
+    ///   而它内部是用 <c>ImGui.Checkbox(label, …)</c> / <c>ImGui.InputText(label, …)</c> 画的——
+    ///   **替换层完全拦得到，但提取器一条也没采到**（函数名不是 `ImGui.*`、字符串又在下一行），
+    ///   结果整个界面全英文（用户实测截图）。实测该插件漏采 500+ 条（光 Settings.cs 就 245 条）。
+    /// </summary>
+    private static readonly Regex BareCallRe = new(
+        @"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(?:\$)?@?""((?:[^""\\]|\\.)*)""",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// **赋值式 / switch 表达式的字符串**：<c>=&gt; "Open a Window"</c>、<c>Name = "Foo Bar"</c>、
+    /// <c>{ "Key", "标签" }</c>、<c>new("标签", …)</c> 等。
+    ///
+    /// ⚠ 为什么需要（2026-09-15 Craftimizer 实测）：`"Open a Window"` 之类文案常写成
+    ///   <c>CopyType.OpenWindow =&gt; "Open a Window",</c>（switch 表达式返回值），**后面没有括号**，
+    ///   所以"函数调用式"的两条规则都抓不到，而它最终会被显示成下拉框的选项文字。
+    /// </summary>
+    private static readonly Regex AssignStringRe = new(
+        @"(?:=>|=\s*[^=]|,\s*|\(\s*|\[\s*)\s*(?:\$)?@?""((?:[^""\\]|\\.)*)""",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// 裸调用的**排除名单**：这些函数的字符串实参是路径/日志/异常消息等，不是界面文字
+    /// （采进来只会白耗机翻配额）。注意只对「裸标识符调用」生效——`ImGui.*` 那批由精确规则负责。
+    /// </summary>
+    private static readonly HashSet<string> NonUiCallNames = new(StringComparer.Ordinal)
+    {
+        "Path", "File", "Directory", "FileInfo", "DirectoryInfo", "FileStream", "StreamReader", "StreamWriter",
+        "Console", "Debug", "Log", "Logger", "Trace",
+        "string", "String", "Format", "Join", "Concat", "Equals", "Compare", "IsNullOrEmpty", "IsNullOrWhiteSpace",
+        "Exception", "ArgumentException", "ArgumentNullException", "InvalidOperationException", "NotImplementedException",
+        "Convert", "Enum", "Type", "Activator", "Guid", "Uri", "Regex", "Encoding",
+        "JsonSerializer", "Deserialize", "Serialize", "XmlSerializer", "JsonDocument", "Parse",
+        "Array", "Task", "Thread", "Process", "Environment", "Math", "DateTime", "TimeSpan", "Version", "Assembly",
+        "nameof", "throw", "new", "get", "set", "return", "if", "foreach", "while", "switch", "catch", "using", "lock",
+        "Marshal", "Interlocked", "BitConverter", "MemoryMarshal", "Unsafe",
+        "List", "Dictionary", "HashSet", "Queue", "Stack", "Comparer", "EqualityComparer", "Tuple",
+        "GetType", "ToString", "Contains", "StartsWith", "EndsWith", "IndexOf", "Substring", "Replace", "Split", "Trim",
+        "Add", "Remove", "Clear", "Insert", "TryGetValue", "ContainsKey", "ToList", "ToArray", "Any", "All", "Where", "Select",
+    };
 
     /// <summary> 判定「已汉化」的中文字符串条数下限（对已安装 DLL 与仓库源码通用）。 </summary>
     private const int BilingualZhThreshold = 50;
@@ -373,27 +426,40 @@ public sealed class SourceExtractService
             if (lower.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") ||
                 lower.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
                 continue;
-            string[] lines;
-            try { lines = File.ReadAllLines(file, Encoding.UTF8); } catch { continue; }
-            foreach (var line in lines)
+            string text;
+            try { text = File.ReadAllText(file, Encoding.UTF8); } catch { continue; }
+            // ⚠ **整文件匹配，不逐行**：跨行调用（`DrawOption(\n  "标签",\n …)`）极常见，
+            //   逐行看的话字符串在下一行、永远匹配不到（这正是 Craftimizer 漏采 500+ 条的根因之一）。
+            //   正则里的 `\s*` 本身能跨行，前提是把整段文本交给它。
             {
-                // 统计该行的中文字符串字面量（判断"源码级汉化"）
-                foreach (Match zm in StringLiteralRe.Matches(line))
+                // 统计中文字符串字面量（判断"源码级汉化"）
+                foreach (Match zm in StringLiteralRe.Matches(text))
                 {
                     var lit = Unescape(zm.Groups[1].Value).Trim();
                     if (lit.Length >= 2 && TextHeuristics.HasCjk(lit)) zhSeen.Add(lit);
                 }
-                foreach (Match m in CallRe.Matches(line))
+                // ① 精确规则：ImGui / ImGuiHelpers / ImRaii / Im / Luna 的调用（含 u8、Loc.Localize）
+                foreach (Match m in CallRe.Matches(text))
                 {
                     AddCandidate(strings, funcStats, m.Groups[1].Value, m.Groups[2].Value);
                 }
-                foreach (Match m in U8Re.Matches(line))
+                foreach (Match m in U8Re.Matches(text))
                 {
                     AddCandidate(strings, funcStats, m.Groups[1].Value, m.Groups[2].Value);
                 }
-                foreach (Match m in LocRe.Matches(line))
+                foreach (Match m in LocRe.Matches(text))
                 {
                     AddCandidate(strings, funcStats, "Localize", m.Groups[1].Value);
+                }
+                // ② 宽口径规则：自定义封装函数（裸标识符/.点号限定）的文字实参
+                foreach (Match m in BareCallRe.Matches(text))
+                {
+                    AddBareCandidate(strings, funcStats, m.Groups[1].Value, m.Groups[2].Value);
+                }
+                // ③ 赋值式 / switch 表达式（`=> "Open a Window"`、`Name = "Foo Bar"`）——没有括号，上面两条抓不到
+                foreach (Match m in AssignStringRe.Matches(text))
+                {
+                    AddBareCandidate(strings, funcStats, "赋值", m.Groups[1].Value);
                 }
             }
         }
@@ -417,6 +483,45 @@ public sealed class SourceExtractService
         if (s.Contains('{') || s.Contains('}')) return;
         strings.Add(s);
         funcStats[func] = funcStats.TryGetValue(func, out var c) ? c + 1 : 1;
+    }
+
+    /// <summary>
+    /// 宽口径候选：自定义封装函数的文字实参（`DrawOption("Enable Synthesis Helper", …)` 等）。
+    ///
+    /// ⚠ 与 <see cref="AddCandidate"/> 的区别与取舍（重要）：
+    ///   · 精确规则只认 `ImGui.Xxx("…")` 这类**已知绘制 API**，覆盖不了"插件自己包一层"的写法——
+    ///     而后者在成熟插件里极常见（Craftimizer 几乎全这么写），漏掉就是**整窗英文**。
+    ///   · 宽口径难免带上少量噪音（日志/异常消息等自然语言），但**多采基本无害**：
+    ///     替换是「按内容精确匹配」，界面没传这串就永远用不到，顶多多花一点机翻配额；
+    ///     而**漏采是致命的**（界面保持英文，用户直接看到）。故此处宁可多采。
+    ///   · 两道闸门仍然保留：① 函数名黑名单（路径/日志/异常等，见 <see cref="NonUiCallNames"/>）；
+    ///     ② **必须是「多词」文案**（含空格）—— 无空格的串多半是 ImGui ID / 键名 / 标识符
+    ///     （`table`/`stats`/`desc`/`col1` 这类，实测都是 ImRaii.Table 的 ID），误报率高；
+    ///     单词类标签（`None`/`Save`/`Import`）由精确规则（`ImGui.Button("Save")` 等）负责，不依赖此路。
+    /// </summary>
+    private static void AddBareCandidate(SortedSet<string> strings, Dictionary<string, int> funcStats, string func, string raw)
+    {
+        // 已由精确规则覆盖的限定名（ImGui.Xxx / ImRaii.Xxx …）跳过，避免同一串被采两次、统计被拆成两个键
+        if (func.StartsWith("ImGui", StringComparison.Ordinal) ||
+            func.StartsWith("ImRaii", StringComparison.Ordinal) ||
+            func.StartsWith("Luna", StringComparison.Ordinal))
+            return;
+        // 取最后一段做黑名单判定（Namespace.Class.Method → Method）
+        var simple = func;
+        var dot = func.LastIndexOf('.');
+        if (dot >= 0 && dot + 1 < func.Length) simple = func[(dot + 1)..];
+        if (NonUiCallNames.Contains(simple)) return;
+
+        var s = TextHeuristics.StripIdSuffix(Unescape(raw)).Trim();
+        if (!s.Contains(' ')) return;                   // 只收"多词"文案，见上方说明
+        if (s.Length < 2 || s.Length > 300) return;
+        if (TextHeuristics.HasCjk(s)) return;
+        if (TextHeuristics.IsKeyName(s)) return;
+        if (!TextHeuristics.HasAsciiLetter(s)) return;
+        if (s.Contains("://")) return;
+        if (s.Contains('{') || s.Contains('}')) return;
+        strings.Add(s);
+        funcStats[simple] = funcStats.TryGetValue(simple, out var c) ? c + 1 : 1;
     }
 
     private static string Unescape(string s)
