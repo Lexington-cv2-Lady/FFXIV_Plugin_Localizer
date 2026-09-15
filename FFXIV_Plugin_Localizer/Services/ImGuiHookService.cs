@@ -491,6 +491,14 @@ public sealed unsafe class ImGuiHookService : IDisposable
         Add("igTableHeader", bTh, a => bTh.Hook!.Original(Label(a, "igTableHeader")), _ => { });
         var bSa = new HookBox<WSliderFloat>();   // (label, float* vRad, float min, float max, fmt, flags) 同型
         Add("igSliderAngle", bSa, (a, b, c, d, e, f) => bSa.Hook!.Original(Label(a, "igSliderAngle"), b, c, d, e, f), _ => { });
+        // ── 纯 label 的按钮类（2026-09-15 补）：**参数里没有 ImVec2**，因此可以安全挂（与 igButton 不同）。
+        //    ⚠ `igButton`/`igSelectable_Bool` 含按值 ImVec2（实测反汇编确认），**永远不能**用托管委托挂；
+        //    但 `igSmallButton(label)` / `igTabItemButton(label, flags)` 只有字符串 + 整数，是安全的。
+        //    实测当前 5 个仓库都没用到，属"补全白名单"性质（将来有用到 SmallButton 的插件即可覆盖）。 ──
+        var bSb = new HookBox<W1>();
+        Add("igSmallButton", bSb, a => bSb.Hook!.Original(Label(a, "igSmallButton")), _ => { });
+        var bTib = new HookBox<W2u>();
+        Add("igTabItemButton", bTib, (a, b) => bTib.Hook!.Original(Label(a, "igTabItemButton"), b), _ => { });
         // ⚠ **不挂 igSetTooltip**：cimgui 对可变参数函数有独立的 `V` 后缀导出（igSetTooltipV），
         //    说明 `igSetTooltip` 是 varargs（`SetTooltip(const char* fmt, ...)`）。
         //    用固定签名委托挂 varargs → x64 调用方需预留 XMM 溢出区而托管封送不保证 →

@@ -202,13 +202,19 @@ public sealed class SourceExtractService
     ///   · `Begin` 的字符串是**窗口标题**（画在标题栏）——不翻；
     ///   · `BeginChild`/`BeginTable`/`BeginTabBar`/`PushID` 的字符串是 ImGui ID（不显示给用户），
     ///     提出来只会污染待翻清单（如 BTS 的 `BTSConfigTabs`/`SettingsConfigTable`）。
+    /// ⚠ **`Child`/`Table` 也在列**：包装库（如 Craftimizer 的 `ImRaii.Table("table", 3, …)`、
+    ///   `ImRaii.Child("macros", …)`）里，首参同样是**ImGui ID** 而非界面文字。实测 Craftimizer 的
+    ///   10 个表 ID（`table`/`stats`/`buffBars`/`params`…）曾被当成待翻译文案——**更危险的是真去替换它们**：
+    ///   翻译成中文会**改变 table 的内部 ID**，可能导致列宽/排序等状态错乱。必须排除。
     /// ⚠ 以下**不在**此列——它们的标签是**画出来的文字**，必须保留为候选：
     ///     `BeginTabItem`（标签页名）、`BeginCombo`/`BeginMenu`/`BeginPopupModal`（控件标签）、
-    ///     `TableSetupColumn`（**表头列名**，实测 TeleporterPlugin 的 `Alias`/`Aetheryte` 就是它）。
+    ///     `TableSetupColumn`（**表头列名**，实测 TeleporterPlugin 的 `Alias`/`Aetheryte` 就是它）、
+    ///     `GroupPanel`（其实现内部 `ImGui.TextUnformatted(name)` 把 name **画出来**，见 Craftimizer ImGuiUtils）。
     /// </summary>
     private static readonly HashSet<string> IdOnlyFuncs = new(StringComparer.OrdinalIgnoreCase)
     {
         "Begin", "BeginChild", "BeginTable", "BeginTabBar", "PushID",
+        "Child", "Table",          // 包装库形态（ImRaii.Table / ImRaii.Child）：首参 = ImGui ID
     };
 
     private readonly AppLog _appLog;
