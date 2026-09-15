@@ -525,7 +525,12 @@ public sealed class SourceExtractService
         // 勾选代理才走代理；未勾选则直连（部分网络环境可直连 GitHub）
         var proxy = _cfg.UseProxy ? _cfg.ProxyAddress : "";
 
-        var gitArgs = dir is not null && Directory.Exists(dir)
+        // ⚠ 不要写 `dir is not null &&`（2026-09-15 审查 L1 的真正根因）：
+        //   `Path.Combine` 有 `string?` 重载，一旦写这个空检查，编译器的流分析就把 `dir`
+        //   标记为 **maybe-null** → 后续 `File`/`Directory`/方法调用全部报 CS8620/CS8604。
+        //   而 `Path.Combine(string,string)` 在非 null 入参下**绝不可能返回 null** —— 这个检查本身多余。
+        //   删掉它，两个警告一并消失（不是靠 `!` 压制）。
+        var gitArgs = Directory.Exists(dir)
             ? new[] { "-C", dir, "pull", "--ff-only" }                                  // 已克隆过 → 更新
             : new[] { "clone", "--depth", "1", repoUrl, dir };                          // 首次 → 浅克隆
         var (code, output) = await RunGitAsync(gitArgs, proxy);
