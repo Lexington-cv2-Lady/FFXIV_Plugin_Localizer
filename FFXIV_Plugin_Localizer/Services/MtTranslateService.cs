@@ -387,7 +387,10 @@ public sealed class MtTranslateService
             Status = $"翻译中 {doneNow}/{total0} 条（本批 {take} 条 / {chars} 字符）…";
             try
             {
-                var got = await TranslateBatch(batch, token);
+                // ⚠ **失败自动拆批重试**（2026-09-15 实测事故）：有一批 80 条因 AI **把输入原样回显**
+                //   （zh 全空）→ 解析失败 → **整批 80 条真文案全丢**。单次失败常与「批次过大/内容同质」
+                //   有关，**对半拆开再试通常就过了**；拆到单条仍失败才放弃（最多损失 1 条而非几十条）。
+                var got = await TranslateBatchWithSplit(batch, token);
                 // ⚠ **每批完成立即落盘**（2026-09-15 改进）：原实现把全部批次结果攒在内存、**最后才 merge**，
                 //   于是中途崩溃 / 强退游戏 → 整轮成果**全丢**（用户看不到任何文件）。
                 //   改为每批即写：最多损失"正在飞的这一批"，且进度条上的数字是**真实已落盘**的条数。
@@ -447,6 +450,47 @@ public sealed class MtTranslateService
     /// （实测 40 条失败 30 条）；成对数组里原文是 JSON 的**值**，序列化天然安全。
     /// 发送 <c>[{原文:"...",译文:""}]</c>，要求 AI 只回填译文，按**下标**对应回原文（不依赖 AI 复述原文）。
     /// </summary>
+    /// <summary>
+    /// **带拆批重试的批次翻译**：整批失败时对半拆分再试，直到单条。
+    ///
+    /// ⚠ 为什么需要（2026-09-15 实测）：有一批 80 条 AI 把输入**原样回显**（zh 全空）→ 解析失败
+    ///   → **整批 80 条真文案全丢**。这类失败常与“批次过大 / 内容过于同质”有关，
+    ///   对半拆开往往就正常了。拆到单条仍失败才真正放弃（最多损失 1 条）。
+    /// 取消（用户点停止）不在此处吞掉，直接向上抛给主循环处理。
+    /// </summary>
+    private async Task<Dictionary<string, string>> TranslateBatchWithSplit(
+        Dictionary<string, string> batch, CancellationToken token, int depth = 0)
+    {
+        try
+        {
+            return await TranslateBatch(batch, token);
+        }
+        catch (OperationCanceledException) { throw; }   // 用户主动停止：不重试
+        catch (Exception ex) when (batch.Count > 1 && depth < 8)
+        {
+            var keys = batch.Keys.ToList();
+            var half = keys.Count / 2;
+            var a = keys.Take(half).ToDictionary(k => k, _ => "", StringComparer.Ordinal);
+            var b = keys.Skip(half).ToDictionary(k => k, _ => "", StringComparer.Ordinal);
+            _appLog.Warn($"[机翻] 一批 {batch.Count} 条失败（{Truncate(ex.Message, 80)}）——拆成 {a.Count}+{b.Count} 条重试");
+            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var part in new[] { a, b })
+            {
+                try
+                {
+                    foreach (var (k, v) in await TranslateBatchWithSplit(part, token, depth + 1)) result[k] = v;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex2)
+                {
+                    _appLog.Warn($"[机翻] 拆出的 {part.Count} 条仍失败：{Truncate(ex2.Message, 80)}");
+                }
+                try { await Task.Delay(400, token); } catch (OperationCanceledException) { throw; }
+            }
+            return result;
+        }
+    }
+
     private async Task<Dictionary<string, string>> TranslateBatch(Dictionary<string, string> batch, CancellationToken token = default)
     {
         var (baseUrl, model) = ResolveEndpoint(_cfg);
