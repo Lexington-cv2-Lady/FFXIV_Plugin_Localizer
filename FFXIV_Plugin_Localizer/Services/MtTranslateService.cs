@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -80,10 +81,46 @@ public sealed class MtTranslateService
         var (url, model) = ResolveEndpoint(cfg);
         var m = (model ?? "").ToLowerInvariant();
         var b = (url ?? "").ToLowerInvariant();
-        if (b.Contains("deepseek") || m.Contains("deepseek")) return 384000;
-        if (b.Contains("bigmodel") || b.Contains("moonshot")) return 64000;   // 智谱/Kimi：思考链吃 token，放宽
-        if (b.Contains("dashscope") || b.Contains("aliyuncs")) return 32000;
-        return 16384;
+        // ⚠ 这些值是**保守估计**，不是权威值：2026-09-15 实测智谱 glm-4-flash-250414 的真实上限是
+        //   **16384**（旧项目写的 64000 是错的，照抄导致每批 400、全部翻译失败）。
+        //   故这里一律取"不会出错"的档位，并配 EffectiveMaxTokens + ParseMaxTokensCap 自愈：
+        //   万一某平台更小，第一次被拒后会自动降到它允许的值重试。
+        if (b.Contains("deepseek") || m.Contains("deepseek")) return 8192;    // DeepSeek 上限高，但小值足够
+        if (b.Contains("bigmodel") || m.Contains("bigmodel") || b.Contains("moonshot")) return 16384; // 智谱实测上限
+        if (b.Contains("dashscope") || b.Contains("aliyuncs")) return 8192;
+        return 4096;                                                          // 其它平台保守值
+    }
+
+    /// <summary> 运行中**学到的** max_tokens 上限（按端点 host 记）。被拒过一次后收敛到平台允许值。 </summary>
+    private static readonly Dictionary<string, long> _maxTokensLearned = new(StringComparer.OrdinalIgnoreCase);
+
+    private static string HostKey(string baseUrl)
+    {
+        try { return new Uri(baseUrl).Host; } catch { return baseUrl ?? ""; }
+    }
+
+    /// <summary> 实际使用的 max_tokens：取"按平台估算值"与"学到的上限"中较小者。 </summary>
+    private static long EffectiveMaxTokens(Configuration cfg, string baseUrl)
+    {
+        var want = MaxTokensForModel(cfg);
+        if (_maxTokensLearned.TryGetValue(HostKey(baseUrl), out var cap) && cap > 0 && cap < want) return cap;
+        return want;
+    }
+
+    /// <summary>
+    /// 从平台报错里解析它允许的 max_tokens 上限，如智谱返回
+    /// <c>max_tokens参数非法：限制数值范围[1,16384]</c> → 16384。
+    /// 目的是**自愈**：任何平台的上限写错，最多只浪费一次请求就能自动纠正。
+    /// </summary>
+    private static long ParseMaxTokensCap(string errorBody)
+    {
+        try
+        {
+            var m = Regex.Match(errorBody, @"\[\s*\d+\s*,\s*(\d{2,9})\s*\]");
+            if (m.Success && long.TryParse(m.Groups[1].Value, out var cap) && cap > 0) return cap;
+        }
+        catch { /* 解析失败则返回 0，走原错误路径 */ }
+        return 0;
     }
 
     /// <summary>
@@ -407,34 +444,58 @@ public sealed class MtTranslateService
             }
         }
 
-        var payload = JsonSerializer.Serialize(new
+        // 组装并发送；若平台拒了 max_tokens，**自动学习其上限后重试一次**（见下方自愈逻辑）
+        var attempt = 0;
+        JsonDocument json;
+        while (true)
         {
-            model,
-            temperature = Math.Clamp(_cfg.AiTemperature, 0f, 2f),
-            // ⚠ **必须显式给 max_tokens**（搬自旧项目）：不传就用平台默认值，批量稍大时
-            //    返回会被**中途截断** → JSON 不完整 → 整批解析失败（表现为"总有一批翻不出来"）。
-            //    各平台上限差异很大，按平台给安全值。
-            max_tokens = MaxTokensForModel(_cfg),
-            messages = new[]
+            attempt++;
+            var payload = JsonSerializer.Serialize(new
             {
-                new { role = "system", content = system },
-                new { role = "user", content = userJson }
-            }
-        });
+                model,
+                temperature = Math.Clamp(_cfg.AiTemperature, 0f, 2f),
+                // ⚠ **必须显式给 max_tokens**（搬自旧项目）：不传就用平台默认值，批量稍大时
+                //    返回会被**中途截断** → JSON 不完整 → 整批解析失败（表现为"总有一批翻不出来"）。
+                //    各平台上限差异很大，按平台给安全值；被拒过一次后按学到的上限收敛。
+                max_tokens = EffectiveMaxTokens(_cfg, baseUrl),
+                messages = new[]
+                {
+                    new { role = "system", content = system },
+                    new { role = "user", content = userJson }
+                }
+            });
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, baseUrl.TrimEnd('/') + "/chat/completions");
-        req.Headers.Add("Authorization", "Bearer " + GetApiKey(_cfg).Trim());
-        req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
-        // ⚠ 把 token 传进 SendAsync（对齐旧项目做法）：点「停止翻译」时**在飞的请求也会被立即中断**，
-        //    而不是傻等它自然返回（本机 HttpClient 超时是 90 秒，用户会以为按钮没反应）。
-        using var resp = await _http.SendAsync(req, token);
-        var body = await resp.Content.ReadAsStringAsync(token);
-        if (!resp.IsSuccessStatusCode)
-        {
-            throw new Exception($"HTTP {(int)resp.StatusCode}：{Truncate(body, 200)}");
+            using var req = new HttpRequestMessage(HttpMethod.Post, baseUrl.TrimEnd('/') + "/chat/completions");
+            req.Headers.Add("Authorization", "Bearer " + GetApiKey(_cfg).Trim());
+            req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+            // ⚠ 把 token 传进 SendAsync（对齐旧项目做法）：点「停止翻译」时**在飞的请求也会被立即中断**，
+            //    而不是傻等它自然返回（本机 HttpClient 超时是 90 秒，用户会以为按钮没反应）。
+            using var resp = await _http.SendAsync(req, token);
+            var bodyText = await resp.Content.ReadAsStringAsync(token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                // ⚠ **自愈：max_tokens 被平台拒绝（2026-09-15 实测智谱 400「限制数值范围[1,16384]」）**
+                //    我那批"按平台写死的上限"常量是照抄旧项目的，与平台实际限制不符 → **每一批都 400、全部白跑**。
+                //    只改数字仍会重蹈覆辙（换平台/换模型又可能不对），故改为：**解析平台自报的合法范围、
+                //    记下来并立即用正确值重试本批**。这样任何平台的上限写错最多只浪费一次请求。
+                if (attempt == 1 && (int)resp.StatusCode == 400 &&
+                    bodyText.Contains("max_tokens", StringComparison.OrdinalIgnoreCase))
+                {
+                    var cap = ParseMaxTokensCap(bodyText);
+                    if (cap > 0)
+                    {
+                        _maxTokensLearned[HostKey(baseUrl)] = cap;
+                        _appLog.Warn($"[机翻] 平台拒绝 max_tokens（{Truncate(bodyText, 120)}）——" +
+                                     $"已自动下调到 {cap} 并重试本批");
+                        continue;
+                    }
+                }
+                throw new Exception($"HTTP {(int)resp.StatusCode}：{Truncate(bodyText, 200)}");
+            }
+            json = JsonDocument.Parse(bodyText);
+            break;
         }
 
-        var json = JsonDocument.Parse(body);
         var message = json.RootElement
             .GetProperty("choices")[0]
             .GetProperty("message");
