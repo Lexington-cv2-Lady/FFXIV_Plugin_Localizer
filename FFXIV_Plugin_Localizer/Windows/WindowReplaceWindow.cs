@@ -117,6 +117,34 @@ public sealed class WindowReplaceWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("用本项目词典（我的翻译.json 等）给所有插件的候选套用已有译文——**不调 AI、零成本**。\n已翻译过的不动；命中才填，剩下的再交给「一键翻译」。\n建议每次翻新插件都先点它。");
 
+        Ui.SameLineIfFits(Ui.ButtonWidth("确认用词典刷新"));
+        {
+            // ⚠ 二次确认：这个操作**会覆盖已翻译的条目**，包括你手动改过的那些
+            //   （无法区分"AI 翻的"与"手改的"——两者在同一个译文表里）。
+            //   "词典优先"正是本功能的目的，但必须让用户明确知道代价。
+            var armedDict = _restoreArmedUntil.TryGetValue("refresh::__DICT__", out var untilDict) && DateTime.Now < untilDict;
+            if (armedDict) Ui.PushAccent();
+            if (ImGui.Button(armedDict ? "确认用词典刷新" : "用词典刷新译文"))
+            {
+                if (armedDict)
+                {
+                    _restoreArmedUntil.Remove("refresh::__DICT__");
+                    RefreshAllWithDict();
+                }
+                else
+                {
+                    _restoreArmedUntil["refresh::__DICT__"] = DateTime.Now.AddSeconds(3);
+                    _summary = "⚠ 此操作会把词典译文**覆盖到已翻条目上**（含你手改过的）。3 秒内再点一次确认。";
+                }
+            }
+            if (armedDict) Ui.PopAccent();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("把词典里的译文覆盖到**已经翻过的**条目上——改词典后一键生效，不必重新机翻。\n" +
+                             "补的是这个死角：某条被 AI 翻错后，光改词典修不好它（预翻译只补缺口）。\n" +
+                             "⚠ **会覆盖已翻条目，包括你手动改过的**（无法区分二者——它们在同一张表里）。\n" +
+                             "词典里没有的条目一律不动；想只重翻某插件可先「还原英文」它。");
+
         ImGui.Spacing();
 
         // ── ② 目录与维护（带边框分组，收起视觉噪音）──
@@ -355,6 +383,55 @@ public sealed class WindowReplaceWindow : Window
         }
         _summary = $"全部预翻译完成：{plugins.Count} 个插件共命中 {totalHit} 条（剩余 {totalLeft} 条待机翻）。";
         _plugin.AppLog.Info($"[预翻译] {_summary}");
+    }
+
+    /// <summary>
+    /// **用词典刷新译文**：把词典里的译文**覆盖到已翻译的条目**上。
+    ///
+    /// 补的死角（2026-09-15 发现）：某条被 AI 翻错后，即使改进词典也修不好它——
+    /// 「全部预翻译」只作用于缺口、合并又跳过已有键 → 只能「还原英文」全删重来。
+    /// 本操作让**词典（人工维护、权威）覆盖 AI 产出**，改词典后一键生效，不必重翻。
+    /// 只覆盖"词典里有且值不同"的条目，其余（含你手动编辑过的）一律不动。
+    /// </summary>
+    private void RefreshAllWithDict()
+    {
+        try
+        {
+            if (!_plugin.OldDict.Loaded)
+            {
+                _summary = $"本项目词典为空（{_plugin.Configuration.DictDir}）——先在「我的翻译.json」里写好译文再刷新。";
+                return;
+            }
+            var totalUpdated = 0;
+            var totalAdded = 0;
+            var affected = 0;
+            foreach (var (name, _, _) in _replacement.GetWindowPlugins())
+            {
+                var (translated, _) = _replacement.GetWindowEntries(name);
+                var updates = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var (en, cur) in translated)
+                {
+                    if (!_plugin.OldDict.TryGet(en, out var zh)) continue;   // 词典没这条 → 不动
+                    if (string.Equals(zh, cur, StringComparison.Ordinal)) continue; // 值一样 → 不动
+                    updates[en] = zh;
+                }
+                if (updates.Count == 0) continue;
+                var (u, a) = _replacement.OverwriteWindowEntries(name, updates);
+                if (u + a > 0) affected++;
+                totalUpdated += u;
+                totalAdded += a;
+                Invalidate(name);
+            }
+            _summary = totalUpdated + totalAdded > 0
+                ? $"已用词典刷新 {affected} 个插件：更新 {totalUpdated} 条、新增 {totalAdded} 条（其余条目未改动）。"
+                : "没有需要刷新的条目（词典与现有译文一致，或词典里没有这些文案）。";
+            _plugin.AppLog.Info($"[预翻译] 用词典刷新：{affected} 个插件，更新 {totalUpdated}，新增 {totalAdded}");
+        }
+        catch (Exception ex)
+        {
+            _summary = "刷新失败：" + ex.Message;
+            _plugin.AppLog.Error("[预翻译] 用词典刷新失败：" + ex.Message);
+        }
     }
 
     /// <summary>

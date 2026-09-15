@@ -867,6 +867,54 @@ public sealed unsafe class ReplacementService
         return added;
     }
 
+    /// <summary>
+    /// **用词典覆盖已有译文**（`WindowReplaceWindow` 的「用词典刷新译文」）。
+    ///
+    /// ⚠ 与 <see cref="MergeWindowEntries"/> 的关键区别：那个**只补空缺**（避免机翻覆盖用户编辑），
+    ///   这个**主动覆盖已存在的条目**——因为存在这样一个死角（2026-09-15 发现）：
+    ///   某条被 AI 翻错后，即使你改进词典，`Prefill` 只作用于缺口、合并又跳过已有键
+    ///   → **词典永远修不好它**，只能「还原英文」全删重来（代价极大）。
+    ///   本方法让词典（人工维护，权威）能覆盖 AI 产出（尽力而为）。
+    ///
+    /// 仍然尊重更高优先级来源：`ApplyOneWindowEntry` 内部对 wiki/安装器表已有的键会让位
+    /// （那两者在 RebuildMerged 时优先级本就更高），所以覆盖不会破坏优先级链。
+    ///
+    /// ⚠ **会覆盖"手动编辑过的"条目**——译文表里无法区分"AI 翻的"与"手改的"，这是本操作的
+    ///   已知代价（"词典优先"正是它的目的）。故窗口侧做了 3 秒二次确认并在提示里写明。
+    /// 返回（更新条数, 新增条数）。
+    /// </summary>
+    public (int Updated, int Added) OverwriteWindowEntries(string plugin, Dictionary<string, string> translations)
+    {
+        var updated = 0;
+        var added = 0;
+        lock (_lock)
+        {
+            if (!_windowSources.TryGetValue(plugin, out var table))
+                _windowSources[plugin] = table = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (en, zh) in translations)
+            {
+                var key = en.Trim();
+                var val = (zh ?? "").Trim();
+                if (key.Length < 2 || val.Length == 0) continue;
+                if (table.TryGetValue(key, out var cur))
+                {
+                    if (cur == val) continue;          // 值相同，不算更新
+                    table[key] = val;
+                    ApplyOneWindowEntry(key, val);
+                    updated++;
+                }
+                else
+                {
+                    table[key] = val;
+                    ApplyOneWindowEntry(key, val);
+                    added++;
+                }
+            }
+            if (updated + added > 0) WriteWindowFile(plugin, table);
+        }
+        return (updated, added);
+    }
+
     /// <summary> 设置/删除（中文空 = 删）某插件窗口表的单条，写文件 + 重建。 </summary>
     public void SetWindowEntry(string plugin, string en, string zh)
     {
