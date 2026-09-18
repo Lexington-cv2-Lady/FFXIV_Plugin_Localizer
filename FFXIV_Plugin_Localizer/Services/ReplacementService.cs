@@ -413,9 +413,8 @@ public sealed unsafe class ReplacementService
         return ptr;
     }
 
-    /// <summary> 增量更新单条窗口译文（避免写入时全量重建）。调用方须持有 _lock。 </summary>
     /// <summary>
-    /// 增量写入单条窗口译文。
+    /// 增量更新单条窗口译文（避免写入时全量重建）。调用方须持有 _lock。
     /// ⚠ 语义必须与全量重建的 <see cref="AddMerged"/> 一致（2026-09-15 代码审查 M2）：
     ///   全量走 "先写入者优先"（`_table.ContainsKey` 命中即跳过，由 RebuildMerged 的
     ///   wiki → 安装器表 → 窗口表 顺序决定优先级）；此处原为 "后写入覆盖" → 同一英文跨来源冲突时，
