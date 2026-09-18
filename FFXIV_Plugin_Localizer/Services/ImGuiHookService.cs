@@ -629,17 +629,31 @@ public sealed unsafe class ImGuiHookService : IDisposable
 
     public void Dispose()
     {
-        try { _textHook?.Dispose(); } catch { }
-        try { _textExHook?.Dispose(); } catch { }
-        try { _beginDbgHook?.Dispose(); } catch { }
+        // ⚠ 2026-09-18 全面审查：原为**全空 catch**。这里失败意味着**游戏进程里仍留着我们的补丁**，
+        //   而插件已卸载 → 补丁会调用已卸载插件的代码路径（崩溃来源），且用户毫无线索。
+        //   钩子释放失败必须留日志（不抛，尽最大努力卸载其余钩子）。
+        TryDisposeHook(_textHook, "Text");
+        TryDisposeHook(_textExHook, "TextEx");
+        TryDisposeHook(_beginDbgHook, "BeginDebug");
         _beginDbgHook = null;
-        foreach (var h in _widgetHooks)
-        {
-            try { h.Dispose(); } catch { }
-        }
+        foreach (var h in _widgetHooks) TryDisposeHook(h, "Widget");
         _widgetHooks.Clear();
         _textHook = null;
         _textExHook = null;
         Hooked = false;
+    }
+
+    /// <summary> 释放单个钩子；失败时记日志（含钩子类别），不让一个失败阻断其余卸载。 </summary>
+    private void TryDisposeHook(IDisposable? hook, string kind)
+    {
+        if (hook == null) return;
+        try
+        {
+            hook.Dispose();
+        }
+        catch (Exception ex)
+        {
+            _appLog.Error($"[钩子] {kind} 钩子释放失败（该补丁可能仍留在游戏进程内）：" + ex.Message);
+        }
     }
 }

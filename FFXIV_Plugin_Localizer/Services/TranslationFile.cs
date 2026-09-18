@@ -49,11 +49,38 @@ public static class TranslationFile
         }
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        File.WriteAllText(path, JsonSerializer.Serialize(doc, Options), Encoding.UTF8);
+        WriteAtomic(path, JsonSerializer.Serialize(doc, Options));
     }
 
-    /// <summary> 读取（兼容成对数组 / 纯字典 / 裸数组三种格式）；文件不存在或损坏返回空表。 </summary>
-    public static Dictionary<string, string> Load(string path)
+    /// <summary>
+    /// **原子落盘**：先写同目录临时文件，再 `File.Move` 覆盖（同卷 rename 是原子操作）。
+    /// ⚠ 2026-09-18 全面审查（**中高**）：原直接 `File.WriteAllText` 覆盖——
+    ///   这类文件是用户的**心血**（「我的翻译.json」与每个插件的窗口表，可能上万条人工/机翻结果）。
+    ///   若正好在写入中途游戏崩溃/断电，文件会被截断成**半截 JSON**；
+    ///   而读取端 `Load` 解析失败时**返回空表**，等于用户全部译文瞬间归零（本项目已发生过一次真实数据事故）。
+    ///   改为原子替换后，任何时刻磁盘上的文件要么是**完整的旧版本**、要么是**完整的新版本**，不存在半截态。
+    /// </summary>
+    private static void WriteAtomic(string path, string content)
+    {
+        var tmp = path + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, content, Encoding.UTF8);
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally
+        {
+            // 若 Move 失败（如被杀软短暂占用），清理临时文件，避免目录里堆 .tmp 垃圾
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* 清理失败无所谓 */ }
+        }
+    }
+
+    /// <summary> 读取（兼容成对数组 / 纯字典 / 裸数组三种格式）；文件不存在返回空表。 </summary>
+    /// <param name="onError">
+    /// 解析失败时回调（传入异常信息）。⚠ 2026-09-18 全面审查：原来**静默吞掉**解析异常并返回空表，
+    /// 用户看到的现象是「译文全没了」，却查不到任何线索。译文文件是用户心血，损坏必须留下日志。
+    /// </param>
+    public static Dictionary<string, string> Load(string path, Action<string>? onError = null)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         if (!File.Exists(path)) return result;
@@ -61,9 +88,10 @@ public static class TranslationFile
         {
             ReadInto(result, File.ReadAllText(path));
         }
-        catch
+        catch (Exception ex)
         {
-            /* 损坏则返回已解析部分 */
+            // 唯一能保留的线索就是异常本身；返回已解析部分（JSON 数组可部分解析成功）
+            onError?.Invoke($"译文文件解析失败（{Path.GetFileName(path)}）：{ex.Message}");
         }
         return result;
     }

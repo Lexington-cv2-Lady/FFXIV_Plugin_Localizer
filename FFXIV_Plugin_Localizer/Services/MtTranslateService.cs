@@ -49,6 +49,12 @@ public sealed class MtTranslateService
     /// <summary> 当前任务的取消源（「停止翻译」用）。null = 没有任务在跑。 </summary>
     private volatile CancellationTokenSource? _cts;
 
+    /// <summary> 当前后台任务的句柄（供 `Dispose` **等待它真正退出**，见该方法说明）。 </summary>
+    private volatile Task? _task;
+
+    /// <summary> 已卸载：此后不再启动新任务（见 `Dispose`）。 </summary>
+    private volatile bool _disposed;
+
     /// <summary> 进度/结果描述（窗口轮询显示）。 </summary>
     public string Status { get; private set; } = "";
 
@@ -165,7 +171,7 @@ public sealed class MtTranslateService
     /// <summary> 启动后台翻译任务：安装器介绍缺口（同一时间只允许一个翻译任务）。 </summary>
     public void Start()
     {
-        if (Running) return;
+        if (_disposed || Running) return;
         if (string.IsNullOrWhiteSpace(GetApiKey(_cfg)))
         {
             Status = "请先在「AI 设置」填写当前服务商的 API Key";
@@ -176,7 +182,7 @@ public sealed class MtTranslateService
         Status = "正在扫描缺失文案…";
         var cts = new CancellationTokenSource();
         _cts = cts;
-        _ = Task.Run(async () =>
+        _task = Task.Run(async () =>
         {
             try
             {
@@ -204,7 +210,7 @@ public sealed class MtTranslateService
     /// <summary> 后台翻译某插件的窗口文字缺口（结果并入该插件窗口表）。 </summary>
     public void StartWindowPlugin(string plugin)
     {
-        if (Running) return;
+        if (_disposed || Running) return;
         if (string.IsNullOrWhiteSpace(GetApiKey(_cfg)))
         {
             Status = "请先在「AI 设置」填写当前服务商的 API Key";
@@ -215,7 +221,7 @@ public sealed class MtTranslateService
         Status = $"[{plugin}] 正在读取缺口…";
         var cts = new CancellationTokenSource();
         _cts = cts;
-        _ = Task.Run(async () =>
+        _task = Task.Run(async () =>
         {
             try
             {
@@ -247,7 +253,7 @@ public sealed class MtTranslateService
     /// </summary>
     public void StartAllWindowPlugins()
     {
-        if (Running) return;
+        if (_disposed || Running) return;
         if (string.IsNullOrWhiteSpace(GetApiKey(_cfg)))
         {
             Status = "请先在「AI 设置」填写当前服务商的 API Key";
@@ -258,7 +264,7 @@ public sealed class MtTranslateService
         Status = "正在汇总各插件的缺口…";
         var cts = new CancellationTokenSource();
         _cts = cts;
-        _ = Task.Run(async () =>
+        _task = Task.Run(async () =>
         {
             try
             {
@@ -341,7 +347,14 @@ public sealed class MtTranslateService
     /// 否则卸载后后台任务仍会继续跑并向已失效的服务里写数据。 </summary>
     public void Dispose()
     {
+        _disposed = true;
         try { _cts?.Cancel(); } catch { /* 已释放则忽略 */ }
+        // ⚠ 2026-09-18 全面审查（**中高**）：原实现**只 Cancel、不等它退出**。而 `Plugin.Dispose`
+        //   紧接着就调 `Replacement.Dispose()`（清空并释放全部表与中文指针）——后台任务此刻可能正停在
+        //   `await` 之后，醒来继续 `MergeTranslations` → **写入已 Dispose 的服务**（重则把新指针塞进
+        //   已清空的弃用区 → 永不释放的泄漏）。这里等它退出：token 已取消，在飞的请求会立刻抛
+        //   OperationCanceledException，正常几十毫秒内结束；最多等 2 秒以免卡住卸载流程。
+        try { _task?.Wait(TimeSpan.FromSeconds(2)); } catch { /* 任务自身异常与卸载无关 */ }
         // ⚠ 2026-09-18 全面审查⑩（**中**）：`_http` 原先**从不释放** → 每次插件重载泄漏一个 HttpClient
         //   及其 handler/Socket 池（对频繁重载插件的用户是可累积的句柄/内存泄漏）。
         try { _http.Dispose(); } catch { /* 忽略 */ }

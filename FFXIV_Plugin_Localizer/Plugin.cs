@@ -234,12 +234,14 @@ public sealed class Plugin : IDalamudPlugin
     {
         try
         {
-            var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "XIVLauncherCN", "dalamudConfig.json");
-            if (!File.Exists(path))
+            // ⚠ 2026-09-18 全面审查：原**硬编码 `XIVLauncherCN`**——国际服（`XIVLauncher`）用户
+            //   永远读不到仓库配置，主窗口就一直显示"未找到"，第三方仓库列表始终为空。
+            //   改为按候选顺序探测，且优先用「插件自身配置目录的上两级」推断（与 LogWindow 导日志同款，
+            //   天然兼容任何启动器目录名 / 自定义安装位置），探测不到再退回按名遍历。
+            var path = ResolveDalamudConfigPath();
+            if (path == null)
             {
-                AppLog.Warn("[仓库] 未找到卫月配置：" + path);
+                AppLog.Warn("[仓库] 未找到 dalamudConfig.json（已探测国服/国际服与插件配置上级目录）");
                 return;
             }
             var jobj = JObject.Parse(File.ReadAllText(path));
@@ -261,6 +263,41 @@ public sealed class Plugin : IDalamudPlugin
         {
             AppLog.Warn("[仓库] 读取卫月仓库配置失败：" + ex.Message);
         }
+    }
+
+    /// <summary>
+    /// 定位 <c>dalamudConfig.json</c>。返回 <c>null</c> 表示都没找到。
+    /// **绝不创建文件**，仅只读探测。顺序：①插件配置目录上两级（最可靠，兼容自定义启动器目录名）
+    /// ②Roaming 下常见启动器目录名（国服 `XIVLauncherCN` / 国际服 `XIVLauncher`）。
+    /// </summary>
+    private static string? ResolveDalamudConfigPath()
+    {
+        // ① 插件配置目录形如 …/{启动器}/{pluginConfigs}/{插件} → 上两级就是启动器目录
+        try
+        {
+            var cfgDir = PluginInterface.GetPluginConfigDirectory();
+            var launcher = Directory.GetParent(Directory.GetParent(cfgDir)?.FullName ?? "")?.FullName;
+            if (!string.IsNullOrEmpty(launcher))
+            {
+                var p = Path.Combine(launcher, "dalamudConfig.json");
+                if (File.Exists(p)) return p;
+            }
+        }
+        catch { /* 推断失败就走 ② */ }
+
+        // ② 按启动器目录名遍历（含国际服）
+        foreach (var name in new[] { "XIVLauncherCN", "XIVLauncher" })
+        {
+            try
+            {
+                var p = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    name, "dalamudConfig.json");
+                if (File.Exists(p)) return p;
+            }
+            catch { /* 换下一个 */ }
+        }
+        return null;
     }
 
     /// <summary>

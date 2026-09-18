@@ -56,7 +56,14 @@ public sealed unsafe class ReplacementService
     private readonly Dictionary<string, nint> _idPtrs = new(StringComparer.Ordinal);
     /// <summary> 首尾带空白的完整串 → 保留空白的中文指针（键是**原始完整串**，中文里保留原空白）。 </summary>
     private readonly Dictionary<string, nint> _wsPtrs = new(StringComparer.Ordinal);
-    private readonly List<nint> _graveyard = new();                            // 已弃用的中文指针（仅 Dispose 释放，避免渲染线程 use-after-free）
+    // 已弃用的中文指针 → 弃用时刻（`Environment.TickCount64`，毫秒）。
+    // ⚠ 2026-09-18 全面审查（**中**）：原为裸 `List<nint>` 且**只在 Dispose 释放**——
+    //   指针是「只进不出」的。每次编辑译文 / 机翻每批 / 词典刷新都会 `RebuildMerged`，
+    //   一次就把全表指针（wiki 启用时 6 万+）倒进弃用区；长时间开着游戏反复编辑就会**无界增长**
+    //   （6 万条 × 8B ≈ 0.5MB／次，几十次就几十 MB，且永不归还）。
+    //   现在改为带时间戳：渲染线程**只可能在"当帧"使用**某个文字指针，弃用超过 10 秒的
+    //   绝无可能仍被引用，可由 `ReclaimGraveyard()` 安全回收（纯指针不含托管对象，无 GC 语义问题）。
+    private readonly List<(nint Ptr, long Ms)> _graveyard = new();
     // ④ 前缀模板候选（动态插值文案，2026-09-18）：按首字节索引 → 模板前缀列表。
     //    CharacterSync 的 $"The logged in character is {name} on {world}(...)" 这类 C# 插值串
     //    运行时拼出完整串（角色名/服务器/ID 是变量），整串哈希永远不命中；
@@ -81,9 +88,9 @@ public sealed unsafe class ReplacementService
     /// <summary> 使「依赖 _table 内容的派生缓存」失效（审查①）。 </summary>
     private void InvalidateDerivedCaches()
     {
-        foreach (var ptr in _idPtrs.Values) _graveyard.Add(ptr);
+        foreach (var ptr in _idPtrs.Values) Retire(ptr);
         _idPtrs.Clear();
-        foreach (var ptr in _wsPtrs.Values) _graveyard.Add(ptr);
+        foreach (var ptr in _wsPtrs.Values) Retire(ptr);
         _wsPtrs.Clear();
         _prefixDirty = true;
     }
@@ -110,11 +117,11 @@ public sealed unsafe class ReplacementService
         {
             _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             _hashes = new HashSet<ulong>();
-            foreach (var ptr in _ptrs.Values) _graveyard.Add(ptr);
+            foreach (var ptr in _ptrs.Values) Retire(ptr);
             _ptrs.Clear();
-            foreach (var ptr in _idPtrs.Values) _graveyard.Add(ptr);
+            foreach (var ptr in _idPtrs.Values) Retire(ptr);
             _idPtrs.Clear();
-            foreach (var ptr in _wsPtrs.Values) _graveyard.Add(ptr);
+            foreach (var ptr in _wsPtrs.Values) Retire(ptr);
             _wsPtrs.Clear();
             _prefixIndex = new();
         }
@@ -239,11 +246,20 @@ public sealed unsafe class ReplacementService
         try
         {
             var path = TablePath;
-            var data = TranslationFile.Load(path);
-            if (data.Count == 0) return;
+            var data = TranslationFile.Load(path, msg => _appLog.Error("[替换] " + msg));
+            // ⚠ 2026-09-18 全面审查（**中**）：原为 `if (data.Count == 0) return;`——
+            //   于是 `Reload()`（用户点「重新载入」）时，若对照表文件已被删除/清空/损坏，
+            //   内存里的旧表**不会清掉**：用户以为"删了文件就没了"，界面却仍显示中文。
+            //   与 `LoadWindowTables` 的行为（先清空再按磁盘重建）不一致，属遗漏。
+            //   现在统一语义：**磁盘是什么就是什么**。文件不存在 → 空表（本来就该没有译文）。
+            //   安全性：写入已是原子替换（见 TranslationFile.WriteAtomic），不存在"半截文件"，
+            //   故不会因为一次读到空而误清用户译文。
             _installerSource = Normalize(data);
             RebuildMerged();
-            _appLog.Info($"[替换] 已载入安装器对照表：{_installerSource.Count} 条（{TableFileName}）");
+            if (data.Count == 0)
+                _appLog.Warn($"[替换] 安装器对照表为空或缺失（{TableFileName}" + (File.Exists(path) ? " 存在但读不出条目）" : " 不存在）"));
+            else
+                _appLog.Info($"[替换] 已载入安装器对照表：{_installerSource.Count} 条（{TableFileName}）");
         }
         catch (Exception ex)
         {
@@ -289,7 +305,7 @@ public sealed unsafe class ReplacementService
                 {
                     foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
                     {
-                        var data = TranslationFile.Load(file);
+                        var data = TranslationFile.Load(file, msg => _appLog.Error("[替换] " + msg));
                         if (data.Count == 0) continue;
                         _windowSources[Path.GetFileNameWithoutExtension(file)] = Normalize(data);
                     }
@@ -309,16 +325,18 @@ public sealed unsafe class ReplacementService
     ///   压住插件设置界面的精确译文（HighFPSPhysics 的 Disable 按钮应显示"禁用"）。窗口表是插件特定语境
     ///   的精确匹配，理应优先；wiki 仅作兜底。
     /// ⚠ 旧中文指针**不在运行时释放**：渲染线程可能正拿着某个指针绘制（后台机翻线程重建表时会并发），
-    /// 立即 Free 会造成 use-after-free 崩溃。统一塞进 _graveyard，只在 Dispose 释放；重建不频繁，内存代价可忽略。 </summary>
+    /// 立即 Free 会造成 use-after-free 崩溃。统一塞进 **带时间戳的弃用区**，
+    /// 由 `ReclaimGraveyard`（渲染线程每帧、5 秒一次）回收 10 秒前弃用的指针；
+    /// ⚠ 2026-09-18 审查前是「只在 Dispose 释放」→ 反复编辑/机翻会无界增长，已修。 </summary>
     private void RebuildMerged()
     {
         lock (_lock)
         {
-            foreach (var ptr in _ptrs.Values) _graveyard.Add(ptr);
+            foreach (var ptr in _ptrs.Values) Retire(ptr);
             _ptrs.Clear();
-            foreach (var ptr in _idPtrs.Values) _graveyard.Add(ptr);
+            foreach (var ptr in _idPtrs.Values) Retire(ptr);
             _idPtrs.Clear();
-            foreach (var ptr in _wsPtrs.Values) _graveyard.Add(ptr);
+            foreach (var ptr in _wsPtrs.Values) Retire(ptr);
             _wsPtrs.Clear();
             _table = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             _hashes = new HashSet<ulong>();
@@ -415,11 +433,67 @@ public sealed unsafe class ReplacementService
             if (other == plugin) continue;
             if (string.CompareOrdinal(other, plugin) < 0 && t.ContainsKey(en)) return;
         }
-        if (_ptrs.Remove(en, out var old)) _graveyard.Add(old);   // 旧指针作废（延迟释放）
+        if (_ptrs.Remove(en, out var old)) Retire(old);   // 旧指针作废（延迟释放）
         _table[en] = Encoding.UTF8.GetBytes(zh);
         _hashes.Add(FnvUtf8(en));
         InvalidateDerivedCaches();   // ⚠ 审查①：清 _idPtrs/_wsPtrs，并标记 _prefixIndex 待重建
     }
+
+    /// <summary>
+    /// 把一个中文指针放进弃用区（**不在运行时立刻 Free**）——渲染线程可能正拿着它绘制。
+    /// 调用方须持有 _lock。回收见 <see cref="ReclaimGraveyard"/>。
+    /// </summary>
+    private void Retire(nint ptr)
+    {
+        if (ptr != 0) _graveyard.Add((ptr, Environment.TickCount64));
+    }
+
+    /// <summary>
+    /// 回收弃用区里「**久到不可能再被渲染线程引用**」的指针。
+    /// ⚠ 2026-09-18 全面审查（**中**）：弃用区原本只在 Dispose 释放 → **无界增长**（见字段处说明）。
+    /// **安全性依据**：我们挂钩的这些控件（Text 族 / Checkbox / Combo / 各控件 label）**都只用
+    /// label 指针当次计算哈希或当次绘制**：ImGui 不把它存进任何跨帧结构（TreeNode/TabItem/
+    /// CollapsingHeader/MenuItem/Selectable/Combo 存的是 `ImGuiID`，不是 `const char*`）。
+    /// 因此**十几秒前**就已被换掉的指针，绝无可能仍被任何一帧引用——取 10 秒是极大的安全余量。
+    /// 本方法由 `TryReplace`（渲染线程、每帧）顺带调用，**持锁**执行，无需额外同步。
+    ///
+    /// ⚠⚠ **地雷（切勿踩）**：ImGui 里 **`ImGui::Begin(name)` 会把 name 指针直接存进
+    ///   `ImGuiWindow::Name`（不做拷贝）**，要求其**静态生命周期**——一旦释放就是 use-after-free。
+    ///   同理 `BeginChild`/`PushID` 这类「名字进 ID 栈或窗口结构」的函数也要当心。
+    ///   所以我们**只把 igBegin 用作只读诊断钩子、绝不替换它的 name**（见 ImGuiHookService.BeginDbgDetour）。
+    ///   若将来真要替换窗口名，那条指针**必须转成「永不释放」**（例如缓存进一个只增列表），不能走这套回收。
+    /// </summary>
+    private void ReclaimGraveyard()
+    {
+        // ⚠ 本方法在**渲染热路径**每帧被调 → 必须**先做零成本预筛**再决定是否真扫。
+        //   常态下弃用区很小（几十个），`_graveyard.Count < 1024` 直接返回，开销可忽略；
+        //   只有发生过全表重建（一次倒进几万条）才会走到扫描，而那时正是需要回收的时候。
+        if (_graveyard.Count < 1024) return;
+        var now = Environment.TickCount64;
+        if (now - _lastReclaimMs < 5_000) return;   // 最多每 5 秒扫一次
+        _lastReclaimMs = now;
+        var cutoff = now - GraveyardRetireMs;
+        var keep = 0;
+        var freed = 0;
+        for (var i = 0; i < _graveyard.Count; i++)
+        {
+            // ⚠ 单次**限量**释放：一次全表重建会倒进 6 万+ 指针，一口气 Free 完是几毫秒的
+            //   渲染线程停顿（会掉帧）。限量后剩余的留到 5 秒后的下一轮，几轮就清干净，
+            //   每轮开销可忽略；且这些指针早已无人引用，多留几秒毫无风险。
+            if (_graveyard[i].Ms > cutoff || freed >= MaxFreePerReclaim) _graveyard[keep++] = _graveyard[i];
+            else { Marshal.FreeCoTaskMem(_graveyard[i].Ptr); freed++; }
+        }
+        if (keep < _graveyard.Count) _graveyard.RemoveRange(keep, _graveyard.Count - keep);
+    }
+
+    /// <summary> 上次回收弃用区的时间（`Environment.TickCount64`），用于给热路径扫描降频。 </summary>
+    private long _lastReclaimMs;
+
+    /// <summary> 弃用指针的最短存活时长（安全余量，见 <see cref="ReclaimGraveyard"/>）。 </summary>
+    private const long GraveyardRetireMs = 10_000;
+
+    /// <summary> 单次回收最多释放的指针数（避免一次性 Free 数万块，见 <see cref="ReclaimGraveyard"/>）。 </summary>
+    private const int MaxFreePerReclaim = 4096;
 
     /// <summary> 增量移除单条窗口译文（其它窗口表仍有同键时保留）。调用方须持有 _lock。
     /// ⚠ 2026-09-16：不再因 wiki/安装器占键而 return（优先级已调整为窗口表 > 安装器 > wiki）。 </summary>
@@ -429,7 +503,7 @@ public sealed unsafe class ReplacementService
         {
             if (t.ContainsKey(en)) return; // 别的插件表还有同键
         }
-        if (_ptrs.Remove(en, out var old)) _graveyard.Add(old);
+        if (_ptrs.Remove(en, out var old)) Retire(old);
         _table.Remove(en);
         // 不摘 _hashes：防止哈希碰撞误伤同哈希的其它键（多一次未命中，无害）
         // ⚠ 审查⑥：被删的键若在**安装器表 / wiki** 里也有译文，应**回退**到那个译文，而不是让界面变回英文。
@@ -494,6 +568,8 @@ public sealed unsafe class ReplacementService
 
         lock (_lock)
         {
+            // 顺带回收弃用区里早已无人引用的指针（零成本预筛，见 ReclaimGraveyard）
+            ReclaimGraveyard();
             // ⚠ 黑名单检查放在**哈希命中之后**（2026-09-15 代码审查 H1 修正）：
             //   原实现放在预筛之前 → 渲染线程**每帧每条文字**都 `Encoding.UTF8.GetString`
             //   分配一次字符串，GC 压力随绘制文字量线性涨（且我的注释与代码相反，声称"只对可能命中的做"）。
@@ -750,7 +826,7 @@ public sealed unsafe class ReplacementService
                 return;
             }
             // 内置包当前是纯字典格式（构建时由 PowerShell 生成），用统一读取器兼容
-            var data = TranslationFile.Load(bundle);
+            var data = TranslationFile.Load(bundle, msg => _appLog.Error("[替换] 内置包" + msg));
             if (data.Count == 0) return;
             var added = 0;
             lock (_lock)
@@ -1046,13 +1122,20 @@ public sealed unsafe class ReplacementService
                 if (_installerSource.ContainsKey(key)) continue;
                 _installerSource[key] = val;
                 added++;
+                // ⚠ 2026-09-18 全面审查（**中高**）：**不再整表重建**。
+                //   原实现每个机翻批次完成后都调 `RebuildMerged()`——那会把 **6.2 万条 wiki 术语**
+                //   逐条 `Encoding.UTF8.GetBytes` 重建一遍（AddMerged 的注释自己就警告过这个卡顿源），
+                //   而安装器机翻可能几百批 → **周期性帧卡顿**（渲染线程在锁上等它）。
+                //   安装器表优先级**低于**窗口表、**高于** wiki，故只需**增量并入**：
+                //   该键尚无任何译文（不在 _table）才写入；已被窗口表/wiki 占据的不动（保持优先级语义）。
+                if (!_table.ContainsKey(key))
+                {
+                    _table[key] = Encoding.UTF8.GetBytes(val);
+                    _hashes.Add(FnvUtf8(key));
+                }
             }
         }
-        if (added > 0)
-        {
-            RebuildMerged();
-            Save();
-        }
+        if (added > 0) Save();   // 只落盘安装器表（轻量），不再 RebuildMerged
         return added;
     }
 
@@ -1190,10 +1273,17 @@ public sealed unsafe class ReplacementService
         return (translated, untranslated);
     }
 
-    /// <summary> 把机翻/手动结果并入某插件的窗口表（写文件 + 重建合并表）。返回实际新增条数。 </summary>
+    /// <summary> 把机翻/手动结果并入某插件的窗口表（写文件 + 重建合并表）。返回实际新增条数。
+    /// ⚠ 2026-09-18 全面审查（**高**）：**写盘必须在锁外**。
+    ///   渲染热路径 `TryReplace` 对**每帧每条文字**都要 `lock (_lock)`；而机翻每批完成都会调本方法，
+    ///   原先「持锁 → JSON 序列化整表 + 写盘 + 目录遍历」→ 这段时间**主线程所有文字绘制全被阻塞**
+    ///   → 明显卡帧、按键/粘贴丢事件（正是本项目 Ctrl+V 事故的同类机理）。
+    ///   现在：锁内只改内存并**拷一份快照**，锁外再写盘（写盘期间渲染线程可正常取锁）。
+    /// </summary>
     public int MergeWindowEntries(string plugin, Dictionary<string, string> translations)
     {
         var added = 0;
+        Dictionary<string, string>? snapshot = null;
         lock (_lock)
         {
             if (!_windowSources.TryGetValue(plugin, out var table))
@@ -1216,7 +1306,7 @@ public sealed unsafe class ReplacementService
             }
             if (added > 0)
             {
-                WriteWindowFile(plugin, table);
+                snapshot = new Dictionary<string, string>(table, StringComparer.Ordinal);  // 锁内快照，锁外写
                 foreach (var (en, zh) in translations)     // 增量写入合并表，避免全量重建
                 {
                     var key = en.Trim();
@@ -1226,6 +1316,7 @@ public sealed unsafe class ReplacementService
                 }
             }
         }
+        if (snapshot != null) WriteWindowFile(plugin, snapshot);   // ⚠ 锁外写盘（审查：锁内 IO 会卡帧）
         return added;
     }
 
@@ -1249,6 +1340,7 @@ public sealed unsafe class ReplacementService
     {
         var updated = 0;
         var added = 0;
+        Dictionary<string, string>? snapshot = null;   // 审查：写盘移到锁外（锁内 IO 会卡渲染线程）
         lock (_lock)
         {
             if (!_windowSources.TryGetValue(plugin, out var table))
@@ -1272,8 +1364,9 @@ public sealed unsafe class ReplacementService
                     added++;
                 }
             }
-            if (updated + added > 0) WriteWindowFile(plugin, table);
+            if (updated + added > 0) snapshot = new Dictionary<string, string>(table, StringComparer.Ordinal);
         }
+        if (snapshot != null) WriteWindowFile(plugin, snapshot);   // ⚠ 锁外写盘
         return (updated, added);
     }
 
@@ -1283,6 +1376,7 @@ public sealed unsafe class ReplacementService
         en = en.Trim();
         zh = (zh ?? "").Trim();
         if (en.Length < 2) return;
+        Dictionary<string, string> snapshot;
         lock (_lock)
         {
             if (!_windowSources.TryGetValue(plugin, out var table))
@@ -1291,23 +1385,26 @@ public sealed unsafe class ReplacementService
                 table.Remove(en);
             else
                 table[en] = zh;
-            WriteWindowFile(plugin, table);
+            snapshot = new Dictionary<string, string>(table, StringComparer.Ordinal);   // 审查：锁内快照
             if (zh.Length == 0) RemoveOneWindowEntry(en);
             else ApplyOneWindowEntry(plugin, en, zh);
         }
+        WriteWindowFile(plugin, snapshot);   // ⚠ 锁外写盘
     }
 
     /// <summary> 删除某插件窗口表的单条。 </summary>
     public void RemoveWindowEntry(string plugin, string en)
     {
+        Dictionary<string, string>? snapshot = null;
         lock (_lock)
         {
             if (_windowSources.TryGetValue(plugin, out var table) && table.Remove(en))
             {
-                WriteWindowFile(plugin, table);
+                snapshot = new Dictionary<string, string>(table, StringComparer.Ordinal);   // 审查：锁内快照
                 RemoveOneWindowEntry(en);
             }
         }
+        if (snapshot != null) WriteWindowFile(plugin, snapshot);   // ⚠ 锁外写盘
     }
 
     /// <summary>
@@ -1458,17 +1555,22 @@ public sealed unsafe class ReplacementService
                 // 先移出 _windowSources 再逐条增量移除（这样"别的表是否还有同键"的判断才准确）
                 foreach (var en in table.Keys.ToList()) RemoveOneWindowEntry(en);
             }
-            try
-            {
-                var file = Path.Combine(WindowTableDir, $"{plugin}.json");
-                DeleteToRecycleBin(file);   // ⚠ 走回收站，别用 File.Delete（见方法注释）
-            }
-            catch (Exception ex)
-            {
-                _appLog.Warn($"[替换] 删除 {plugin} 的译文文件失败：{ex.Message}");
-            }
-            _windowDirStamp = ComputeWindowDirStamp();   // 同 WriteWindowFile：自己的改动不该被当成外部改动
         }
+        // ⚠ 2026-09-18 全面审查（**高**）：**回收站删除与目录遍历移到锁外**。
+        //   原先它们在 `lock (_lock)` 内执行，而本路径会被**后台 watcher 线程**触发
+        //   （用户卸载任意插件 → AutoPurgeUninstalled → 这里）→ 持锁做 Shell 删除（可能上百毫秒），
+        //   期间渲染线程 TryReplace（每帧每条文字都抢同一把锁）全部被阻塞 → 卡帧、丢输入事件。
+        //   锁内只改内存（上面已完成），锁外做删除。
+        try
+        {
+            var file = Path.Combine(WindowTableDir, $"{plugin}.json");
+            DeleteToRecycleBin(file);   // ⚠ 走回收站，别用 File.Delete（见方法注释）
+        }
+        catch (Exception ex)
+        {
+            _appLog.Warn($"[替换] 删除 {plugin} 的译文文件失败：{ex.Message}");
+        }
+        _windowDirStamp = ComputeWindowDirStamp();   // 同 WriteWindowFile：自己的改动不该被当成外部改动
         _appLog.Info($"[替换] 已还原 {plugin} 为英文（清除 {removed} 条译文，候选文件保留）");
         return removed;
     }
@@ -1825,7 +1927,7 @@ public sealed unsafe class ReplacementService
         }
 
         // ③ 纯字典 / 成对数组（通用）
-        var generic = TranslationFile.Load(path);
+        var generic = TranslationFile.Load(path, msg => _appLog.Warn("[替换] 导入" + msg));
         if (generic.Count == 0) throw new InvalidDataException("无法识别的文件格式（不是本工具翻译包，也不是 FuckDalamudCN 机翻表）");
         lock (_lock)
         {
@@ -1921,7 +2023,7 @@ public sealed unsafe class ReplacementService
             foreach (var ptr in _ptrs.Values) Marshal.FreeCoTaskMem(ptr);
             foreach (var ptr in _idPtrs.Values) Marshal.FreeCoTaskMem(ptr);
             foreach (var ptr in _wsPtrs.Values) Marshal.FreeCoTaskMem(ptr);
-            foreach (var ptr in _graveyard) Marshal.FreeCoTaskMem(ptr);
+            foreach (var (ptr, _) in _graveyard) Marshal.FreeCoTaskMem(ptr);
             _ptrs.Clear();
             _idPtrs.Clear();
             _wsPtrs.Clear();
