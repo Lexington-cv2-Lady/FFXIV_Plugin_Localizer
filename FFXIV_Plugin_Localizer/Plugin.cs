@@ -11,6 +11,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using FFXIVPluginLocalizer.Services;
 using FFXIVPluginLocalizer.Windows;
+using Newtonsoft.Json.Linq;
 
 namespace FFXIVPluginLocalizer;
 
@@ -22,6 +23,8 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static IGameInteropProvider Interop { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
+    [PluginService] internal static ISigScanner SigScanner { get; private set; } = null!;
+    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
 
     private const string CommandName = "/plocalizer";
 
@@ -29,6 +32,8 @@ public sealed class Plugin : IDalamudPlugin
     public Configuration Configuration { get; init; }
     public AppLog AppLog { get; }
     public ImGuiHookService Hook { get; }
+    /// <summary> 游戏原生 UI（AtkAddon）文字汉化：遍历 AtkStage 组件树，覆盖 KamiToolKit 系插件（LazyGatherer 等）的配置窗口。 </summary>
+    public AtkNativeUiWalkerService AtkHook { get; }
     public ReplacementService Replacement { get; }
     public MtTranslateService Mt { get; }
     public MainWindow MainWindow { get; }
@@ -37,9 +42,16 @@ public sealed class Plugin : IDalamudPlugin
     public AiSettingsWindow AiSettingsWindow { get; }
     public WindowReplaceWindow WindowReplaceWindow { get; }
     public SourceExtractWindow SourceExtractWindow { get; }
+    public DictWindow DictWindow { get; }
+    public ManualEditWindow ManualEditWindow { get; }
+    public RepoWindow RepoWindow { get; }
     public SourceExtractService SourceExtract { get; }
     public WikiGlossaryService Wiki { get; }
     public OldDictionaryService OldDict { get; }
+
+    /// <summary> 卫月仓库链接（只读展示：主库 + 第三方仓库；从 dalamudConfig.json 读，不改卫月任何设置）。 </summary>
+    public string DalamudMainRepo { get; private set; } = "";
+    public List<(string Url, bool IsEnabled)> DalamudThirdRepos { get; } = new();
 
     public Plugin()
     {
@@ -70,8 +82,9 @@ public sealed class Plugin : IDalamudPlugin
             Configuration.Save();
         }
         AppLog = new AppLog(Path.Combine(PluginInterface.GetPluginConfigDirectory(), "汉化日志.log"));
+        ReadDalamudRepos(); // 读卫月仓库链接（只读展示，不改卫月设置）
         // ⚠ 顺序要求：Replacement 必须先建（EnsureWikiDir 内部要用它设置术语），否则会抛 NRE 被吞。
-        Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory);
+        Replacement = new ReplacementService(AppLog, PluginInterface.GetPluginConfigDirectory, Configuration);
         Replacement.Enabled = Configuration.ReplacementEnabled;
         Replacement.SyncFdcnOnStartup(); // 启动同步：FDCN 文件指纹变了才自动重导；未装 FDCN 用内置翻译包打底
         // wiki 官方术语表（可选）：联动旧项目词典目录，加载后作为替换最高优先级词源 + 机翻参考
@@ -82,6 +95,9 @@ public sealed class Plugin : IDalamudPlugin
         EnsureDictDir();
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
             () => Configuration.WidgetHooks, Replacement, Configuration.DebugHookLog);
+        // 原生 UI（AtkAddon）文字汉化：与 ImGui 钩子互补，覆盖 KamiToolKit 系插件的游戏原生配置窗口
+        //（SetText 钩子曾被 Reloaded.Hooks 拒编，2026-09-18 改为 500ms 轮询遍历 AtkStage 组件树 + 官方 SetText）
+        AtkHook = new AtkNativeUiWalkerService(AppLog, Log, Framework, Replacement);
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         Mt.SetWiki(Wiki); // 机翻时附带官方术语对照，保证专有名词译名一致
         MainWindow = new MainWindow(this);
@@ -91,12 +107,18 @@ public sealed class Plugin : IDalamudPlugin
         WindowReplaceWindow = new WindowReplaceWindow(this, Replacement, Mt);
         SourceExtract = new SourceExtractService(AppLog, Configuration, PluginInterface.GetPluginConfigDirectory);
         SourceExtractWindow = new SourceExtractWindow(this, SourceExtract, Replacement);
+        DictWindow = new DictWindow(this);
+        ManualEditWindow = new ManualEditWindow(this, Replacement);
+        RepoWindow = new RepoWindow(this);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
         WindowSystem.AddWindow(TranslationWindow);
         WindowSystem.AddWindow(AiSettingsWindow);
         WindowSystem.AddWindow(WindowReplaceWindow);
         WindowSystem.AddWindow(SourceExtractWindow);
+        WindowSystem.AddWindow(DictWindow);
+        WindowSystem.AddWindow(ManualEditWindow);
+        WindowSystem.AddWindow(RepoWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -104,6 +126,8 @@ public sealed class Plugin : IDalamudPlugin
         });
 
         PluginInterface.UiBuilder.Draw += DrawAll;
+        // 2026-09-17：行为联动——卫月在安装器里卸载插件 → 立即清理其翻译资产（秒级；60 秒轮询兜底）
+        Replacement.StartUninstallWatch();
         PluginInterface.UiBuilder.OpenMainUi += ToggleMain;
         PluginInterface.UiBuilder.OpenConfigUi += ToggleMain; // 插件安装器的设置按钮：本插件暂无独立设置窗，打开主窗（官方模板同款回调，缺失会在安装器报校验警告）
         Framework.Update += OnFramework;
@@ -175,11 +199,68 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary> 打开/关闭源码提取窗口（主窗口「源码提取」按钮入口）。 </summary>
     public void ToggleSourceExtractUi() => SourceExtractWindow.Toggle();
 
+    public void ToggleDictUi() => DictWindow.Toggle();
+
+    /// <summary> 打开/关闭手动翻译（安装器对照表）二级窗口。 </summary>
+    public void ToggleManualEditUi() => ManualEditWindow.Toggle();
+
+    /// <summary> 打开/关闭仓库地址二级窗口。 </summary>
+    public void ToggleRepoUi() => RepoWindow.Toggle();
+
+    /// <summary> 收集当前卫月实际用的仓库地址（主库 + 启用的第三方），供后台预翻拉清单。
+    /// 只读已读到的 dalamudConfig，不改卫月设置。 </summary>
+    public List<string> BuildRepoUrls()
+    {
+        var urls = new List<string>();
+        if (DalamudMainRepo.Length > 0) urls.Add(DalamudMainRepo);
+        foreach (var (url, en) in DalamudThirdRepos)
+            if (en && url.Length > 0) urls.Add(url);
+        return urls;
+    }
+
     /// <summary> 主窗口「还原英文」：清空生效对照表让界面立刻回到英文（磁盘文件保留）。 </summary>
     public void RestoreEnglish()
     {
         Replacement.ClearActive();
         AppLog.Info("[还原] 界面已还原为英文（对照表文件未删除）");
+    }
+
+    /// <summary>
+    /// 只读卫月仓库配置（dalamudConfig.json）：主库 MainRepoUrl + 第三方 ThirdRepoList。
+    /// 仅用于主窗口展示——知道「后台自动翻译勾了全部」会覆盖哪些仓库的插件；**绝不回写、不增删**。
+    /// 橙月/土月把主库换成了镜像（如 DailyRoutines），这里如实显示用户实际用的地址。
+    /// </summary>
+    private void ReadDalamudRepos()
+    {
+        try
+        {
+            var path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "XIVLauncherCN", "dalamudConfig.json");
+            if (!File.Exists(path))
+            {
+                AppLog.Warn("[仓库] 未找到卫月配置：" + path);
+                return;
+            }
+            var jobj = JObject.Parse(File.ReadAllText(path));
+            DalamudMainRepo = (string?)jobj["MainRepoUrl"] ?? "";
+            DalamudThirdRepos.Clear();
+            var third = jobj["ThirdRepoList"]?["$values"] as JArray;
+            if (third != null)
+            {
+                foreach (var item in third)
+                {
+                    var url = (string?)item["Url"] ?? "";
+                    var en = (bool?)item["IsEnabled"] ?? true;
+                    if (url.Length > 0) DalamudThirdRepos.Add((url, en));
+                }
+            }
+            AppLog.Info($"[仓库] 主库 1 个 + 第三方 {DalamudThirdRepos.Count} 个（仅展示）");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn("[仓库] 读取卫月仓库配置失败：" + ex.Message);
+        }
     }
 
     /// <summary>
@@ -366,6 +447,19 @@ public sealed class Plugin : IDalamudPlugin
     {
         try
         {
+            // 2026-09-18：主开关「后台自动翻译」是总闸——关了则一切自动行为都停（不扫描、不提示、不下载）。
+            // 默认关，需用户在「后台自动翻译」窗口主动开启。
+            if (!Configuration.AutoTranslate)
+            {
+                AppLog.Info("[自动] 后台自动翻译主开关已关，启动检查跳过");
+                return;
+            }
+            // 子开关「主动预翻仓库全部插件」：后台刷新仓库清单缓存（不阻塞主线程；CollectMissing 只读本地缓存）。
+            // 即使当前无缺口也触发——缓存过期就该在后台更新，下次启动检查才能用上未安装插件的介绍。
+            // 2026-09-18：按卫月实际配的仓库（主库+启用的第三方）拉，不再硬编码官方 staging。
+            if (Configuration.AutoExtractAllPlugins)
+                Replacement.EnsureRepoCacheAsync(BuildRepoUrls());
+
             var count = Replacement.CollectMissing().Values.Distinct().Count();
             if (count == 0)
             {
@@ -412,6 +506,7 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.RemoveAllWindows();
         Mt.Dispose();          // 中断进行中的翻译（否则卸载后后台任务还在跑）
         Hook.Dispose();
+        AtkHook.Dispose();
         Replacement.Dispose();
         AppLog.Info("[插件] 翻译插件的插件 已卸载");
     }

@@ -72,12 +72,19 @@ public sealed class WikiGlossaryService
     /// <summary> 英文 → 中文（去重后的全量术语表）。 </summary>
     private Dictionary<string, string> _terms = new(StringComparer.Ordinal);
 
+
     /// <summary>
-    /// **首字母分桶缓存**（2026-09-15 代码审查 M3 修正）：`FindRelevant` 每次调用都要遍历
-    /// **6.2 万条**术语重建分桶并逐桶排序，而机翻每批（10~200 条）就调它一次 →
-    /// **每批白付数百 ms**。分桶只依赖 `_terms`，加载后即固定，故缓存起来（带锁，允许后台读）。
+    /// `_terms` + `_buckets` 的**一致性快照**：后台线程一次取到"配套的"两者。
+    ///
+    /// ⚠ 2026-09-18 全面审查④（**中**）：原实现 `Load()` 在主线程把 `_terms` 整个换新、`_buckets` 置 null，
+    ///   而**后台机翻线程**正在 `FindRelevant` 里拿**旧 `_buckets` 的键**去查 `_terms[en]` —— 两者不配套时
+    ///   抛 **KeyNotFoundException**，被 `TranslateBatchWithSplit` 的通用 catch 吞成"批次失败"
+    ///   → **静默丢翻译**（日志只留一条 warn）。触发场景：「翻译进行中点重载 wiki 术语」。
+    ///   现在：`Load()` 先在**局部**构建，完成后用**单个 volatile 引用**一次发布 →
+    ///   读方取一次快照，`Terms`/`Buckets` 必定配套，不存在中间态。
     /// </summary>
-    private volatile Dictionary<char, List<string>>? _buckets;
+    private sealed record Snapshot(Dictionary<string, string> Terms, Dictionary<char, List<string>> Buckets);
+    private volatile Snapshot? _snap;
 
     /// <summary> 各类术语条数（文件名 → 条数），用于 UI 展示。 </summary>
     public IReadOnlyDictionary<string, int> CategoryCounts => _categoryCounts;
@@ -94,14 +101,18 @@ public sealed class WikiGlossaryService
         _appLog = appLog;
     }
 
-    /// <summary> 从指定目录加载全部术语 json（返回加载条数；目录不存在返回 0）。 </summary>
+    /// <summary> 从指定目录加载全部术语 json（返回加载条数；目录不存在返回 0）。
+    /// ⚠ 审查④：**在局部构建**，完成后才把 terms+分桶作为一个快照**原子发布**——
+    /// 这样后台 `FindRelevant` 永远取到配套的两者，不会出现"旧桶 + 新表"的 KeyNotFound。 </summary>
     public int Load(string dir)
     {
-        _terms = new Dictionary<string, string>(StringComparer.Ordinal);
-        _buckets = null;   // 词表重建 → 分桶缓存失效（M3）
+        var terms = new Dictionary<string, string>(StringComparer.Ordinal);
         _categoryCounts.Clear();
+        _snap = null;      // 先撤下旧快照（期间读方会自行重建，见 FindRelevant 的 ??=）
+
         if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
         {
+            _terms = terms;
             return 0;
         }
         try
@@ -121,8 +132,8 @@ public sealed class WikiGlossaryService
                         var k = en.Trim();
                         var v = zh.Trim();
                         if (k.Length < 2 || k.Length > MaxTermLen || v.Length == 0 || k == v) continue;
-                        if (_terms.ContainsKey(k)) continue; // 先到先得（同名术语以先加载的为准）
-                        _terms[k] = v;
+                        if (terms.ContainsKey(k)) continue; // 先到先得（同名术语以先加载的为准）
+                        terms[k] = v;
                         added++;
                     }
                     _categoryCounts[name] = added;
@@ -132,7 +143,10 @@ public sealed class WikiGlossaryService
                     _appLog.Warn($"[wiki] 读取 {name} 失败：{ex.Message}");
                 }
             }
-            _appLog.Info($"[wiki] 已加载术语表 {_terms.Count} 条（{_categoryCounts.Count} 个分类）");
+            // ── 原子发布：先建好配套快照，再一次性挂上 ──
+            _terms = terms;
+            _snap = BuildSnapshot(terms);
+            _appLog.Info($"[wiki] 已加载术语表 {terms.Count} 条（{_categoryCounts.Count} 个分类）");
         }
         catch (Exception ex)
         {
@@ -175,24 +189,11 @@ public sealed class WikiGlossaryService
     {
         var hits = new Dictionary<string, string>(StringComparer.Ordinal);
         if (_terms.Count == 0) return new();
-        // 按首字母分桶（英文术语首字母），只为缩小比较范围
-        // ⚠ 走缓存（M3）：分桶只依赖 _terms，加载后不变；原实现每次调用重建 6.2 万条 + 排序，
-        //   而机翻**每批**都会调它 → 每批浪费数百毫秒。首次构建后在 Load 时失效。
-        var buckets = _buckets;
-        if (buckets == null)
-        {
-            var b = new Dictionary<char, List<string>>(64);
-            foreach (var en in _terms.Keys)
-            {
-                if (en.Length < 3) continue;
-                var c = char.ToUpperInvariant(en[0]);
-                if (!b.TryGetValue(c, out var list)) b[c] = list = new List<string>();
-                list.Add(en);
-            }
-            // 长术语优先（更具体）
-            foreach (var list in b.Values) list.Sort((a, b2) => b2.Length.CompareTo(a.Length));
-            buckets = _buckets = b;   // 发布（volatile 写；竞态最坏只是重复构建一次，无副作用）
-        }
+        // ⚠ 一致性快照（审查④）：一次取到**配套的** terms+buckets，避免后台线程拿旧桶查新表 → KeyNotFound。
+        //    快照缺失（尚未构建）时在此构建一次并发布；竞态最坏只是重复构建，无副作用。
+        var snap = _snap ??= BuildSnapshot(_terms);
+        var terms = snap.Terms;
+        var buckets = snap.Buckets;
 
         foreach (var text in texts)
         {
@@ -207,11 +208,28 @@ public sealed class WikiGlossaryService
                 {
                     if (hits.Count >= max) break;
                     if (en.Length > text.Length) continue;
-                    if (text.Contains(en, StringComparison.OrdinalIgnoreCase)) hits[en] = _terms[en];
+                    // 用快照里的 terms（与 buckets 配套）取值，不用可能已被换新的 _terms
+                    if (text.Contains(en, StringComparison.OrdinalIgnoreCase) && terms.TryGetValue(en, out var zh))
+                        hits[en] = zh;
                 }
             }
         }
         return hits.Select(kv => (kv.Key, kv.Value)).ToList();
+    }
+
+    /// <summary> 由给定词表构建「术语表 + 首字母分桶」的一致性快照（分桶内按长度降序，长术语更具体优先）。 </summary>
+    private static Snapshot BuildSnapshot(Dictionary<string, string> terms)
+    {
+        var b = new Dictionary<char, List<string>>(64);
+        foreach (var en in terms.Keys)
+        {
+            if (en.Length < 3) continue;
+            var c = char.ToUpperInvariant(en[0]);
+            if (!b.TryGetValue(c, out var list)) b[c] = list = new List<string>();
+            list.Add(en);
+        }
+        foreach (var list in b.Values) list.Sort((x, y) => y.Length.CompareTo(x.Length));
+        return new Snapshot(terms, b);
     }
 
     /// <summary> 直接暴露全部术语（替换层合并用）。 </summary>

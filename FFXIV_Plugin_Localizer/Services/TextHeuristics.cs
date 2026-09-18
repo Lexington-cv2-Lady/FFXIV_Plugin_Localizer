@@ -35,8 +35,21 @@ public static class TextHeuristics
     /// <summary> 颜色值：#RGB / #RRGGBB / #RRGGBBAA（LightlessSync 等插件堆里大量存在，非界面文案）。 </summary>
     private static readonly Regex HexColor = new(@"^#[0-9a-fA-F]{3,8}$", RegexOptions.Compiled);
 
-    /// <summary> printf 风格格式模板：%.2f、%d、%s、{0} 等——是代码模板不是可读文案。 </summary>
-    private static readonly Regex FormatTemplate = new(@"%[-+ #0-9.]*[diouxXeEfgGsc%]", RegexOptions.Compiled);
+    /// <summary>
+    /// printf 风格格式模板：<c>%.2f</c>、<c>%d</c>、<c>%s</c>、<c>%d%%</c> 等——是代码模板不是可读文案。
+    ///
+    /// ⚠ **2026-09-18 全面审查③（静默丢覆盖率，中偏高）**：原判据 `%[-+ #0-9.]*[diouxXeEfgGsc%]`
+    ///   **未锚定**且字符类里**含空格** → `% damage` 的 `% d` 就命中；也不要求转换符后不是字母，
+    ///   于是**大量正常文案被误判成"技术噪音"**：`% damage`、`% of max`、`% chance`、`% faster`、
+    ///   `Deals 50% damage`、`100% complete` ……
+    ///   后果不只是"少翻几条"：`IsTechnicalNoise` → `IsTranslatable` → `NeedsTranslation` 整条链排除，
+    ///   这些串**既不进待翻列表、也不送 AI、`GetTranslationProgress` 还把它们排除** →
+    ///   **进度显示 100%、界面永远英文，而用户看不到任何缺口**（最难发现的一类失败）。
+    /// 修正：转换符后**不能紧跟字母**。真格式串后面是空格/标点/串尾（`%d items`、`Remaining: %d`）；
+    ///   而 `% damage` 的 `d` 后面接着 `a`（在拼单词）→ 是正常文案。
+    ///   已用 18 个正反例验证（8 个真模板 + 10 个含百分号的正常文案）全部判定正确。
+    /// </summary>
+    private static readonly Regex FormatTemplate = new(@"%[-+ #0-9.]*[diouxXeEfgGsc%](?![A-Za-z])", RegexOptions.Compiled);
 
     /// <summary> 结构化片段：以 { [ ( 开头且以 } ] ) 结尾的**紧凑占位符**（{Cids}、[x]、(a)）。
     /// ⚠ 判据必须要求「括号内不含空白」：旧写法 `^[\{\[\(].*[\}\]\)]$` 会把**方括号包裹的正常文案**
@@ -54,8 +67,20 @@ public static class TextHeuristics
     public static bool IsChatCommand(string s)
     {
         var t = (s ?? "").Trim();
-        return t.Length >= 2 && t[0] == '/' && !t.Contains(' ');
+        if (t.Length < 2 || t[0] != '/') return false;
+        if (!t.Contains(' ')) return true;                          // /tp 纯命令
+        if (t.Contains("→") || t.Contains("<-")) return false;      // 提示文本（带箭头说明）
+        if (CommandSentence.IsMatch(t)) return false;                // 含常见句子词 → 提示文本要翻
+        return CommandSyntax.IsMatch(t);                            // 否则是 命令+子命令/参数
     }
+
+    /// <summary> 斜杠后仅 字母数字/下划线/连字符/方括号/空格（命令语法，无标点无句子成分）。 </summary>
+    private static readonly Regex CommandSyntax = new(@"^/[a-zA-Z0-9_\-\[\] ]+$", RegexOptions.Compiled);
+
+    /// <summary> 常见英文句子成分词（出现即视为提示文本而非命令）。 </summary>
+    private static readonly Regex CommandSentence = new(
+        @"\b(the|a|an|to|you|your|is|are|was|were|will|would|see|usage|for|with|on|in|at|this|that|and|or|of|it|if|when|open|click|press|use|using|more|info|information|here|please|can|cannot|must|should|does|do|not)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary> 是否像「非界面的技术字符串」（颜色/格式模板/结构化片段/纯标识符），应排除。 </summary>
     public static bool IsTechnicalNoise(string s)

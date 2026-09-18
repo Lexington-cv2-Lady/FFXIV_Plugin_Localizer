@@ -89,11 +89,18 @@ public class Configuration : IPluginConfiguration
     /// <summary> 按服务商分存的 API Key。⚠ 每个用户自己填，只存本机 pluginConfigs（APPDATA），严禁入库/写死在代码里。 </summary>
     public Dictionary<string, string>? AiApiKeys { get; set; }
 
-    /// <summary> 启动时自动扫描缺口并翻译（需已填 Key）。默认开。 </summary>
-    public bool AutoTranslate { get; set; } = true;
+    /// <summary> 后台自动翻译**主开关**（总闸）。关了则启动时不自动扫描缺口、不自动翻译（一切自动行为都停）。
+    /// 默认**关**（2026-09-18 用户要求：全部默认关闭，需用户主动勾选）。 </summary>
+    public bool AutoTranslate { get; set; }
 
-    /// <summary> 后台静默执行：有新缺口直接后台翻译不问人；关闭则只提示等手动点。默认开。 </summary>
-    public bool SilentTranslate { get; set; } = true;
+    /// <summary> 【子开关，仅主开关开启时生效】主动预翻卫月仓库**全部**插件（含未安装）的介绍。
+    /// 默认**关**——关则只翻已安装插件的介绍；勾则启动检查时拉取仓库清单，把未安装插件的
+    /// Description/Punchline 也送翻（用于分包前提前预翻常用插件）。
+    /// ⚠ 仓库有几千个插件，勾选会一次性送翻大量条目，API 费用明显增加。 </summary>
+    public bool AutoExtractAllPlugins { get; set; }
+
+    /// <summary> 后台静默执行：有新缺口直接后台翻译不问人；关闭则只提示等手动点。默认**关**（2026-09-18：全部默认关）。 </summary>
+    public bool SilentTranslate { get; set; }
 
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

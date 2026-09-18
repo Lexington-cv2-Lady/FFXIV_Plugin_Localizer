@@ -27,6 +27,9 @@ public sealed class SourceExtractWindow : Window
     /// <summary> 后台任务写、UI 读（H2 修正）：普通 Dictionary 跨线程读写属未定义行为，换并发容器。 </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _lastResult = new();
     private readonly Dictionary<string, int> _chineseCache = new(); // 插件名 → 已装 DLL 的中文字符串条数（0=原版英文）
+    /// <summary> 插件名 → 是否有可打开的配置/主界面（2026-09-18：无界面插件不显示）。 </summary>
+    private readonly Dictionary<string, bool> _hasUiCache = new();
+    private int _hiddenNoUi;   // 被隐藏的无界面插件数
     private bool _testing;          // 连接测试进行中
     private bool? _testOk;          // 上次测试结果（null=未测）
     private string _testMessage = "";
@@ -245,6 +248,11 @@ public sealed class SourceExtractWindow : Window
 
         // ── 工具栏：计数 + 搜索 + 操作（按钮按需换行，窄窗口不会裁掉）──
         ImGui.TextDisabled($"已装且带 GitHub 地址：{_plugins.Count} 个");
+        if (_hiddenNoUi > 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled($"（已隐藏 {_hiddenNoUi} 个无配置/主界面的插件）");
+        }
         ImGui.SameLine();
         ImGui.SetNextItemWidth(190f);
         ImGui.InputTextWithHint("##srcFilter", "搜索（内部名/显示名）", ref _filter, 128);
@@ -270,8 +278,9 @@ public sealed class SourceExtractWindow : Window
             ImGui.EndDisabled();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("把列表里的插件逐个提取一遍（自动跳过：已是中文版、源码已汉化、已翻译完成的）。\n" +
-                             "有搜索筛选时只处理筛选出的那些；已克隆过的仓库只会做一次 git pull，很快。");
+            ImGui.SetTooltip("把列表里的插件逐个提取一遍（自动跳过：已是中文版）。\n" +
+                             "每次都会 git pull 更新源码并**覆盖**旧候选文件——插件上游更新后重新提取即可拿到新文案。\n" +
+                             "有搜索筛选时只处理筛选出的那些；已翻译的条目不受影响（译文表独立于候选）。");
 
         // 目录入口（结果相关，跟列表放一起更顺手）
         Ui.SameLineIfFits(Ui.ButtonWidth("打开提取目录"));
@@ -331,7 +340,7 @@ public sealed class SourceExtractWindow : Window
             if (_chineseCache.TryGetValue(name, out var zh) && zh > 0)
                 Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    （已是中文版·{zh} 条，无需提取）");
             else if (pg.Done)
-                Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    【已翻译】{pg.Translated}/{pg.Total} 条（无需重复提取）");
+                Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f), $"    【已翻译】{pg.Translated}/{pg.Total} 条（重新提取会覆盖更新候选）");
             else if (pg.Total > 0)
                 Ui.ColoredWrapped(new Vector4(1f, 0.75f, 0.4f, 1f), $"    待翻译 {pg.Translated}/{pg.Total} 条");
             else
@@ -360,7 +369,10 @@ public sealed class SourceExtractWindow : Window
     /// <summary> 刷新插件列表 + 检测各插件已装 DLL 的中文情况（用于列表标注与提前跳过）。 </summary>
     private void RefreshList()
     {
-        _plugins = _svc.ListPluginsWithRepo();
+        _hasUiCache.Clear();   // 插件启用/卸载后状态可能变，每次刷新重查
+        var all = _svc.ListPluginsWithRepo();
+        _plugins = all.Where(p => HasOpenableUi(p.Name)).ToList();   // 2026-09-18：无配置/主界面的插件不显示
+        _hiddenNoUi = all.Count - _plugins.Count;
         _listLoaded = true;
         _chineseCache.Clear();
         _progressCache.Clear();
@@ -384,6 +396,26 @@ public sealed class SourceExtractWindow : Window
                 _progressCache[name] = (0, 0, false);
             }
         }
+    }
+
+    /// <summary>
+    /// 该插件是否有可打开的界面（配置界面或主界面）。未加载/查不到视为**有**（避免误删：
+    /// 只是当前没启用并不代表没有配置界面）。2026-09-18 用户要求"不能打开配置窗口的不显示"。
+    /// </summary>
+    private bool HasOpenableUi(string plugin)
+    {
+        if (_hasUiCache.TryGetValue(plugin, out var v)) return v;
+        var result = true;
+        try
+        {
+            var target = Plugin.PluginInterface.InstalledPlugins
+                .FirstOrDefault(p => string.Equals(p.InternalName, plugin, StringComparison.OrdinalIgnoreCase));
+            if (target != null && target.IsLoaded)
+                result = target.HasConfigUi || target.HasMainUi;
+        }
+        catch { /* 查不到按保留处理 */ }
+        _hasUiCache[plugin] = result;
+        return result;
     }
 
     /// <summary> 打开提取结果目录（未翻译 json 所在处）。 </summary>
@@ -470,13 +502,13 @@ public sealed class SourceExtractWindow : Window
            || p.RepoUrl.Contains(filter, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// 该插件是否**需要**提取：已是中文版的、
-    /// 已翻译完成的（缺口为 0）都不必再联网拉仓库——否则「全部提取」会为几十个插件白跑网络。
+    /// 该插件是否**需要**提取：已是中文版（已装 DLL 含大量中文）不必再联网拉仓库。
+    /// ⚠ 2026-09-17：不再跳过"已翻译完成"的插件——插件上游源码更新后，重新提取会
+    ///   git pull 更新源码并**覆盖**旧的候选文件，否则新版本的新文案永远进不来。
     /// </summary>
     private bool NeedsExtract(string name)
     {
         if (_chineseCache.TryGetValue(name, out var zh) && zh > 0) return false;   // 已装 DLL 就是中文版
-        if (_progressCache.TryGetValue(name, out var pg) && pg.Done) return false; // 候选已全部翻完
         return true;
     }
 
@@ -495,8 +527,8 @@ public sealed class SourceExtractWindow : Window
         if (targets.Count == 0)
         {
             _summary = filter.Length > 0
-                ? $"筛选出的插件都无需提取（已是中文版 / 已翻译完成）。"
-                : "没有需要提取的插件（都已是中文版或已翻译完成）。";
+                ? $"筛选出的插件都无需提取（已是中文版）。"
+                : "没有需要提取的插件（都已是中文版）。";
             return;
         }
 

@@ -342,6 +342,9 @@ public sealed class MtTranslateService
     public void Dispose()
     {
         try { _cts?.Cancel(); } catch { /* 已释放则忽略 */ }
+        // ⚠ 2026-09-18 全面审查⑩（**中**）：`_http` 原先**从不释放** → 每次插件重载泄漏一个 HttpClient
+        //   及其 handler/Socket 池（对频繁重载插件的用户是可累积的句柄/内存泄漏）。
+        try { _http.Dispose(); } catch { /* 忽略 */ }
     }
 
     /// <summary>
@@ -577,19 +580,23 @@ public sealed class MtTranslateService
             break;
         }
 
-        var message = json.RootElement
-            .GetProperty("choices")[0]
-            .GetProperty("message");
-        var content = message.TryGetProperty("content", out var cEl) ? cEl.GetString() ?? "" : "";
-        var reasoning = message.TryGetProperty("reasoning_content", out var rcEl) ? rcEl.GetString() ?? "" : "";
-        // 推理模型（glm-4.7-flash / glm-4.5-flash 等）把思考过程放 reasoning_content：content 空时兜底取用
-        if (string.IsNullOrWhiteSpace(content) && reasoning.Length > 0) content = reasoning;
+        // ⚠ 审查：`JsonDocument` 持有池化内存 → 用 using 包住整个使用范围（原先未释放）
+        using (json)
+        {
+            var message = json.RootElement
+                .GetProperty("choices")[0]
+                .GetProperty("message");
+            var content = message.TryGetProperty("content", out var cEl) ? cEl.GetString() ?? "" : "";
+            var reasoning = message.TryGetProperty("reasoning_content", out var rcEl) ? rcEl.GetString() ?? "" : "";
+            // 推理模型（glm-4.7-flash / glm-4.5-flash 等）把思考过程放 reasoning_content：content 空时兜底取用
+            if (string.IsNullOrWhiteSpace(content) && reasoning.Length > 0) content = reasoning;
 
-        // 按成对数组下标解析；失败再退回「编号行」解析（兼容 AI 不听话改了格式）
-        var result = TranslationFile.FromPairJson(content, items);
-        if (result.Count == 0) result = ParseNumberedLines(content, items);
-        if (result.Count == 0) throw new Exception("返回内容无法解析：" + Truncate(content, 200));
-        return result;
+            // 按成对数组下标解析；失败再退回「编号行」解析（兼容 AI 不听话改了格式）
+            var result = TranslationFile.FromPairJson(content, items);
+            if (result.Count == 0) result = ParseNumberedLines(content, items);
+            if (result.Count == 0) throw new Exception("返回内容无法解析：" + Truncate(content, 200));
+            return result;
+        }
     }
 
     /// <summary> 解析「编号. 译文」行，按编号映射回原英文。兼容全角句点、多种分隔与多余前后缀。 </summary>
@@ -643,7 +650,8 @@ public sealed class MtTranslateService
             var body = await resp.Content.ReadAsStringAsync();
             if (!resp.IsSuccessStatusCode)
                 return $"连接失败（HTTP {(int)resp.StatusCode}）：{Truncate(body, 200)}";
-            var json = JsonDocument.Parse(body);
+            // ⚠ 审查：`JsonDocument` 持有池化内存，必须 using（原先未释放，机翻长任务下每批泄漏一份）
+            using var json = JsonDocument.Parse(body);
             var content = json.RootElement.GetProperty("choices")[0]
                 .GetProperty("message").GetProperty("content").GetString() ?? "";
             return "连接成功：" + Truncate(StripFences(content), 80);

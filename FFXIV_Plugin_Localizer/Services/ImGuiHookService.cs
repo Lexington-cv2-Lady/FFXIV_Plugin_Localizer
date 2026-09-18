@@ -110,6 +110,24 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private delegate byte WInputText(nint label, nint buf, nuint bufSize, uint flags, nint cb, nint data);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte WInputTextHint(nint label, nint hint, nint buf, nuint bufSize, uint flags, nint cb, nint data);
+    /// <summary> igInputTextEx(label, hint, buf, bufSize, sizeArg, flags, callback, user_data)
+    /// —— **2026-09-16 实锤**：新 Dalamud（09-11 更新）把 `ImGui.InputText` 的实现改为
+    ///    P/Invoke 这个导出（不再走 `igInputText`），实测 Craftimizer 数值输入框标签全漏网。
+    ///    签名经 Bindings 程序集元数据核实：`sizeArg` 是 **`ref Vector2`（引用=指针）**，不是按值结构体，
+    ///    全部参数为「指针 + int」，**安全可挂**（不同于按值 ImVec2 的 igButton/igSelectable）。 </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WInputTextEx(nint label, nint hint, nint buf, int bufSize, nint sizeArg, int flags, nint cb, nint data);
+    /// <summary> 按钮/选项族（2026-09-16 新增）。此前「含按值 ImVec2 永不挂」的结论在 **x64 下不成立**：
+    /// 8 字节结构体与指针同为 GPR 槽位、大小一致，用 nint 占位透传完全安全（cimgui.h 实测）。
+    /// igButton(label, ImVec2 size)；igSmallButton(label)（无 size）；igSelectable_Bool(label, bool, flags, ImVec2 size)。 </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WButton(nint label, nint size);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WSmallButton(nint label);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WSelectable(nint label, byte selected, int flags, nint size);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte WSelectablePtr(nint label, nint pSelected, int flags, nint size);
 
     private const int MaxTextLen = 1024;
 
@@ -460,6 +478,18 @@ public sealed unsafe class ImGuiHookService : IDisposable
         Add("igInputText", bIT, (a, b, c, d, e, f) => bIT.Hook!.Original(Label(a, "igInputText"), b, c, d, e, f), _ => { });
         var bITH = new HookBox<WInputTextHint>();
         Add("igInputTextWithHint", bITH, (a, b, c, d, e, f, g) => bITH.Hook!.Original(Label(a, "igInputTextWithHint"), Label(b, "igInputTextWithHint"), c, d, e, f, g), _ => { });
+        // 2026-09-16：新 Dalamud 的 ImGui.InputText 改走 igInputTextEx（见委托注释），label 与 hint 都替换（hint 常为 null，Label 对 p==0 安全）。
+        var bITEx = new HookBox<WInputTextEx>();
+        Add("igInputTextEx", bITEx, (a, b, c, d, e, f, g, h) => bITEx.Hook!.Original(Label(a, "igInputTextEx"), Label(b, "igInputTextEx"), c, d, e, f, g, h), _ => { });
+        // 2026-09-16：x64 下按值 ImVec2（8 字节）与 nint 同为 GPR 槽位 → 按钮/选项可安全替换 label（含 Reset to Default）。
+        var bBtn = new HookBox<WButton>();
+        Add("igButton", bBtn, (a, b) => bBtn.Hook!.Original(Label(a, "igButton"), b), _ => { });
+        var bSmallBtn = new HookBox<WSmallButton>();
+        Add("igSmallButton", bSmallBtn, a => bSmallBtn.Hook!.Original(Label(a, "igSmallButton")), _ => { });
+        var bSel = new HookBox<WSelectable>();
+        Add("igSelectable_Bool", bSel, (a, b, c, d) => bSel.Hook!.Original(Label(a, "igSelectable_Bool"), b, c, d), _ => { }); // 算法列表/行动池选项（Oneshot/Stepwise/Optimal 等）
+        var bSelPtr = new HookBox<WSelectablePtr>();
+        Add("igSelectable_BoolPtr", bSelPtr, (a, b, c, d) => bSelPtr.Hook!.Original(Label(a, "igSelectable_BoolPtr"), b, c, d), _ => { });
         // 表格列标题（TableSetupColumn）与工具提示（SetTooltip）——常见但此前漏挂：
         // 前者是"表格里的列名"（实测 TeleporterPlugin 的 Alias/Aetheryte 就是它），后者是悬停提示。
         var bTsc = new HookBox<V4>();

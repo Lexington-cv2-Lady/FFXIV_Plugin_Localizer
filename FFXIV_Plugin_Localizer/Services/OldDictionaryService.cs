@@ -43,14 +43,29 @@ public sealed class OldDictionaryService
     ///   且**优先级最高**——即使词典/机翻给出了译文，也会被黑名单拦下。
     /// </summary>
     private readonly HashSet<string> _blacklist = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// ⚠ 2026-09-18 全面审查⑪（**高**）：`_blacklist` 的**写方是主线程**（`Load()` 的 `Clear`/`UnionWith`，
+    ///   由「重载词典」触发），**读方是后台机翻线程**（`NeedsTranslation` → `IsBlacklisted`）。
+    ///   `HashSet` 无并发保护时读写属**未定义行为**（可能抛异常、返回错值，极端情况内部桶损坏 → 挂死）。
+    ///   触发场景很日常：「翻译进行中点重载词典」。用一把私有锁保护全部访问（黑名单仅几十条，开销可忽略）。
+    /// </summary>
+    private readonly object _blLock = new();
+
     /// <summary> 黑名单条数（供界面显示）。 </summary>
-    public int BlacklistCount => _blacklist.Count;
+    public int BlacklistCount { get { lock (_blLock) return _blacklist.Count; } }
 
     /// <summary> 该词是否在黑名单里（应保持英文）。 </summary>
-    public bool IsBlacklisted(string word) => _blacklist.Contains((word ?? "").Trim());
+    public bool IsBlacklisted(string word)
+    {
+        var w = (word ?? "").Trim();
+        lock (_blLock) return _blacklist.Contains(w);
+    }
 
-    /// <summary> 黑名单全部词条（供机翻侧过滤：拉黑的词不送翻）。 </summary>
-    public IReadOnlyCollection<string> BlacklistWords => _blacklist;
+    /// <summary> 黑名单全部词条的**快照**（拷贝返回，避免调用方在锁外遍历被并发修改的集合）。 </summary>
+    public IReadOnlyCollection<string> BlacklistWords
+    {
+        get { lock (_blLock) return _blacklist.ToArray(); }
+    }
 
     public int Count => _entries.Count;
     public bool Loaded => _entries.Count > 0;
@@ -67,11 +82,13 @@ public sealed class OldDictionaryService
     {
         _entries.Clear();
         _sourceCounts.Clear();
-        _blacklist.Clear();
+        lock (_blLock) _blacklist.Clear();
         if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir)) return 0;
 
         // 0) 单词黑名单**先加载**：后续所有词表都要用它过滤（防止黑名单词被译成中文）
-        _blacklist.UnionWith(LoadWordList(Path.Combine(dir, BlacklistFileName)));
+        //    ⚠ 先读盘到局部变量、再进锁（LoadWordList 会读文件，不该持锁做 IO）
+        var blWords = LoadWordList(Path.Combine(dir, BlacklistFileName));
+        lock (_blLock) _blacklist.UnionWith(blWords);
 
         foreach (var file in KnownFiles)
         {
@@ -88,7 +105,7 @@ public sealed class OldDictionaryService
             }
         }
         _appLog.Info($"[预翻译] 已加载本项目词典：{_entries.Count} 条（{_sourceCounts.Count} 个文件），" +
-                     $"单词黑名单 {_blacklist.Count} 条");
+                     $"单词黑名单 {BlacklistCount} 条");
         return _entries.Count;
     }
 
@@ -292,6 +309,22 @@ public sealed class OldDictionaryService
 
     /// <summary> 单词黑名单文件名（命中词保持英文）。 </summary>
     public const string BlacklistFileName = "单词黑名单.json";
+
+    /// <summary> 确保单词黑名单文件存在（缺失时创建带说明的模板，格式与旧项目一致），返回完整路径。 </summary>
+    public static string EnsureBlacklistFile(string dir)
+    {
+        var path = Path.Combine(dir, BlacklistFileName);
+        if (!File.Exists(path))
+        {
+            File.WriteAllText(path,
+                "# 单词黑名单.json —— 使用方法\n" +
+                "# 每行写一个英文单词/词组；同一行也可用英文逗号分隔多个词，例如：rue,bibo\n" +
+                "# 以 # 开头的行（或行内 # 及之后的内容）是注释，不会被当作黑名单词\n" +
+                "# 命中黑名单的词在翻译时保留英文原文，不进行翻译、不替换\n" +
+                "# 编辑保存后点「重载词典」即可生效\n", Encoding.UTF8);
+        }
+        return path;
+    }
 
     /// <summary> 查词（供预翻译）。 </summary>
     public bool TryGet(string en, out string zh) => _entries.TryGetValue(en, out zh!);
