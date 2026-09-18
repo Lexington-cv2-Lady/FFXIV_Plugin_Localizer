@@ -1844,7 +1844,8 @@ public sealed unsafe class ReplacementService
         }
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        File.WriteAllText(path, JsonSerializer.Serialize(pack, Indented), Encoding.UTF8);
+        // ⚠ 2026-09-18 全面审查：导出包是用户要存/传给他人的成果，同样走**原子落盘**防半截文件。
+        TranslationFile.WriteAtomic(path, JsonSerializer.Serialize(pack, Indented));
         _appLog.Info($"[替换] 已导出翻译包：安装器 {pack.Installer.Count} 条 + 窗口 {winTotal} 条（{pack.Windows.Count} 个插件）→ {path}");
         return (pack.Installer.Count, winTotal);
     }

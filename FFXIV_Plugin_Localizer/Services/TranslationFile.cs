@@ -59,13 +59,18 @@ public static class TranslationFile
     ///   若正好在写入中途游戏崩溃/断电，文件会被截断成**半截 JSON**；
     ///   而读取端 `Load` 解析失败时**返回空表**，等于用户全部译文瞬间归零（本项目已发生过一次真实数据事故）。
     ///   改为原子替换后，任何时刻磁盘上的文件要么是**完整的旧版本**、要么是**完整的新版本**，不存在半截态。
+    /// 本方法**公开**供其它服务复用（项目里所有「承载用户心血」的 json 都应走它）。
+    /// ⚠ 临时文件后缀是 `.tmp`（**不是 `.json`**）——这样它不会被 `EnumerateFiles(dir, "*.json")`
+    ///   之类的表目录扫描误当成一个插件表读进去。
     /// </summary>
-    private static void WriteAtomic(string path, string content)
+    /// <param name="encoding">默认 UTF-8 **无 BOM**；旧词典文件要求带 BOM（中文记事本判编码用），传 <c>new UTF8Encoding(true)</c>。</param>
+    public static void WriteAtomic(string path, string content, Encoding? encoding = null)
     {
         var tmp = path + ".tmp";
         try
         {
-            File.WriteAllText(tmp, content, Encoding.UTF8);
+            File.WriteAllText(tmp, content, encoding ?? Encoding.UTF8);
+            // 同卷 `File.Move(overwrite)` 走 MoveFileEx / rename，对读者来说是**原子替换**
             File.Move(tmp, path, overwrite: true);
         }
         finally

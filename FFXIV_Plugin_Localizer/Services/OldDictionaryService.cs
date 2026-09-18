@@ -290,7 +290,9 @@ public sealed class OldDictionaryService
 
             if (added > 0)
             {
-                File.WriteAllText(path,
+                // ⚠ 2026-09-18 全面审查：改为**原子落盘**。「我的翻译.json」是用户词典（可能上万条人工成果），
+                //   直写若在崩溃/断电时中断会留下半截 JSON → 读回时解析失败 → 词典等于丢失。
+                TranslationFile.WriteAtomic(path,
                     root.ToJsonString(new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }),
                     new UTF8Encoding(true));   // 带 BOM：中文 Windows 的记事本才不会把 UTF-8 误判成 GBK
                 _appLog.Info($"[预翻译] 已写入词典：新增 {added} 条（跳过 {skipped} 条）→ {path}");
