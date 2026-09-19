@@ -14,6 +14,7 @@
     <Description>给其他 Dalamud 插件的界面做运行时汉化：在 ImGui 文字绘制层把插件渲染的英文按对照表换成中文显示，不改对方插件文件，自用/发布皆可。
 含源码提取候选、AI 机翻（多服务商）、词典管理与单词黑名单、后台自动翻译与运行时自动补译。</Description>
     <RepoUrl>https://github.com/Lexington-cv2-Lady/FFXIV_Plugin_Localizer</RepoUrl>
+    <IconUrl>https://cdn.jsdmirror.com/https://raw.githubusercontent.com/Lexington-cv2-Lady/FFXIV_Plugin_Localizer/main/Data/icon.png</IconUrl>
     <Tags>汉化;翻译;ui;chinese;localization;中文;dalamud</Tags>
     <CategoryTags>utility</CategoryTags>
     <!-- dev 插件部署目录（构建后自动复制）。用 $(APPDATA) 环境变量，避免写死个人用户名路径；
