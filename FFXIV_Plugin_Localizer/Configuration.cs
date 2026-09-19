@@ -78,6 +78,8 @@ public class Configuration : IPluginConfiguration
     // ── AI 设置（OpenAI 兼容端点；默认智谱 glm-4-flash 免费模型，12 家预设见 MtTranslateService.Providers） ──
     /// <summary> AI 供应商名（预设表名称；空 = 自定义手工端点）。 </summary>
     public string AiProviderName { get; set; } = "智谱 GLM";
+    /// <summary> 自定义模式下用户给端点起的显示名（空则显示「自定义」）。仅用于 UI 展示与 Key 分存键，不影响端点解析。 </summary>
+    public string AiCustomName { get; set; } = "";
     /// <summary> API 地址覆盖（留空 = 供应商预设）。 </summary>
     public string AiBaseUrl { get; set; } = "";
     /// <summary> 模型名覆盖（留空 = 供应商预设）。 </summary>
@@ -101,6 +103,15 @@ public class Configuration : IPluginConfiguration
 
     /// <summary> 后台静默执行：有新缺口直接后台翻译不问人；关闭则只提示等手动点。默认**关**（2026-09-18：全部默认关）。 </summary>
     public bool SilentTranslate { get; set; }
+
+    /// <summary> 机翻**结束后自动**把新译文沉淀进「词典目录\我的翻译.json」（只增不覆盖已有键）。
+    /// 默认**开**——用户老是忘记手动点「翻译结果写入词典」；想关就取消勾选（2026-09-19）。 </summary>
+    public bool AutoMergeToDict { get; set; } = true;
+
+    // 2026-09-19 运行时发现自动翻门槛（**满足任意一个**即送机翻，防看两眼就删白烧额度）：
+    //   ①同一英文累计出现 MinHits 次（反复看到=真在用）；②距首次出现满 MinAgeSec 秒（装稳了没卸）。
+    public int MissedMinHits { get; set; } = 3;
+    public int MissedMinAgeSec { get; set; } = 180;
 
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

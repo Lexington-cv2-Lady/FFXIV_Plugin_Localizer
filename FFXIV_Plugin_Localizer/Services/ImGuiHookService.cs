@@ -155,6 +155,23 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private long _dbgFrame;
     public bool DebugStats { get; set; }
 
+    /// <summary> 体检模式：即使「钩子调试」关着，也累积未命中英文——供「体检」按钮逐个开窗检测漏网文字。 </summary>
+    public bool HealthCollecting { get; set; }
+
+    /// <summary> 体检：清空未命中累积。 </summary>
+    public void ResetMissedSamples() { lock (_dbgCalls) _dbgMissSamples.Clear(); }
+
+    /// <summary> 体检：取走并清空当前累积的未命中英文（去重）。 </summary>
+    public List<string> DrainMissedSamples()
+    {
+        lock (_dbgCalls)
+        {
+            var r = _dbgMissSamples.Distinct().ToList();
+            _dbgMissSamples.Clear();
+            return r;
+        }
+    }
+
     /// <summary> 钩子是否挂接成功（替换可用的前提）。 </summary>
     public bool Hooked { get; private set; }
 
@@ -307,7 +324,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 while (n < MaxTextLen && q[n] != 0) n++;
             }
             var hit = _replacement.TryReplace(q, n);
-            if (DebugStats && n >= 2)
+            if ((DebugStats || HealthCollecting) && n >= 2)
             {
                 lock (_dbgCalls)
                 {
@@ -316,7 +333,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
                     {
                         _dbgHits[source] = _dbgHits.TryGetValue(source, out var h) ? h + 1 : 1;
                     }
-                    else if (_dbgMissSamples.Count < 40)
+                    else if (_dbgMissSamples.Count < (HealthCollecting ? 500 : 40))
                     {
                         var text = System.Text.Encoding.UTF8.GetString(q, n).Trim();
                         // ⚠ 只记录**纯 ASCII 英文**样本：界面里已是中文的（安装器/Dalamud 自带汉化）不是问题，

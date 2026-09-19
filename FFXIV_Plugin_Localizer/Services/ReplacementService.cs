@@ -25,6 +25,7 @@ public sealed unsafe class ReplacementService
     public const string TableFileName = "安装器对照表.json";
     /// <summary> 安装器已装插件还缺翻译的文案清单（机翻 API 的输入）。 </summary>
     public const string MissingFileName = "安装器未翻译.json";
+    public const string MissedFileName = "运行时发现.json";   // 钩子未命中的英文 UI 文字（去重累积，供手动补词典）
     /// <summary> 窗口文字表目录（每插件一份 &lt;插件名&gt;.json）。 </summary>
     public const string WindowTableDirName = "窗口翻译";
     /// <summary> 「还原英文」前的自动备份目录名（回收站性质，用户可自行取回）。 </summary>
@@ -47,6 +48,10 @@ public sealed unsafe class ReplacementService
     private readonly Configuration _config;
     private readonly object _lock = new();
 
+    /// <summary> 仓库清单缓存成功刷新后触发（在后台 Task 线程）。订阅方据此立刻启动一轮机翻，
+    /// 而不必等下次启动——否则"拉完清单却不翻"，用户以为后台翻译没在跑。 </summary>
+    public event Action? RepoCacheUpdated;
+
     private Dictionary<string, string> _installerSource = new(StringComparer.Ordinal);              // 安装器表
     private readonly Dictionary<string, Dictionary<string, string>> _windowSources = new(StringComparer.Ordinal); // 插件名 → 窗口表
     private Dictionary<string, byte[]> _table = new(StringComparer.Ordinal);   // 合并查找：英文 → 中文 UTF-8
@@ -56,6 +61,8 @@ public sealed unsafe class ReplacementService
     private readonly Dictionary<string, nint> _idPtrs = new(StringComparer.Ordinal);
     /// <summary> 首尾带空白的完整串 → 保留空白的中文指针（键是**原始完整串**，中文里保留原空白）。 </summary>
     private readonly Dictionary<string, nint> _wsPtrs = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (int Hits, long FirstTick, long LastTick)> _missed = new(StringComparer.Ordinal);   // 运行时未命中英文：累计出现次数 + 首次出现 Tick
+    private bool _missedDirty; private long _lastMissFlushMs;
     // 已弃用的中文指针 → 弃用时刻（`Environment.TickCount64`，毫秒）。
     // ⚠ 2026-09-18 全面审查（**中**）：原为裸 `List<nint>` 且**只在 Dispose 释放**——
     //   指针是「只进不出」的。每次编辑译文 / 机翻每批 / 词典刷新都会 `RebuildMerged`，
@@ -167,6 +174,9 @@ public sealed unsafe class ReplacementService
         var now = Environment.TickCount64;
         if (now - _lastStampCheckMs < 3000) return false;   // 降频：3 秒一次（列目录便宜，但没必要每帧做）
         _lastStampCheckMs = now;
+        // 运行时未命中文字降频落盘（10 秒一次；钩子已持 _lock，这里同一把锁内安全）
+        CheckDueMissed();
+        if (_missedDirty && now - _lastMissFlushMs > 10_000) { FlushMissed(); }
         // 2026-09-17：低频自动清理**已卸载**插件（60 秒一次；候选插件不在已装列表 → 删译文/候选/源码）
         if (now - _lastPurgeCheckMs > 60_000)
         {
@@ -696,6 +706,7 @@ public sealed unsafe class ReplacementService
                     }
                 }
             }
+            RecordMissed(p, n);
             return 0;
         }
     }
@@ -710,6 +721,83 @@ public sealed unsafe class ReplacementService
             if (p[i] != prefix[i]) return false;
         return true;
     }
+
+    /// <summary>
+    /// 记录**未命中**的英文 UI 文字（钩子替换表查不到、原样放行的）。
+    /// 用途：源码提取会漏扫（QuestJournal 的 ImGui 文字），但只要插件在游戏里显示过这条英文，
+    /// 这里就会抓到 → 用户在「运行时发现」列表里手动补进词典，谁都能补。
+    /// 热路径：先字节级粗过滤（长度/字母/路径/##ID/中文），不通过直接 return，零分配。
+    /// </summary>
+    private void RecordMissed(byte* p, int n)
+    {
+        if (n < 6 || n > 160) return;
+        bool hasLetter = false, junk = false;
+        for (int i = 0; i < n; i++)
+        {
+            byte b = p[i];
+            if ((b >= (byte)'a' && b <= (byte)'z') || (b >= (byte)'A' && b <= (byte)'Z')) hasLetter = true;
+            else if (b == (byte)'\\' || b == (byte)'/' || b == (byte)':' || b == (byte)'<') junk = true;
+            else if (b == (byte)'#' && i + 1 < n && p[i + 1] == (byte)'#') return; // ImGui ##ID
+        }
+        if (!hasLetter || junk) return;
+        // 含中文（UTF8 三字节 E4-E9 开头）→ 不是英文 UI，跳过
+        for (int i = 0; i < n - 2; i++)
+            if (p[i] >= 0xE4 && p[i] <= 0xE9) return;
+        var s = System.Text.Encoding.UTF8.GetString(p, n).Trim();
+        if (s.Length < 4 || s.Length > 120) return;
+        var now = Environment.TickCount64;
+        if (_missed.TryGetValue(s, out var mi)) _missed[s] = (mi.Hits + 1, mi.FirstTick, now);
+        else _missed[s] = (1, now, now);
+        _missedDirty = true;
+    }
+
+    /// <summary> 到点判定（降频调用）：遍历累计的未翻译英文，**满足任意一个**就送机翻并移除——
+    /// ①累计出现 ≥ MissedMinHits 次（反复看到=真在用）；②距首次出现满 MissedMinAgeSec 秒（装稳了没卸）。
+    /// 防"下载看两眼就删"白烧 API。 </summary>
+    private void CheckDueMissed()
+    {
+        var now = Environment.TickCount64;
+        int minHits = _config.MissedMinHits;
+        long minAgeMs = (long)_config.MissedMinAgeSec * 1000;
+        List<string> due = new();
+        foreach (var kv in _missed)
+        {
+            bool hit = kv.Value.Hits >= minHits;
+            bool aged = (now - kv.Value.FirstTick) >= minAgeMs && (now - kv.Value.LastTick) <= 90_000; // 满时长 且 最近 90 秒仍在显示（删了插件就不再更新 LastTick，自动不再翻）
+            if (hit || aged) due.Add(kv.Key);
+        }
+        if (due.Count == 0) return;
+        foreach (var k in due) _missed.Remove(k);
+        _missedDirty = true;
+        foreach (var k in due)
+        {
+            try { MissedCaptured?.Invoke(k); } catch { }
+        }
+    }
+
+    /// <summary> 把内存里累积的未翻译英文落盘（降频调用，CheckExternalChanges 里触发）。 </summary>
+    private void FlushMissed()
+    {
+        _lastMissFlushMs = Environment.TickCount64;
+        if (!_missedDirty || _missed.Count == 0) return;
+        _missedDirty = false;
+        try
+        {
+            var path = Path.Combine(_configDir(), MissedFileName);
+            File.WriteAllText(path, string.Join("\n", _missed.Keys.OrderBy(x => x, StringComparer.Ordinal)), new UTF8Encoding(false));
+            _appLog.Info($"[运行时发现] 已记录 {_missed.Count} 条未翻译英文 → {MissedFileName}");
+        }
+        catch (Exception ex) { _appLog.Error("[运行时发现] 落盘失败：" + ex.Message); }
+    }
+
+    /// <summary> 列出运行时发现的未翻译英文（按字典序）。 </summary>
+    /// <summary> 钩子抓到一条**新**的未翻译英文（去重后才触发；供后台自动翻译）。 </summary>
+    public event Action<string>? MissedCaptured;
+
+    public List<string> GetMissed() => _missed.Keys.OrderBy(x => x, StringComparer.Ordinal).ToList();
+
+    /// <summary> 手动补完后从运行时列表移除该条（可选；留着也无害，下次去重不会重复记）。 </summary>
+    public void RemoveMissed(string s) { _missed.Remove(s); _missedDirty = true; }
 
     /// <summary>
     /// 导入 FuckDalamudCN 的机翻表（installedPlugins\FuckDalamudCN\&lt;版本&gt;\Assets\translations.json，
@@ -1055,7 +1143,8 @@ public sealed unsafe class ReplacementService
                 }
                 Directory.CreateDirectory(_configDir());
                 File.WriteAllText(cachePath, JsonSerializer.Serialize(all, Indented));
-                _appLog.Info($"[仓库缺口] 已合并 {repoUrls.Count} 个仓库、共 {all.Count} 个插件到本地缓存，下次启动检查可预翻未安装插件");
+                _appLog.Info($"[仓库缺口] 已合并 {repoUrls.Count} 个仓库、共 {all.Count} 个插件到本地缓存，启动一轮缺口翻译");
+                RepoCacheUpdated?.Invoke();   // 拉完新清单 → 通知 Plugin 立刻开始翻（不等下次启动）
             }
             catch (Exception ex)
             {
@@ -1083,6 +1172,13 @@ public sealed unsafe class ReplacementService
             catch { /* 代理地址非法则退回直连 */ }
         }
         return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+    }
+
+    /// <summary> 体检用：某条英文介绍在安装器对照表里是否已有中文（空文案不算缺口）。 </summary>
+    public bool HasInstallerTranslation(string? english)
+    {
+        if (string.IsNullOrWhiteSpace(english)) return true;
+        lock (_lock) return _installerSource.ContainsKey(english.Trim());
     }
 
     /// <summary>
@@ -1753,16 +1849,38 @@ public sealed unsafe class ReplacementService
     /// <summary> 读扫描候选文件（文案扫描输出，仍是「英文→空值」字典格式）。 </summary>
     private static Dictionary<string, string> ReadJsonDict(string path)
     {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
-            if (!File.Exists(path)) return new Dictionary<string, string>();
-            return JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path))
-                   ?? new Dictionary<string, string>();
+            if (!File.Exists(path)) return result;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                // 新格式：[{"原文":"...","译文":"..."}]（防外部 AI 把扁平 {英文:""} 当成 key/value 搞混返回空）
+                foreach (var el in root.EnumerateArray())
+                {
+                    string? en = null, zh = "";
+                    if (el.ValueKind == JsonValueKind.Object)
+                    {
+                        if (el.TryGetProperty("原文", out var enEl) && enEl.ValueKind == JsonValueKind.String) en = enEl.GetString();
+                        if (el.TryGetProperty("译文", out var zhEl) && zhEl.ValueKind == JsonValueKind.String) zh = zhEl.GetString() ?? "";
+                    }
+                    if (!string.IsNullOrEmpty(en) && !result.ContainsKey(en)) result[en] = zh ?? "";
+                }
+            }
+            else if (root.ValueKind == JsonValueKind.Object)
+            {
+                // 旧扁平格式：{"英文": "译文"}
+                foreach (var prop in root.EnumerateObject())
+                {
+                    string zh = prop.Value.ValueKind == JsonValueKind.String ? (prop.Value.GetString() ?? "") : "";
+                    if (!result.ContainsKey(prop.Name)) result[prop.Name] = zh;
+                }
+            }
         }
-        catch
-        {
-            return new Dictionary<string, string>();
-        }
+        catch { }
+        return result;
     }
 
     // ═══════════════════════ 手动编辑（安装器表） ═══════════════════════

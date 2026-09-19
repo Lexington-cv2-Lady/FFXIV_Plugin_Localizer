@@ -68,6 +68,22 @@ public sealed class AiSettingsWindow : Window
 
         ImGui.Spacing();
 
+        // 自定义模式：让用户给端点起个名（Key 按这个名分存）——仅在当前选了「自定义」时才显示
+        if (MtTranslateService.IsCustomProvider(cfg))
+        {
+            ImGui.TextUnformatted("自定义名称：");
+            var customName = cfg.AiCustomName;
+            ImGui.SetNextItemWidth(-1f);
+            if (ImGui.InputTextWithHint("##AiCustomName", "给这个自定义端点起个名（如「我的智谱中转」）", ref customName, 64))
+            {
+                cfg.AiCustomName = customName.Trim();
+                cfg.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("自定义模式下给这个端点起个好认的名字（Key 会按这个名字保存）。留空则显示「自定义」。");
+            ImGui.Spacing();
+        }
+
         // BaseUrl 覆盖
         ImGui.TextUnformatted("API 地址（留空 = 供应商预设）：");
         var baseUrl = cfg.AiBaseUrl;
@@ -83,10 +99,13 @@ public sealed class AiSettingsWindow : Window
 
         // API Key（密文 + 显隐 + 粘贴）
         ImGui.TextUnformatted("API Key（按服务商独立保存，只存本机）：");
-        var key = MtTranslateService.GetApiKey(cfg);
+        var key = MtTranslateService.GetApiKey(cfg) ?? "";
         var showW = 52f;
         var pasteW = 52f;
-        ImGui.SetNextItemWidth(Math.Max(120f, ImGui.GetContentRegionAvail().X - pasteW - showW - 16f));
+        // Key 框宽按密文长度自适应：短 Key 窄、长 Key 放宽（封顶），不再占满整行
+        var charW = ImGui.CalcTextSize("A").X;
+        var keyW = Math.Clamp((key?.Length ?? 0) * charW + 44f, 160f, 320f);
+        ImGui.SetNextItemWidth(keyW);
         var keyFlags = _showKey ? ImGuiInputTextFlags.None : ImGuiInputTextFlags.Password;
         if (ImGui.InputText("##AiKey", ref key, 512, keyFlags))
         {
@@ -150,48 +169,6 @@ public sealed class AiSettingsWindow : Window
             cfg.AiBatchSize = Math.Clamp(batch, 1, 200);
             cfg.Save();
         }
-
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
-
-        // ── wiki 官方术语表（术语优先于机翻，物品/技能名必须用官方译名） ──
-        ImGui.TextUnformatted("wiki 术语表（官方译名，优先级最高）：");
-        Ui.Hint("与旧项目「FFXIV 模组汉化工具」联动：装了它就直接读取它词典目录下的 wiki 术语，每次启动重新读取，\n" +
-                "故旧项目更新术语后本插件立即用上最新版（不复制文件）。未装旧项目则留空此目录，正常走机翻。");
-        var wikiOn = cfg.WikiEnabled;
-        if (ImGui.Checkbox("启用 wiki 术语表", ref wikiOn))
-        {
-            cfg.WikiEnabled = wikiOn;
-            cfg.Save();
-            _plugin.ReloadWiki(); // 立即生效
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("启用后，命中术语的英文一律用官方译名（如物品名、技能名），\n优先于机翻和普通对照表。中文化界面时更准确统一。");
-
-        var wikiDir = cfg.WikiDir;
-        ImGui.SetNextItemWidth(Math.Max(200f, ImGui.GetContentRegionAvail().X - 140f));
-        if (ImGui.InputTextWithHint("##WikiDir", "术语目录（留空 = 自动探测旧项目的词典目录）", ref wikiDir, 512))
-        {
-            cfg.WikiDir = wikiDir.Trim();
-            cfg.Save();
-        }
-        ImGui.SameLine();
-        if (ImGui.Button("自动探测并加载"))
-        {
-            var n = _plugin.ReloadWiki();
-            _testResult = n > 0
-                ? $"wiki 术语已加载 {n} 条并生效（来源：{cfg.WikiDir}）"
-                : "未找到术语表：请确认已装旧项目插件（会读其词典目录），或在上方手动填写术语目录。";
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("重新探测旧项目词典目录并加载其 wiki 术语（不复制，直接读取）。");
-
-        if (_plugin.Wiki.Loaded)
-            Ui.ColoredWrapped(new Vector4(0.55f, 0.9f, 0.55f, 1f),
-                $"【已启用】 已加载 {_plugin.Wiki.Count} 条官方术语（{string.Join("、", _plugin.Wiki.CategoryCounts.Select(kv => $"{kv.Key} {kv.Value}"))}）");
-        else
-            Ui.Hint("未加载术语表。装了旧项目插件会自动读取其术语；也可在上方手动指定目录后点「自动探测并加载」。");
 
         ImGui.Spacing();
         ImGui.Separator();

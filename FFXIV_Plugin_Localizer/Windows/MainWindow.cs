@@ -185,6 +185,27 @@ public sealed class MainWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("打开词典窗口（预翻译词源目录、重载词典、单词黑名单）。\n译文在此沉淀、跨插件复用；黑名单词永远保持英文。");
 
+        // 2026-09-19：体检——逐个打开已装插件配置窗，自动找出"还是英文"的漏网文字
+        Ui.SameLineIfFits(Ui.ButtonWidth("体检"));
+        if (_plugin.HealthRunning)
+        {
+            ImGui.BeginDisabled();
+            ImGui.Button("体检中…");
+            ImGui.EndDisabled();
+        }
+        else if (ImGui.Button("体检"))
+        {
+            _plugin.StartHealthCheck();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("自动逐个打开已装插件的配置窗（约 1.5 秒/个），收集"
+                           + "「对照表里没有、界面仍显示英文」的漏网文字——像你肉眼逐个窗口看一遍。\n"
+                           + "跑完在下方和日志出报告。会短暂自动开关窗口，属正常。");
+        if (_plugin.HealthReport.Length > 0)
+        {
+            Ui.ColoredWrapped(new Vector4(0.7f, 0.9f, 0.75f, 1f), _plugin.HealthReport);
+        }
+
         ImGui.Separator();
 
         // ── 日志（置底持续显示） ──

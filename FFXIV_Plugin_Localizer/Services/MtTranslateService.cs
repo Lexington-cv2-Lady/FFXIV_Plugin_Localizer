@@ -25,7 +25,7 @@ public sealed class MtTranslateService
         ("通义千问", "qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1", "阿里云百炼（OpenAI 兼容，需先开通百炼）"),
         ("腾讯混元", "hunyuan-turbos-latest", "https://api.hunyuan.cloud.tencent.com/v1", "腾讯云大模型（OpenAI 兼容）"),
         ("百度千帆", "ernie-4.5-turbo-32k", "https://qianfan.baidubce.com/v2", "百度智能云千帆（OpenAI 兼容）"),
-        ("DeepSeek", "deepseek-chat", "https://api.deepseek.com/v1", "深度求索（OpenAI 兼容，国内可直连，性价比高）"),
+        ("DeepSeek", "deepseek-flash", "https://api.deepseek.com/v1", "深度求索（OpenAI 兼容，国内可直连，性价比高；2026-09-10 起 deepseek-flash 正式发布，旧 deepseek-chat 已下线）"),
         ("OpenRouter", "openai/gpt-4o-mini", "https://openrouter.ai/api/v1", "海外聚合中转，可调 GPT/Claude/Gemini"),
         ("Groq", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1", "开源模型超高速推理（海外）"),
         ("OpenAI（GPT）", "gpt-4o-mini", "https://api.openai.com/v1", "官方接口：国内不可直连，需代理或中转"),
@@ -51,6 +51,12 @@ public sealed class MtTranslateService
 
     /// <summary> 当前后台任务的句柄（供 `Dispose` **等待它真正退出**，见该方法说明）。 </summary>
     private volatile Task? _task;
+    // 2026-09-19 运行时发现自动翻：钩子抓到未翻译英文 → 入此队列 → 空闲时自动送翻，翻完写词典
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _missedQueue = new();
+    private readonly HashSet<string> _missedQueued = new(StringComparer.Ordinal);
+    private readonly object _missedLock = new();
+    /// <summary> 一批运行时发现文案翻完（en→zh），由 Plugin 订阅写进词典。 </summary>
+    public event Action<Dictionary<string,string>>? MissedBatchTranslated;
 
     /// <summary> 已卸载：此后不再启动新任务（见 `Dispose`）。 </summary>
     private volatile bool _disposed;
@@ -77,6 +83,63 @@ public sealed class MtTranslateService
         try { cts.Cancel(); } catch { /* 已释放则忽略 */ }
         Status = "正在停止…（已完成的批次会保留）";
         _appLog.Info("[机翻] 用户请求停止翻译");
+    }
+
+    /// <summary> 钩子抓到一条未翻译英文 → 入队；若当前空闲且已填 Key，则自动启动后台翻（2026-09-19 全自动）。 </summary>
+    public void EnqueueMissed(string en)
+    {
+        if (_disposed) return;
+        if (string.IsNullOrWhiteSpace(GetApiKey(_cfg))) return;
+        lock (_missedLock)
+        {
+            if (!_missedQueued.Add(en)) return;   // 已在队列/已入过队
+        }
+        _missedQueue.Enqueue(en);
+        if (!Running) StartMissedLoop();
+    }
+
+    /// <summary> 后台循环：取 missed 队列攒批 → TranslateAll → 翻完事件抛给 Plugin 写词典。队列空即退出。 </summary>
+    private void StartMissedLoop()
+    {
+        if (_disposed || Running) return;
+        Running = true;
+        ProgressDone = 0; ProgressTotal = 0;
+        Status = "自动翻译运行时发现的新文案…";
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        _task = Task.Run(async () =>
+        {
+            var done = 0;
+            try
+            {
+                while (_missedQueue.TryDequeue(out var en))
+                {
+                    lock (_missedLock) _missedQueued.Remove(en);
+                    if (en.Length > MaxTextLen) continue;
+                    var batch = new List<string> { en };
+                    while (batch.Count < 8 && _missedQueue.TryDequeue(out var more))
+                    {
+                        lock (_missedLock) _missedQueued.Remove(more);
+                        if (more.Length <= MaxTextLen) batch.Add(more);
+                    }
+                    await TranslateAll(batch, t => { MissedBatchTranslated?.Invoke(t); return 0; }, cts.Token);
+                    done += batch.Count;
+                }
+                if (done > 0) _appLog.Info("[自动翻] 运行时发现文案共翻 " + done + " 条并写词典");
+            }
+            catch (Exception ex)
+            {
+                Status = "自动翻失败：" + ex.Message;
+                _appLog.Error("[自动翻] " + Status);
+            }
+            finally
+            {
+                Running = false;
+                _cts = null;
+                cts.Dispose();
+                ProgressDone = 0; ProgressTotal = 0;
+            }
+        });
     }
 
     /// <summary>
@@ -188,6 +251,7 @@ public sealed class MtTranslateService
             {
                 var missing = _replacement.CollectMissing();
                 var texts = missing.Values.Distinct().Where(t => t.Length <= MaxTextLen).ToList();
+                _appLog.Info($"[机翻] 开始：{missing.Count} 个插件缺口、{texts.Count} 条待翻文案（介绍类）");
                 await TranslateAll(texts, t => _replacement.MergeTranslations(t), cts.Token);
             }
             catch (Exception ex)
@@ -293,6 +357,7 @@ public sealed class MtTranslateService
                     return;
                 }
                 Status = $"共 {perPlugin.Count} 个插件、{uniq.Count} 条待翻，正在翻译…";
+                _appLog.Info($"[机翻] 一键翻译窗口文字：{perPlugin.Count} 个插件、{uniq.Count} 条待翻");
 
                 // ② 整批送翻，再按"归属插件"分发回各自的窗口表
                 await TranslateAll(uniq, translated =>
@@ -414,6 +479,8 @@ public sealed class MtTranslateService
             var doneNow = total0 - queue.Count;
             ProgressDone = doneNow;
             Status = $"翻译中 {doneNow}/{total0} 条（本批 {take} 条 / {chars} 字符）…";
+            // 日志自带上下文：这一批在翻哪段文案（首条前 40 字），出问题不用再来回转述
+            _appLog.Info($"[机翻] 进度 {doneNow}/{total0}：本批 {take} 条，首条 \"{Truncate(batch.Keys.First(), 40)}\"");
             try
             {
                 // ⚠ **失败自动拆批重试**（2026-09-15 实测事故）：有一批 80 条因 AI **把输入原样回显**
@@ -436,7 +503,7 @@ public sealed class MtTranslateService
             catch (Exception ex)
             {
                 failed += batch.Count;
-                _appLog.Warn($"[机翻] 一批 {batch.Count} 条失败：{ex.Message}");
+                _appLog.Warn($"[机翻] 一批 {batch.Count} 条失败（首条 \"{Truncate(batch.Keys.First(), 40)}\"）：{Truncate(ex.Message, 120)}");
             }
             queue.RemoveRange(0, batch.Count);
 
@@ -494,7 +561,7 @@ public sealed class MtTranslateService
         {
             return await TranslateBatch(batch, token);
         }
-        catch (OperationCanceledException) { throw; }   // 用户主动停止：不重试
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }   // 用户主动停止：不重试；HttpClient 超时（token 未取消）会落到下面拆批
         catch (Exception ex) when (batch.Count > 1 && depth < 8)
         {
             var keys = batch.Keys.ToList();
@@ -509,10 +576,10 @@ public sealed class MtTranslateService
                 {
                     foreach (var (k, v) in await TranslateBatchWithSplit(part, token, depth + 1)) result[k] = v;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
                 catch (Exception ex2)
                 {
-                    _appLog.Warn($"[机翻] 拆出的 {part.Count} 条仍失败：{Truncate(ex2.Message, 80)}");
+                    _appLog.Warn($"[机翻] 拆出的 {part.Count} 条仍失败（首条 \"{Truncate(part.Keys.First(), 40)}\"）：{Truncate(ex2.Message, 100)}");
                 }
                 try { await Task.Delay(400, token); } catch (OperationCanceledException) { throw; }
             }
@@ -704,15 +771,19 @@ public sealed class MtTranslateService
         return string.IsNullOrEmpty(cb) || string.IsNullOrEmpty(cm) ? ("", "") : (cb, cm);
     }
 
-    /// <summary> 当前服务商的名字（手工自定义模式返回「自定义」）。 </summary>
+    /// <summary> 当前服务商的名字（内置预设返回其名；自定义模式返回用户起的名，没起名则「自定义」）。 </summary>
     public static string CurrentProviderName(Configuration cfg)
     {
         var named = FindByName(cfg);
         if (named != null) return named.Value.Name;
-        return string.IsNullOrWhiteSpace(cfg.AiBaseUrl) || string.IsNullOrWhiteSpace(cfg.AiModel)
-            ? "未配置"
-            : "自定义";
+        if (string.IsNullOrWhiteSpace(cfg.AiBaseUrl) || string.IsNullOrWhiteSpace(cfg.AiModel))
+            return "未配置";
+        var custom = (cfg.AiCustomName ?? "").Trim();
+        return custom.Length > 0 ? custom : "自定义";
     }
+
+    /// <summary> 当前是否为自定义端点模式（AiProviderName 空或不在内置预设表中）。 </summary>
+    public static bool IsCustomProvider(Configuration cfg) => FindByName(cfg) == null;
 
     /// <summary> 读取当前服务商保存的 API Key（兼容旧版单一 ZhipuApiKey 字段：仅迁移到智谱名下）。 </summary>
     public static string GetApiKey(Configuration cfg)
