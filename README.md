@@ -8,11 +8,19 @@
 
 卫月设置 -> 实验性 -> 自定义插件仓库，添加：
 
+**主地址**
 ```
 https://raw.githubusercontent.com/Lexington-cv2-Lady/Lexington_CV-2_Repository/main/plugin_repo.json
 ```
 
+**镜像**（主地址加载慢时用）
+```
+https://cdn.jsdmirror.com/gh/Lexington-cv2-Lady/Lexington_CV-2_Repository@main/plugin_repo.json
+```
+
 然后在插件安装器搜索「翻译插件的插件」安装。
+
+聊天命令：`/ptp`。
 
 ## 流程
 
