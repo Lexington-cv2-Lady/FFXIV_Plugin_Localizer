@@ -28,7 +28,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static ISigScanner SigScanner { get; private set; } = null!;
     [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
 
-    private const string CommandName = "/plocalizer";
+    private const string CommandName = "/ptp";
 
     public readonly WindowSystem WindowSystem = new("FFXIVPluginLocalizer");
     public Configuration Configuration { get; init; }
