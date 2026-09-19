@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Text.Json;
+using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
@@ -45,6 +47,8 @@ public sealed class Plugin : IDalamudPlugin
     public DictWindow DictWindow { get; }
     public ManualEditWindow ManualEditWindow { get; }
     public RepoWindow RepoWindow { get; }
+    public HealthReportWindow HealthReportWindow { get; }
+    public PluginEditorWindow PluginEditorWindow { get; }
     public SourceExtractService SourceExtract { get; }
     public WikiGlossaryService Wiki { get; }
     public OldDictionaryService OldDict { get; }
@@ -110,6 +114,8 @@ public sealed class Plugin : IDalamudPlugin
         DictWindow = new DictWindow(this);
         ManualEditWindow = new ManualEditWindow(this, Replacement);
         RepoWindow = new RepoWindow(this);
+        HealthReportWindow = new HealthReportWindow(this);
+        PluginEditorWindow = new PluginEditorWindow(this, Replacement, Mt);
         WindowSystem.AddWindow(MainWindow);
         WindowSystem.AddWindow(LogWindow);
         WindowSystem.AddWindow(TranslationWindow);
@@ -119,6 +125,11 @@ public sealed class Plugin : IDalamudPlugin
         WindowSystem.AddWindow(DictWindow);
         WindowSystem.AddWindow(ManualEditWindow);
         WindowSystem.AddWindow(RepoWindow);
+        WindowSystem.AddWindow(HealthReportWindow);
+        WindowSystem.AddWindow(PluginEditorWindow);
+        // 2026-09-19 全自动：钩子抓到未翻译英文 → 开了后台翻译就自动进机翻队列；翻完写词典
+        Replacement.MissedCaptured += OnMissedCaptured;
+        Mt.MissedBatchTranslated += OnMissedBatchTranslated;
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -128,6 +139,8 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.Draw += DrawAll;
         // 2026-09-17：行为联动——卫月在安装器里卸载插件 → 立即清理其翻译资产（秒级；60 秒轮询兜底）
         Replacement.StartUninstallWatch();
+        // 2026-09-19：仓库清单后台拉完 → 立刻启动一轮机翻（原来拉完就结束，要等下次启动才翻）
+        Replacement.RepoCacheUpdated += OnRepoCacheUpdated;
         PluginInterface.UiBuilder.OpenMainUi += ToggleMain;
         PluginInterface.UiBuilder.OpenConfigUi += ToggleMain; // 插件安装器的设置按钮：本插件暂无独立设置窗，打开主窗（官方模板同款回调，缺失会在安装器报校验警告）
         Framework.Update += OnFramework;
@@ -172,12 +185,66 @@ public sealed class Plugin : IDalamudPlugin
         }
         // 外部改了译文 json（资源管理器里增删改）也要即时生效——不能只在「插件翻译」窗口开着时才检测
         Replacement.CheckExternalChanges();
+        AutoMergeTick();
         // 调试日志（可选）
         if (Configuration.DebugHookLog && (DateTime.Now - _lastDbgLog).TotalSeconds >= 5)
         {
             _lastDbgLog = DateTime.Now;
             Hook.TickDebugLog();
         }
+    }
+
+    /// <summary> 钩子抓到一条未翻译英文：开了后台自动翻译就直接送机翻队列（全自动）。 </summary>
+    private void OnMissedCaptured(string en)
+    {
+        if (Configuration.AutoTranslate)
+            Mt.EnqueueMissed(en);
+    }
+
+    /// <summary> 一批运行时发现文案翻完（en→zh）→ 直接写进本项目词典（全局命中）。 </summary>
+    private void OnMissedBatchTranslated(Dictionary<string, string> batch)
+    {
+        try
+        {
+            var dir = Configuration.DictDir;
+            if (string.IsNullOrWhiteSpace(dir) || !OldDict.Loaded || batch.Count == 0) return;
+            var pairs = new System.Collections.Generic.List<(string En, string Zh)>();
+            foreach (var kv in batch) pairs.Add((kv.Key, kv.Value));
+            var (added, _) = OldDict.MergeIntoDict(dir, pairs);
+            OldDict.Load(dir);
+            if (added > 0) AppLog.Info("[自动翻] 运行时发现 → 写词典 +" + added + " 条");
+        }
+        catch (Exception ex) { AppLog.Error("[自动翻] 写词典失败：" + ex.Message); }
+    }
+
+    /// <summary> 机翻刚结束的瞬间，若开了 AutoMergeToDict，自动把已翻译文沉淀进 我的翻译.json（只增不覆盖）。 </summary>
+    private void AutoMergeTick()
+    {
+        if (_mtWasRunning && !Mt.Running && Configuration.AutoMergeToDict)
+        {
+            try
+            {
+                var dir = Configuration.DictDir;
+                if (!string.IsNullOrWhiteSpace(dir) && OldDict.Loaded)
+                {
+                    var pairs = new System.Collections.Generic.List<(string En, string Zh)>();
+                    foreach (var (name, _, _) in Replacement.GetWindowPlugins())
+                    {
+                        var (tr, _) = Replacement.GetWindowEntries(name);
+                        foreach (var (en, zh) in tr) pairs.Add((en, zh));
+                    }
+                    if (pairs.Count > 0)
+                    {
+                        var (added, _) = OldDict.MergeIntoDict(dir, pairs);
+                        OldDict.Load(dir);
+                        if (added > 0)
+                            AppLog.Info("[自动沉淀] 机翻结束，自动写入词典 +" + added + " 条（已存在的跳过）");
+                    }
+                }
+            }
+            catch (Exception ex) { AppLog.Error("[自动沉淀] 失败：" + ex.Message); }
+        }
+        _mtWasRunning = Mt.Running;
     }
 
     private void OnCommand(string command, string args) => ToggleMain();
@@ -203,6 +270,9 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary> 打开/关闭手动翻译（安装器对照表）二级窗口。 </summary>
     public void ToggleManualEditUi() => ManualEditWindow.Toggle();
+
+    /// <summary> 打开「插件编辑」二级窗口并切到指定插件（插件翻译列表点「编辑」时调用）。 </summary>
+    public void OpenPluginEditor(string plugin) => PluginEditorWindow.Open(plugin);
 
     /// <summary> 打开/关闭仓库地址二级窗口。 </summary>
     public void ToggleRepoUi() => RepoWindow.Toggle();
@@ -478,6 +548,7 @@ public sealed class Plugin : IDalamudPlugin
     // ── 启动自动检查：加载约 10 秒后扫一次缺口，静默/按配置翻译（插件更新后新文案也走这条） ──
     private readonly DateTime _startupCheckAt = DateTime.Now.AddSeconds(10);
     private DateTime _lastDbgLog = DateTime.MinValue;
+    private bool _mtWasRunning;   // 机翻完成自动沉淀词典用
     private bool _startupCheckDone;
 
     private void StartupCheck()
@@ -533,6 +604,152 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    /// <summary> 仓库清单缓存后台拉完后触发（后台 Task 线程）：
+    /// 若主开关+静默都开着、且配了 Key，立刻启动一轮机翻——新清单里 520 个插件的介绍缺口马上开始翻，
+    /// 不必等下次启动。Mt.Start() 内部自己 CollectMissing 读新缓存；正在跑则自动跳过。 </summary>
+    private void OnRepoCacheUpdated()
+    {
+        try
+        {
+            if (!Configuration.AutoTranslate || !Configuration.SilentTranslate)
+                return;
+            if (string.IsNullOrWhiteSpace(MtTranslateService.GetApiKey(Configuration)))
+            {
+                AppLog.Info("[仓库缺口] 新清单已就位，但未配置 API Key，暂不自动翻译");
+                return;
+            }
+            AppLog.Info("[仓库缺口] 新清单已就位，启动一轮缺口翻译…");
+            Mt.Start();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn("[仓库缺口] 拉完清单后启动翻译失败：" + ex.Message);
+        }
+    }
+
+    // ── 体检：逐个打开已装插件的配置窗，收集"仍显示英文"的漏网文字（像用户肉眼看一样） ──
+    private bool _healthRunning;
+    /// <summary> 体检是否在跑（主窗口据此禁用按钮）。 </summary>
+    public bool HealthRunning { get; private set; }
+    /// <summary> 最近一次体检报告（主窗口显示摘要）。 </summary>
+    public string HealthReport { get; private set; } = "";
+    /// <summary> 最近一次体检的完整结果：(插件名, 漏网英文列表)——报告窗口据此逐项画出。 </summary>
+    public List<(string Name, List<string> Items)> HealthResults { get; } = new();
+
+    /// <summary>
+    /// 逐个打开已装插件的配置窗（OpenConfigUi），等 ~1.5 秒让它画出来，
+    /// 收集这期间"未命中译文表的纯英文"（≈ 肉眼看着还是英文的），再关掉窗口，最后出报告。
+    /// 原理：钩子在绘制那一刻查表，命中的已换成中文指针——所以未命中的英文就是真漏网。
+    /// 会短暂自动开关窗口，故做成手动按钮，不在后台自动跑。
+    /// </summary>
+    public void StartHealthCheck()
+    {
+        if (_healthRunning) return;
+        _healthRunning = true;
+        HealthRunning = true;
+        HealthReport = "";
+        Task.Run(async () =>
+        {
+            try
+            {
+                Hook.HealthCollecting = true;
+                var targets = PluginInterface.InstalledPlugins
+                    .Where(p => p.IsLoaded && (p.HasConfigUi || p.HasMainUi)
+                             && !string.Equals(p.InternalName, "FFXIV_Plugin_Localizer", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                AppLog.Info($"[体检] 开始：共 {targets.Count} 个插件待检查");
+                HealthResults.Clear();
+                foreach (var p in targets)
+                {
+                    Hook.ResetMissedSamples();
+                    try { if (p.HasConfigUi) p.OpenConfigUi(); else p.OpenMainUi(); }
+                    catch (Exception exOpen) { AppLog.Warn($"[体检] 打开 {p.Name} 失败：{exOpen.Message}"); }
+                    await Task.Delay(1500);
+                    var missed = Hook.DrainMissedSamples();
+                    try { AtkHook.TryClosePluginWindow(p.InternalName); } catch { /* 尽力关 */ }
+                    await Task.Delay(300);
+                    var real = missed.Where(IsLikelyUiText).ToList();
+                    if (real.Count > 0)
+                    {
+                        AppLog.Info($"[体检] {p.Name}（{p.InternalName}）：{real.Count} 条漏网英文");
+                        foreach (var m in real.Take(15)) AppLog.Info("      " + m);
+                        HealthResults.Add((p.Name, real));
+                    }
+                    else
+                    {
+                        AppLog.Info($"[体检] {p.Name}：无漏网英文");
+                    }
+                }
+                // ── 安装器介绍覆盖率（未安装插件的简介/描述，静态对比仓库清单 vs 译文表）──
+                // 未安装的插件开不了配置窗，它们的介绍在仓库清单里——直接对比即可，不用开窗。
+                var cachePath = Path.Combine(PluginInterface.GetPluginConfigDirectory(), "pluginmaster_cache.json");
+                if (File.Exists(cachePath))
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(cachePath));
+                    int introTotal = 0, introDone = 0;
+                    foreach (var el in doc.RootElement.EnumerateArray())
+                    {
+                        var name = el.TryGetProperty("Name", out var nEl) ? (nEl.GetString() ?? "?") : "?";
+                        var punch = el.TryGetProperty("Punchline", out var pEl) ? pEl.GetString() ?? "" : "";
+                        var desc = el.TryGetProperty("Description", out var dEl) ? dEl.GetString() ?? "" : "";
+                        var missingItems = new List<string>();
+                        if (!string.IsNullOrWhiteSpace(punch))
+                        {
+                            introTotal++;
+                            if (Replacement.HasInstallerTranslation(punch)) introDone++;
+                            else missingItems.Add("[简介] " + punch.Trim());
+                        }
+                        if (!string.IsNullOrWhiteSpace(desc))
+                        {
+                            introTotal++;
+                            if (Replacement.HasInstallerTranslation(desc)) introDone++;
+                            else
+                            {
+                                var d = desc.Trim();
+                                missingItems.Add("[描述] " + (d.Length > 80 ? d[..80] + "…" : d));
+                            }
+                        }
+                        if (missingItems.Count > 0) HealthResults.Add((name, missingItems));
+                    }
+                    AppLog.Info($"[体检] 安装器介绍覆盖率：{introDone}/{introTotal} 条已汉化（全部仓库插件的简介+描述）");
+                }
+                else
+                {
+                    AppLog.Info("[体检] 无仓库清单缓存（pluginmaster_cache.json），跳过安装器介绍覆盖率检查");
+                }
+
+                HealthReport = HealthResults.Count == 0
+                    ? "体检完成：所有插件配置窗未发现漏网英文。"
+                    : $"体检完成：{HealthResults.Count} 个插件仍有漏网英文（详见报告窗口/日志）。";
+                AppLog.Info("[体检] 完成。\n" + HealthReport);
+                HealthReportWindow.Toggle();   // 跑完自动弹报告窗给用户看
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("[体检] 失败：" + ex.Message);
+                HealthReport = "体检失败：" + ex.Message;
+            }
+            finally
+            {
+                Hook.HealthCollecting = false;
+                _healthRunning = false;
+                HealthRunning = false;
+            }
+        });
+    }
+
+    /// <summary> 体检过滤：真正值得报的界面文字（去掉 "[igButton] " 前缀、排除 ImGui ###id 与太短/纯符号串）。 </summary>
+    private static bool IsLikelyUiText(string s)
+    {
+        var t = s;
+        var idx = t.IndexOf(']');
+        if (idx >= 0 && idx < t.Length - 1) t = t[(idx + 1)..].Trim();   // 去掉 "[source] " 前缀
+        if (t.Length < 3) return false;
+        if (t.StartsWith("###")) return false;                            // ImGui 内部 id
+        var letters = t.Count(char.IsAsciiLetter);
+        return letters >= 2;                                              // 至少两个字母，排除纯数字/符号
+    }
+
     public void Dispose()
     {
         Framework.Update -= OnFramework;
@@ -541,6 +758,9 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleMain;
         CommandManager.RemoveHandler(CommandName);
         WindowSystem.RemoveAllWindows();
+        Replacement.RepoCacheUpdated -= OnRepoCacheUpdated;   // 退订，避免卸载后回调
+        Replacement.MissedCaptured -= OnMissedCaptured;        // 2026-09-20 发布审查：补退订
+        Mt.MissedBatchTranslated -= OnMissedBatchTranslated;
         Mt.Dispose();          // 中断进行中的翻译（否则卸载后后台任务还在跑）
         Hook.Dispose();
         AtkHook.Dispose();

@@ -566,10 +566,10 @@ public sealed class SourceExtractService
         var outDir = Path.Combine(_configDir(), OutputDirName);
         Directory.CreateDirectory(outDir);
         var outPath = Path.Combine(outDir, $"{pluginName}_源码提取.json");
-        var dict = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var s in strings) dict[s] = "";
+        // 2026-09-19：改用 [{原文,译文}] 数组格式——扁平 {英文:""} 会让外部 AI 分不清 key/value、常返回空值（旧项目教训）。
+        var entries = strings.Select(s => new Dictionary<string, string> { ["原文"] = s, ["译文"] = "" }).ToList();
         File.WriteAllText(outPath,
-            System.Text.Json.JsonSerializer.Serialize(dict, JsonFile.Indented), Encoding.UTF8);
+            System.Text.Json.JsonSerializer.Serialize(entries, JsonFile.Indented), Encoding.UTF8);
 
         var funcSummary = string.Join("、", funcStats.OrderByDescending(kv => kv.Value).Take(6)
             .Select(kv => $"{kv.Key}×{kv.Value}"));

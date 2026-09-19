@@ -22,11 +22,11 @@ public sealed class WindowReplaceWindow : Window
     private readonly MtTranslateService _mt;
     private string _summary = "";
     private bool _mtWasRunning;
+    private string _filter = "";   // 列表过滤（搜原文/译文/插件名）
 
     // 按插件缓存（展开时读取文件；机翻结束后自动失效）
     private readonly Dictionary<string, (List<(string En, string Zh)> Translated, List<string> Untranslated)> _cache = new();
     private readonly Dictionary<string, string> _editBufs = new();
-    private string _openPlugin = ""; // 当前展开的插件（只允许一个展开，简化缓存管理）
     // 2026-09-18「打开/关闭插件配置」toggle：记录我们帮开过的窗口（官方 API 无 Close，二次点击走 Atk SetShow(false)）
     private readonly Dictionary<string, bool> _openedByUs = new(StringComparer.OrdinalIgnoreCase);
 
@@ -186,7 +186,6 @@ public sealed class WindowReplaceWindow : Window
                 // 清缓存 + 重读目录与表，解决"删了 json 仍显示已翻译"的问题
                 _cache.Clear();
                 _editBufs.Clear();
-                _openPlugin = "";
                 _replacement.Reload();
                 _summary = "已重新读取对照表与候选目录（删除的译文会立刻消失）。";
             }
@@ -286,10 +285,26 @@ public sealed class WindowReplaceWindow : Window
 
         ImGui.Separator();
 
+        // ── 置顶搜索框（画在滚动区外，不受列表滚动影响）：按插件名/原文/译文过滤 ──
+        var f = _filter;
+        ImGui.SetNextItemWidth(260f);
+        if (ImGui.InputTextWithHint("##filter", "搜插件名 / 原文 / 译文…", ref f, 256))
+            _filter = f;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("按插件名、英文原文或中文译文过滤下方列表。留空显示全部。");
+
         var plugins = _replacement.GetWindowPlugins();
+        if (!string.IsNullOrWhiteSpace(_filter))
+        {
+            var needle = _filter.Trim();
+            plugins = plugins.Where(p =>
+                p.Plugin.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                MatchesText(p.Plugin, needle)
+            ).ToList();
+        }
         if (plugins.Count == 0)
         {
-            Ui.Hint("还没有候选文案。请先到「源码提取」窗口提取某个插件的文案，再回来翻译。");
+            Ui.Hint("没有匹配的插件（或还没有候选文案）。请先到「源码提取」窗口提取某个插件的文案。");
             return;
         }
 
@@ -300,28 +315,33 @@ public sealed class WindowReplaceWindow : Window
                 for (var i = 0; i < plugins.Count; i++)
                 {
                     var (name, total, translated) = plugins[i];
-                    ImGui.PushID(name);
-                    // 2026-09-18：label 末尾 ##<插件名> 是固定节点 ID（不显示）——计数变化不改变节点 ID，
-                    //    否则删除/翻译后计数一变，CollapsingHeader 展开状态丢失（列表自动收起）。
-                    //    ⚠ PushID 也用插件名而非索引 i——列表按进度排序后顺序会变，用 i 作 ID 同样丢展开状态。
-                    var label = translated >= total ? $"{name}（已翻译 {translated}/{total}）全部已翻译##{name}" : $"{name}（已翻 {translated}/共 {total}）##{name}";
-                    if (ImGui.CollapsingHeader(label))
-                    {
-                        if (_openPlugin != name)
-                        {
-                            _openPlugin = name;
-                            Invalidate(name);
-                        }
-                        DrawPluginEditor(name);
-                    }
-                    else if (_openPlugin == name)
-                    {
-                        _openPlugin = "";
-                    }
-                    ImGui.PopID();
+                    // 2026-09-19：整行可点（Selectable），点插件名直接弹二级窗口，不再单独放「编辑」按钮
+                    var label = translated >= total ? $"{name}（已翻译 {translated}/{total}）" : $"{name}（已翻 {translated}/共 {total}）";
+                    if (ImGui.Selectable(label, false, ImGuiSelectableFlags.None, new Vector2(0, 0)))
+                        _plugin.OpenPluginEditor(name);
                 }
             }
         }
+    }
+
+    private void Invalidate(string plugin) => _cache.Remove(plugin);
+
+    private (List<(string En, string Zh)> Translated, List<string> Untranslated) GetCached(string plugin)
+    {
+        if (!_cache.TryGetValue(plugin, out var data))
+        {
+            data = _replacement.GetWindowEntries(plugin);
+            _cache[plugin] = data;
+        }
+        return data;
+    }
+
+    /// <summary> 搜索过滤用：某插件的原文或译文是否含 needle。 </summary>
+    private bool MatchesText(string plugin, string needle)
+    {
+        var (tr, un) = GetCached(plugin);
+        return tr.Any(t => t.Zh.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+            || un.Any(t => t.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0);
     }
 
     /// <summary>
@@ -338,18 +358,6 @@ public sealed class WindowReplaceWindow : Window
         // 宽度自适应窗口（窄窗口不会溢出）；高度用默认，跟输入框等高
         var w = Math.Max(120f, ImGui.GetContentRegionAvail().X);
         ImGui.ProgressBar(frac, new Vector2(w, 0f), $"{done}/{total}（{frac * 100f:F0}%）");
-    }
-
-    private void Invalidate(string plugin) => _cache.Remove(plugin);
-
-    private (List<(string En, string Zh)> Translated, List<string> Untranslated) GetCached(string plugin)
-    {
-        if (!_cache.TryGetValue(plugin, out var data))
-        {
-            data = _replacement.GetWindowEntries(plugin);
-            _cache[plugin] = data;
-        }
-        return data;
     }
 
     /// <summary>
@@ -527,7 +535,6 @@ public sealed class WindowReplaceWindow : Window
         {
             // ⚠ 先备份再删：译文的代价是 AI 额度，误点不可接受（2026-09-15 已真实丢过 416 条）
             var (affected, totalRemoved, backup) = _replacement.PurgeAllWindowTranslations();
-            _openPlugin = "";
             _cache.Clear();   // 全部译文已删，本窗口条目缓存整体失效
             var bak = string.IsNullOrEmpty(backup) ? "" : $"\n（已自动备份到 {ReplacementService.WindowBackupDirName}\\{Path.GetFileName(backup)}，可从「打开翻译目录」的上级找回）";
             _summary = affected > 0
@@ -557,222 +564,4 @@ public sealed class WindowReplaceWindow : Window
         }
     }
 
-    /// <summary>
-    /// 在游戏里打开目标插件**自己的**配置界面（精确到该插件，等同插件安装器里每行的 ⚙ 按钮），
-    /// 方便翻完立刻看效果。
-    /// 官方正路（反射 Dalamud 15.0.3.4 核实）：`IDalamudPluginInterface.InstalledPlugins`
-    /// → `IExposedPlugin.OpenConfigUi()`；无配置界面则退 `OpenMainUi()`。
-    /// </summary>
-    private void OpenPluginConfigUi(string plugin)
-    {
-        try
-        {
-            var target = Plugin.PluginInterface.InstalledPlugins
-                .FirstOrDefault(p => string.Equals(p.InternalName, plugin, StringComparison.OrdinalIgnoreCase));
-            if (target == null)
-            {
-                _summary = $"未找到已安装的 {plugin}（可能只提取过源码、本机未装或未启用）。";
-                return;
-            }
-            if (!target.IsLoaded)
-            {
-                _summary = $"{target.Name} 当前未加载（被禁用了？），无法打开配置界面。";
-                return;
-            }
-            if (target.HasConfigUi)
-            {
-                target.OpenConfigUi();
-                _summary = $"已打开 {target.Name} 的配置界面。";
-            }
-            else if (target.HasMainUi)
-            {
-                target.OpenMainUi();
-                _summary = $"{target.Name} 没有配置界面，已打开其主界面。";
-            }
-            else
-            {
-                _summary = $"{target.Name} 未提供配置/主界面入口，无法打开。";
-            }
-        }
-        catch (Exception ex)
-        {
-            _summary = "打开插件配置失败：" + ex.Message;
-            _plugin.AppLog.Error($"[窗口] 打开插件配置失败（{plugin}）：{ex.Message}");
-        }
-    }
-
-    private void DrawPluginEditor(string plugin)
-    {
-        var (translated, untranslated) = GetCached(plugin);
-
-        if (_mt.Running)
-        {
-            ImGui.TextDisabled($"机翻进行中（{_mt.Status}）——完成后自动刷新。");
-            DrawTranslateProgressBar();
-        }
-        else
-        {
-            // ── 翻译动作（主操作高亮）──
-            Ui.PushAccent();
-            if (ImGui.Button($"翻译本插件缺失（{untranslated.Count} 条）"))
-            {
-                if (string.IsNullOrWhiteSpace(MtTranslateService.GetApiKey(_plugin.Configuration)))
-                {
-                    _summary = "请先在「AI 设置」填写 API Key。";
-                }
-                else
-                {
-                    _summary = "";
-                    _mt.StartWindowPlugin(plugin);
-                }
-            }
-            Ui.PopAccent();
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("只翻这一个插件的缺口。已翻译的不覆盖；缺口为 0 时按钮上会显示 0 条。");
-
-            Ui.SameLineIfFits(Ui.ButtonWidth("重读本插件"));
-            if (ImGui.Button("重读本插件"))
-            {
-                // 外部改了/删了该插件的 json 后，用它立刻同步（不解缓存就要靠这个）
-                Invalidate(plugin);
-                _replacement.Reload();
-                _summary = $"已重新读取 {plugin} 的译文与候选。";
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("重新读取该插件的译文文件与候选清单。\n在外部删除/编辑 json 后点它同步，无需重载插件。");
-
-            // 2026-09-18 toggle：第一次点打开，第二次点关闭（官方 API 无 Close，走 Atk SetShow(false)）
-            var cfgOpen = _openedByUs.TryGetValue(plugin, out var opened) && opened;
-            var cfgLabel = cfgOpen ? "关闭插件配置" : "打开插件配置";
-            Ui.SameLineIfFits(Ui.ButtonWidth(cfgLabel));
-            if (ImGui.Button(cfgLabel))
-            {
-                if (cfgOpen)
-                {
-                    if (_plugin.AtkHook.TryClosePluginWindow(plugin))
-                        _summary = $"已关闭 {plugin} 的配置界面。";
-                    else
-                        _summary = $"没找到 {plugin} 的窗口（可能已被手动关闭），已视为关闭状态。";
-                    _openedByUs[plugin] = false;
-                }
-                else
-                {
-                    OpenPluginConfigUi(plugin);
-                    _openedByUs[plugin] = true;
-                }
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("在游戏里打开该插件自己的配置界面（等同插件安装器里的 ⚙ 按钮），方便即时查看翻译效果；\n再点一次即关闭。\n插件没有配置界面时改开其主界面；两者都没有或未加载则提示。");
-
-            // 2026-09-16：复制插件名称（放在「打开插件配置」右侧）。
-            Ui.SameLineIfFits(Ui.ButtonWidth("复制插件名称"));
-            if (ImGui.Button("复制插件名称"))
-            {
-                ImGui.SetClipboardText(plugin);
-                _summary = $"已复制插件名称到剪贴板：{plugin}";
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("复制该插件名称（内部名）到剪贴板，便于搜索候选文件或外部检索。");
-
-            // 2026-09-18：单项还原英文（只还原这一个插件；先备份到 还原备份\，删除走回收站可找回）
-            Ui.SameLineIfFits(Ui.ButtonWidth("还原本插件英文"));
-            if (ImGui.Button("还原本插件英文"))
-            {
-                var bak = _replacement.BackupWindowTable(plugin);
-                var n = _replacement.ClearPluginTranslations(plugin);
-                Invalidate(plugin);
-                _replacement.Reload();
-                _summary = n > 0
-                    ? $"已把 {plugin} 还原为英文（删除 {n} 条译文" + (string.IsNullOrEmpty(bak) ? "" : $"，备份：{ReplacementService.WindowBackupDirName}") + "）。"
-                    : $"{plugin} 当前没有译文。";
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("只还原这一个插件：备份并删除其译文（回收站+备份可找回），候选保留。\n其余插件的译文不受影响。");
-        }
-        if (_summary.Length > 0)
-        {
-            ImGui.SameLine();
-            Ui.ColoredWrapped(new Vector4(1f, 0.5f, 0.2f, 1f), _summary);
-        }
-        ImGui.Spacing();
-
-        var shown = 0;
-        using (var child = ImRaii.Child("##窗口条目列表", new Vector2(-1f, 300f), true))
-        {
-            if (child.Success)
-            {
-                // 已翻译（可改可删）
-                foreach (var (en, zh) in translated)
-                {
-                    if (shown >= MaxEditorRows) break;
-                    shown++;
-                    DrawEntryRow(plugin, en, zh);
-                }
-                // 未翻译（空输入框，填了即存）
-                foreach (var en in untranslated)
-                {
-                    if (shown >= MaxEditorRows) break;
-                    shown++;
-                    DrawEntryRow(plugin, en, "");
-                }
-
-                if (translated.Count + untranslated.Count > MaxEditorRows)
-                {
-                    ImGui.TextDisabled($"……条目过多，仅显示前 {MaxEditorRows} 条（机翻不受影响，可对整插件直接点翻译）");
-                }
-                if (translated.Count + untranslated.Count == 0)
-                {
-                    Ui.Hint("该插件没有候选文案（可能未扫描或已全中文）。");
-                }
-            }
-        }
-    }
-
-    private void DrawEntryRow(string plugin, string en, string zh)
-    {
-        ImGui.PushID(en);
-        // 英文原文：明确标注并保持灰色只读（本插件窗口已免疫替换，这里永远显示原样英文，供对照）
-        ImGui.PushStyleColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]);
-        ImGui.TextUnformatted("原文");
-        ImGui.PopStyleColor();
-        ImGui.SameLine();
-        ImGui.TextWrapped(en);
-        ImGui.SameLine();
-        if (ImGui.SmallButton("复制原文"))
-        {
-            ImGui.SetClipboardText(en);
-            _summary = $"已复制原文到剪贴板：{(en.Length > 40 ? en[..40] + "…" : en)}";
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("把这句英文原文复制到剪贴板（免手动选中，便于外部检索或翻译）。");
-        ImGui.SameLine();
-        if (ImGui.SmallButton("删除"))
-        {
-            _replacement.RemoveWindowEntry(plugin, en);
-            Invalidate(plugin);
-            ImGui.PopID();
-            return;
-        }
-
-        // 中文译文：可编辑（失焦即存）
-        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.55f, 0.85f, 1f, 1f));
-        ImGui.TextUnformatted("译文");
-        ImGui.PopStyleColor();
-        ImGui.SameLine();
-        var buf = zh;
-        ImGui.SetNextItemWidth(-1f);
-        if (ImGui.InputText("##窗口译文", ref buf, 1024))
-        {
-            if (ImGui.IsItemDeactivatedAfterEdit())
-            {
-                if (buf.Trim().Length > 0)
-                {
-                    _replacement.SetWindowEntry(plugin, en, buf.Trim());
-                    Invalidate(plugin);
-                }
-            }
-        }
-        ImGui.Spacing();
-        ImGui.PopID();
-    }
 }

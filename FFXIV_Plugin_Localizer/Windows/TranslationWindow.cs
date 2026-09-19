@@ -76,6 +76,29 @@ public sealed class TranslationWindow : Window
             }
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("开启：有新缺口直接后台翻译，无感完成（仅写日志）。\n关闭：只提示有新缺口，等你手动点按钮。");
+
+            ImGui.Spacing();
+            ImGui.TextUnformatted("运行时发现的英文，何时自动翻（满足任意一条）：");
+            var minHits = _plugin.Configuration.MissedMinHits;
+            ImGui.SetNextItemWidth(120f);
+            if (ImGui.InputInt("出现次数（次）", ref minHits))
+            {
+                _plugin.Configuration.MissedMinHits = Math.Max(1, minHits);
+                _plugin.Configuration.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("同一句英文**反复出现**达到此次数才自动翻（默认 3）。\n反复看到=真在用；设为 1 = 出现一次就翻（最积极、最费额度）。");
+            ImGui.SameLine();
+            var minAge = _plugin.Configuration.MissedMinAgeSec;
+            ImGui.SetNextItemWidth(120f);
+            if (ImGui.InputInt("距首次出现（秒）", ref minAge))
+            {
+                _plugin.Configuration.MissedMinAgeSec = Math.Max(0, minAge);
+                _plugin.Configuration.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("从**首次看到**这句英文起，过这么多秒仍没卸载插件，就自动翻（默认 180=3分钟）。\n防「下载看两眼就删」白烧额度；设 0 = 不看这条。");
+            Ui.Hint("两条门槛**满足任意一条**就自动翻：反复出现够多次，或开够久没卸载。两者都不满足（看一眼就关）→ 不翻、不花额度。");
             ImGui.Unindent();
         }
 

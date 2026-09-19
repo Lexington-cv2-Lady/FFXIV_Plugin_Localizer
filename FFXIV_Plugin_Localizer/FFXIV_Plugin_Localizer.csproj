@@ -12,8 +12,7 @@
     <Name>翻译插件的插件</Name>
     <Punchline>运行时把其他 Dalamud 插件的英文界面文字替换为简体中文。</Punchline>
     <Description>给其他 Dalamud 插件的界面做运行时汉化：在 ImGui 文字绘制层把插件渲染的英文按对照表换成中文显示，不改对方插件文件，自用/发布皆可。
-采集模式（只读）把屏幕上实际渲染的英文收集为待翻译清单；翻译管线沿用 _未翻译.json → _已翻译.json 的既有流程；仓库链接扫描辅助归属。
-本版本为 MVP：仅只读采集与清单导出。</Description>
+含源码提取候选、AI 机翻（多服务商）、词典管理与单词黑名单、后台自动翻译与运行时自动补译。</Description>
     <RepoUrl>https://github.com/Lexington-cv2-Lady/FFXIV_Plugin_Localizer</RepoUrl>
     <Tags>汉化;翻译;ui;chinese;localization;中文;dalamud</Tags>
     <CategoryTags>utility</CategoryTags>
