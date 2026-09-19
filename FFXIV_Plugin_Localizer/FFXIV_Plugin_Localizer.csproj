@@ -30,14 +30,14 @@
   <Target Name="GenTranslationBundle" BeforeTargets="AssignTargetPaths"
           Condition="'$(FdcnTranslationsPath)' != '' and Exists('$(FdcnTranslationsPath)')">
     <Exec Command="powershell -NoProfile -Command &quot;$ErrorActionPreference='stop'; $raw = Get-Content -LiteralPath '$(FdcnTranslationsPath)' -Raw -Encoding UTF8 | ConvertFrom-Json; $map = @{}; foreach ($p in $raw.PSObject.Properties) { foreach ($f in $p.Value.PSObject.Properties) { $en = $f.Value.Original; $zh = $f.Value.Translated; if ($en -and $zh -and $en.Trim() -ne $zh.Trim() -and -not $map.ContainsKey($en.Trim())) { $map[$en.Trim()] = $zh.Trim() } } }; $map | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath '$(MSBuildProjectDirectory)\内置翻译包.json' -Encoding UTF8&quot;" />
-    <ItemGroup>
-      <Content Include="内置翻译包.json" CopyToOutputDirectory="PreserveNewest" Visible="false" />
-      <!-- 图标：源码 Data/icon.png 部署到输出 images/icon.png（Dalamud 约定路径），发布 zip 自带 -->
-      <Content Include="Data\icon.png" CopyToOutputDirectory="PreserveNewest">
-        <Link>images\icon.png</Link>
-      </Content>
-    </ItemGroup>
   </Target>
+
+  <!-- 图标：源码 Data/icon.png 部署到输出 images/icon.png（Dalamud 约定路径），发布 zip 自带 -->
+  <ItemGroup>
+    <Content Include="Data\icon.png" CopyToOutputDirectory="PreserveNewest">
+      <Link>images\icon.png</Link>
+    </Content>
+  </ItemGroup>
 
   <!-- DependsOn 打包器：DalamudPackager 的 targets 在 SDK 末尾导入、晚于本文件执行；
        不加依赖时 DeployToDev 会先复制上一次生成的旧 manifest。 -->
