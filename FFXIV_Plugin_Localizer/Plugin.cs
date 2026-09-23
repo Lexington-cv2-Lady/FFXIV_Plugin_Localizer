@@ -104,6 +104,7 @@ public sealed class Plugin : IDalamudPlugin
         AtkHook = new AtkNativeUiWalkerService(AppLog, Log, Framework, Replacement);
         Mt = new MtTranslateService(AppLog, Replacement, Configuration);
         Mt.SetWiki(Wiki); // 机翻时附带官方术语对照，保证专有名词译名一致
+        Mt.SetBlacklist(OldDict.BlacklistWords); // 机翻侧拉黑：黑名单词不送翻（原在 EnsureDictDir 里，因 Mt 未建而 NRE）
         MainWindow = new MainWindow(this);
         LogWindow = new LogWindow(this);
         TranslationWindow = new TranslationWindow(this, Replacement, Mt);
@@ -440,7 +441,7 @@ public sealed class Plugin : IDalamudPlugin
             CreateDefaultDictIfMissing(Configuration.DictDir);   // 首次自动生成模板文件
             var n = OldDict.Load(Configuration.DictDir);
             Replacement.SetBlacklist(OldDict.IsBlacklisted);   // 单词黑名单交给替换层（黑名单优先级最高）
-            Mt.SetBlacklist(OldDict.BlacklistWords);           // 机翻侧也拉黑：这类词不送翻（省额度）
+            // 机翻侧黑名单在 Mt 创建后补设（Mt 此刻尚未 new，提前调会 NRE，2026-09-20 修）
             Log.Information($"[预翻译] 本项目词典目录 {Configuration.DictDir}，已载入 {n} 条，" +
                             $"单词黑名单 {OldDict.BlacklistCount} 条");
         }
@@ -474,7 +475,7 @@ public sealed class Plugin : IDalamudPlugin
                 "格式：terms 是通用术语（不限插件），mods 可留空。",
                 "「原文」写界面上的英文（精确匹配，大小写敏感），「译文」写中文；两者各占一行。",
                 "除了手改，也可以在「插件翻译」窗口点「翻译结果写入词典」自动汇总（只新增、不覆盖已有条目）。",
-                "改完在「AI 设置」窗口的「本项目词典」一栏点「重载词典」即可生效；不会自动翻译，命中即直接采用。"
+                "改完在主窗口点「词典目录」打开词典窗口，再点「重载词典」即可生效；不会自动翻译，命中即直接采用。"
               ],
               "terms": [
                 {
@@ -497,7 +498,7 @@ public sealed class Plugin : IDalamudPlugin
             # 一行一个词，支持逗号分隔；以 # 开头的是注释。
             # 用途：① 插件名/专有缩写（乱译更糟）；② 被插件当标识符用的词（改了会影响显示或逻辑）。
             # 单独成行的词 = 整串精确匹配（大小写不敏感），不会误伤含该词的整句。
-            # 改完在「AI 设置」窗口的「本项目词典」一栏点「重载词典」生效。
+            # 改完在主窗口点「词典目录」打开词典窗口，再点「重载词典」生效。
             URL
             DPS
             GCD

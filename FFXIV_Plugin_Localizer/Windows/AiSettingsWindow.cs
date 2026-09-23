@@ -99,12 +99,12 @@ public sealed class AiSettingsWindow : Window
 
         // API Key（密文 + 显隐 + 粘贴）
         ImGui.TextUnformatted("API Key（按服务商独立保存，只存本机）：");
-        var key = MtTranslateService.GetApiKey(cfg) ?? "";
+        string key = MtTranslateService.GetApiKey(cfg);
         var showW = 52f;
         var pasteW = 52f;
         // Key 框宽按密文长度自适应：短 Key 窄、长 Key 放宽（封顶），不再占满整行
         var charW = ImGui.CalcTextSize("A").X;
-        var keyW = Math.Clamp((key?.Length ?? 0) * charW + 44f, 160f, 320f);
+        var keyW = Math.Clamp(key.Length * charW + 44f, 160f, 320f);
         ImGui.SetNextItemWidth(keyW);
         var keyFlags = _showKey ? ImGuiInputTextFlags.None : ImGuiInputTextFlags.Password;
         if (ImGui.InputText("##AiKey", ref key, 512, keyFlags))

@@ -170,4 +170,55 @@ public static class TextHeuristics
         if (IsTechnicalNoise(t)) return false;  // 技术噪音（颜色/模板/标识符等）
         return HasAsciiLetter(t);
     }
+
+    /// <summary>
+    /// 英文「推理/元评论」特征词：模型没给成稿、反而输出思考过程时几乎必含这些英文片段。
+    /// 正常中文译文以 CJK 为主，不会出现这些整词，故命中即判无效。
+    /// </summary>
+    private static readonly Regex MetaComment = new(
+        @"(?i)\b(hmm+|let me think|let me|i think|i believe|i guess|likely|maybe|actually|" +
+        @"keep as|could maybe|could translate|no\.\.\.|the arena|associated with|should be|not sure|" +
+        @"let's|i'm|isn't|doesn't|aren't|won't|can't tell)\b",
+        RegexOptions.Compiled);
+
+    /// <summary> 子串在文本中的出现次数（大小写敏感，与原文精确匹配口径一致）。 </summary>
+    private static int CountOccurrences(string text, string sub)
+    {
+        int c = 0, i = 0;
+        while ((i = text.IndexOf(sub, i, StringComparison.Ordinal)) >= 0) { c++; i += sub.Length; }
+        return c;
+    }
+
+    /// <summary>
+    /// **机翻结果有效性校验**：自动沉淀 / 写入词典前调用，拦住「模型没给成稿、返回英文推理 / 元评论 / 空值 / 原文照抄」。
+    ///
+    /// 起因（2026-09-23）：词典里混入
+    ///   · <c>The Wreath of Snakes</c> 的大段英文犹豫独白（Hmm? Seiryu? Suzaku?…）；
+    ///   · <c>djUSA.GI</c> 的英文 “likely username/code, keep as” 注释。
+    /// 与旧项目「扁平格式导致机翻返回空值」是同一类问题的变种。
+    ///
+    /// 规则（任一不满足即判无效，不写入词典）：
+    ///   ① 译文非空白、原文非空白，且译文不等于原文；
+    ///   ② 译文**必须含 CJK**——纯英文返回要么没翻、要么是英文元评论
+    ///     （「专名保留」应走黑名单 / 译文=原文，不会到这里）；
+    ///   ③ 不含 ② 所列英文推理 / 元评论特征词；
+    ///   ④ 原文（≥3 字符）不得在译文里重复 ≥2 次（推理独白会反复念叨原文）；
+    ///   ⑤ 问号不超过 1 个（犹豫文本常连续问号）。
+    /// </summary>
+    public static bool IsValidMachineTranslation(string? en, string? zh)
+    {
+        var z = (zh ?? "").Trim();
+        var e = (en ?? "").Trim();
+        if (z.Length == 0 || e.Length == 0) return false;          // ① 空值
+        if (z == e) return false;                                  // ① 原文照抄
+        if (!HasCjk(z)) return false;                              // ② 纯英文
+        if (MetaComment.IsMatch(z)) return false;                  // ③ 元评论
+        if (e.Length >= 3 && CountOccurrences(z, e) >= 2) return false; // ④ 重复原文
+        // ⑤ 犹豫问号：只统计「孤立的单个 ?」。连续的 ??/???? 是占位符（未解锁地点显示 "????"），不是犹豫。
+        var isolatedQ = 0;
+        for (var k = 0; k < z.Length; k++)
+            if (z[k] == '?' && (k == 0 || z[k - 1] != '?') && (k == z.Length - 1 || z[k + 1] != '?'))
+                isolatedQ++;
+        return isolatedQ <= 1;
+    }
 }
