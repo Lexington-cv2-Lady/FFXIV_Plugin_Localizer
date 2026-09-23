@@ -57,6 +57,9 @@ public sealed class TranslationWindow : Window
         if (_plugin.Configuration.AutoTranslate)
         {
             ImGui.Indent();
+            // ⚠ 2026-09-23 司令官要求：此开关**很花钱**，必须常驻高亮，避免手滑误开
+            //   （之前误开把几千个未安装插件的介绍全送付费 AI，白花 30 元）。
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.95f, 0.35f, 0.25f, 1f));
             var extractAll = _plugin.Configuration.AutoExtractAllPlugins;
             if (ImGui.Checkbox("主动预翻仓库全部插件（含未安装）", ref extractAll))
             {
@@ -64,10 +67,13 @@ public sealed class TranslationWindow : Window
                 _plugin.Configuration.Save();
                 if (extractAll) _replacement.EnsureRepoCacheAsync(_plugin.BuildRepoUrls());   // 勾上立刻后台拉仓库清单
             }
+            ImGui.PopStyleColor();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("勾了：启动检查不只查已装插件，还拉卫月仓库清单，把**未安装**插件的介绍也送翻" +
                                  "（用于分包前提前预翻常用插件）。\n不勾：只翻已安装插件的介绍。\n" +
                                  "⚠ 仓库有几千个插件，勾选会一次性送翻大量条目，API 费用明显增加。");
+            ImGui.TextColored(new Vector4(0.95f, 0.35f, 0.25f, 1f),
+                "⚠ 很花钱：会把卫月仓库里几千个【未安装】插件的介绍也送进付费 AI——仅打包分发前预翻才需要，平时别开！");
             var silent = _plugin.Configuration.SilentTranslate;
             if (ImGui.Checkbox("后台静默执行", ref silent))
             {
