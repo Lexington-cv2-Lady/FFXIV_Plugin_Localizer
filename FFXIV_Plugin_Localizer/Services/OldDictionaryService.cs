@@ -234,6 +234,7 @@ public sealed class OldDictionaryService
         var path = Path.Combine(dir, FileName);
         var added = 0;
         var skipped = 0;
+        var invalid = 0;   // 机翻返回「非译文」（英文推理/元评论/空值/原文照抄）被有效性校验拦下的条数
         try
         {
             Directory.CreateDirectory(dir);
@@ -281,6 +282,8 @@ public sealed class OldDictionaryService
                 var v = (rawZh ?? "").Trim();
                 if (k.Length < 2 || v.Length == 0 || k == v) { skipped++; continue; }
                 if (TextHeuristics.HasCjk(k)) { skipped++; continue; }
+                // ⚠ 机翻结果有效性校验：模型返回英文推理/元评论/空值/原文照抄时不写入（2026-09-23 起因：混入英文独白）
+                if (!TextHeuristics.IsValidMachineTranslation(k, v)) { invalid++; continue; }
                 if (!seen.Add(k)) { skipped++; continue; }
                 if (existing.Contains(k)) { skipped++; continue; }   // 已有 → 不覆盖
                 terms.Add(new JsonObject { ["原文"] = k, ["译文"] = v });
@@ -295,7 +298,12 @@ public sealed class OldDictionaryService
                 TranslationFile.WriteAtomic(path,
                     root.ToJsonString(new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }),
                     new UTF8Encoding(true));   // 带 BOM：中文 Windows 的记事本才不会把 UTF-8 误判成 GBK
-                _appLog.Info($"[预翻译] 已写入词典：新增 {added} 条（跳过 {skipped} 条）→ {path}");
+                _appLog.Info($"[预翻译] 已写入词典：新增 {added} 条（跳过 {skipped} 条，无效机翻 {invalid} 条）→ {path}");
+            }
+            else if (invalid > 0)
+            {
+                // 全是无效机翻时也要明确提示，不能静默（否则用户以为沉淀成功、其实没进词典）
+                _appLog.Warn($"[预翻译] {invalid} 条机翻结果无效（疑似英文推理/元评论/空值/原文照抄），未写入词典；另有跳过 {skipped} 条");
             }
         }
         catch (Exception ex)

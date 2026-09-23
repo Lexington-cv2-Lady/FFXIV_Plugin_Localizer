@@ -14,7 +14,7 @@
     <Description>给其他 Dalamud 插件的界面做运行时汉化：在 ImGui 文字绘制层把插件渲染的英文按对照表换成中文显示，不改对方插件文件，自用/发布皆可。
 含源码提取候选、AI 机翻（多服务商）、词典管理与单词黑名单、后台自动翻译与运行时自动补译。</Description>
     <RepoUrl>https://github.com/Lexington-cv2-Lady/FFXIV_Plugin_Localizer</RepoUrl>
-    <IconUrl>https://raw.githubusercontent.com/Lexington-cv2-Lady/FFXIV_Plugin_Localizer/main/Data/icon.png</IconUrl>
+    <IconUrl>https://raw.githubusercontent.com/Lexington-cv2-Lady/FFXIV_Plugin_Localizer/main/images/icon.png</IconUrl>
     <Tags>汉化;翻译;ui;chinese;localization;中文;dalamud</Tags>
     <CategoryTags>utility</CategoryTags>
     <!-- dev 插件部署目录（构建后自动复制）。用 $(APPDATA) 环境变量，避免写死个人用户名路径；
@@ -32,11 +32,10 @@
     <Exec Command="powershell -NoProfile -Command &quot;$ErrorActionPreference='stop'; $raw = Get-Content -LiteralPath '$(FdcnTranslationsPath)' -Raw -Encoding UTF8 | ConvertFrom-Json; $map = @{}; foreach ($p in $raw.PSObject.Properties) { foreach ($f in $p.Value.PSObject.Properties) { $en = $f.Value.Original; $zh = $f.Value.Translated; if ($en -and $zh -and $en.Trim() -ne $zh.Trim() -and -not $map.ContainsKey($en.Trim())) { $map[$en.Trim()] = $zh.Trim() } } }; $map | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath '$(MSBuildProjectDirectory)\内置翻译包.json' -Encoding UTF8&quot;" />
   </Target>
 
-  <!-- 图标：源码 Data/icon.png 部署到输出 images/icon.png（Dalamud 约定路径），发布 zip 自带 -->
+  <!-- 图标：Dalamud 约定路径 images/icon.png，CopyToOutputDirectory 让部署目录自带，
+       DalamudPackager 也按此路径把图标打进发布 zip。 -->
   <ItemGroup>
-    <Content Include="Data\icon.png" CopyToOutputDirectory="PreserveNewest">
-      <Link>images\icon.png</Link>
-    </Content>
+    <Content Include="images\icon.png" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- DependsOn 打包器：DalamudPackager 的 targets 在 SDK 末尾导入、晚于本文件执行；
@@ -48,5 +47,11 @@
       <_DeployFiles Include="$(TargetDir)*\*" Exclude="$(TargetDir)$(AssemblyName)\**" />
     </ItemGroup>
     <Copy SourceFiles="@(_DeployFiles)" DestinationFiles="@(_DeployFiles->'$(DevPluginDir)\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- DalamudPackager 15 没把 images/icon.png 收进 latest.zip；打包后确定性追加，
+       保证从第三方源安装时本地也有图标（不依赖安装器从 IconUrl 下载成功）。 -->
+  <Target Name="AddIconToZip" AfterTargets="DefaultDalamudPackagerRelease" Condition="'$(Configuration)' == 'Release'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)build\add-icon-to-zip.ps1&quot; -ZipPath &quot;$(TargetDir)$(AssemblyName)\latest.zip&quot; -IconSrc &quot;$(TargetDir)$(AssemblyName)\images\icon.png&quot;" />
   </Target>
 </Project>
