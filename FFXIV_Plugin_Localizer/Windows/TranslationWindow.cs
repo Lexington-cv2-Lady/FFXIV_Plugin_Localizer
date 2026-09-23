@@ -83,6 +83,24 @@ public sealed class TranslationWindow : Window
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("开启：有新缺口直接后台翻译，无感完成（仅写日志）。\n关闭：只提示有新缺口，等你手动点按钮。");
 
+            // ── F4 v2：自动翻译闭环（默认关）── 开着才让"运行时翻好的译文"真正进生效表
+            var closure = _plugin.Configuration.AutoClosureEnabled;
+            if (ImGui.Checkbox("自动翻译闭环（译文注入生效表）", ref closure))
+            {
+                _plugin.Configuration.AutoClosureEnabled = closure;
+                _plugin.Configuration.Save();
+                // 切换时立刻同步第四源：开＝注入当前词典，关＝清空并重建（避免残留源继续生效）
+                _replacement.SetDictTerms(closure
+                    ? new Dictionary<string, string>(_plugin.OldDict.SnapshotEntries(), StringComparer.Ordinal)
+                    : null);
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("开启：运行时发现并翻好的译文，除写进词典外，还会\n" +
+                                 "①注入生效替换表（**最低兜底**第四源：窗口 > 安装器 > wiki > 词典）——界面才真正变中文；\n" +
+                                 "②从「未命中队列」移除——不再反复送翻、不再白烧配额。\n" +
+                                 "关闭：行为与以前一致，译文只写词典、不进生效表。\n" +
+                                 "⚠ 默认关；①和②由本开关统一控制、配套生效，不会只清队列而不注入。");
+
             ImGui.Spacing();
             ImGui.TextUnformatted("运行时发现的英文，何时自动翻（满足任意一条）：");
             var minHits = _plugin.Configuration.MissedMinHits;

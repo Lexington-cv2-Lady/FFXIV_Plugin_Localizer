@@ -341,6 +341,13 @@ public sealed class OldDictionaryService
     public bool TryGet(string en, out string zh) => _entries.TryGetValue(en, out zh!);
 
     /// <summary>
+    /// 全部词条**快照**（英文 → 中文），供替换层作**最低兜底**的第四源（F4 自动翻译闭环，见 v2 方案）。
+    /// ⚠ 取快照而非直接暴露 `_entries`：调用方可能在替换层锁外遍历，快照可避免枚举期间并发修改的干扰；
+    /// `_entries` 是 ConcurrentDictionary（2026-09-23 F2 修复），枚举本身线程安全。
+    /// </summary>
+    public List<KeyValuePair<string, string>> SnapshotEntries() => new(_entries);
+
+    /// <summary>
     /// **预翻译**：把该插件候选文案里能在旧词典命中的条目直接填成译文。
     /// 返回（命中条数, 命中明细），由调用方写入译文表。
     /// </summary>

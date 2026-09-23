@@ -213,6 +213,16 @@ public sealed class Plugin : IDalamudPlugin
             foreach (var kv in batch) pairs.Add((kv.Key, kv.Value));
             var (added, _) = OldDict.MergeIntoDict(dir, pairs);
             OldDict.Load(dir);
+            // ── F4 v2 闭环：只写词典是不够的（词典不是替换源，界面不会变中文）──
+            // ① 注入生效替换表（最低兜底第四源：窗口 > 安装器 > wiki > 词典）
+            // ② 从"未命中队列"移除（不再反复送翻、不再白烧配额）
+            // ⚠ 两步**同由 AutoClosureEnabled 控制**：只做②不做①会变成"不再送翻、界面却仍英文"，
+            //   问题被藏起来且该原文永久失去补救机会——故绝不拆开上线。
+            if (Configuration.AutoClosureEnabled)
+            {
+                Replacement.ApplyDictEntries(batch);                            // ① 增量注入（键已存在则让位）
+                foreach (var en in batch.Keys) Replacement.RemoveMissed(en);    // ② 止血
+            }
             if (added > 0) AppLog.Info("[自动翻] 运行时发现 → 写词典 +" + added + " 条");
         }
         catch (Exception ex) { AppLog.Error("[自动翻] 写词典失败：" + ex.Message); }
@@ -238,6 +248,10 @@ public sealed class Plugin : IDalamudPlugin
                     {
                         var (added, _) = OldDict.MergeIntoDict(dir, pairs);
                         OldDict.Load(dir);
+                        // F4 v2 止血：这些原文已沉淀进词典（窗口表本身也已在生效表中），
+                        // 不必再留在"未命中队列"里反复送翻。与注入同源、同一开关，避免单边生效。
+                        if (Configuration.AutoClosureEnabled)
+                            foreach (var (en, _) in pairs) Replacement.RemoveMissed(en);
                         if (added > 0)
                             AppLog.Info("[自动沉淀] 机翻结束，自动写入词典 +" + added + " 条（已存在的跳过）");
                     }
@@ -441,6 +455,10 @@ public sealed class Plugin : IDalamudPlugin
             CreateDefaultDictIfMissing(Configuration.DictDir);   // 首次自动生成模板文件
             var n = OldDict.Load(Configuration.DictDir);
             Replacement.SetBlacklist(OldDict.IsBlacklisted);   // 单词黑名单交给替换层（黑名单优先级最高）
+            // F4 v2：把本项目词典交给替换层作**最低兜底第四源**（窗口 > 安装器 > wiki > 词典）。
+            // 默认关（AutoClosureEnabled=false）→ 不注入，行为与改动前一致；开启后才用词典补缺。
+            if (Configuration.AutoClosureEnabled)
+                Replacement.SetDictTerms(new Dictionary<string, string>(OldDict.SnapshotEntries(), StringComparer.Ordinal));
             // 机翻侧黑名单在 Mt 创建后补设（Mt 此刻尚未 new，提前调会 NRE，2026-09-20 修）
             Log.Information($"[预翻译] 本项目词典目录 {Configuration.DictDir}，已载入 {n} 条，" +
                             $"单词黑名单 {OldDict.BlacklistCount} 条");
@@ -522,6 +540,10 @@ public sealed class Plugin : IDalamudPlugin
         var n = OldDict.Load(Configuration.DictDir);
         Replacement.SetBlacklist(OldDict.IsBlacklisted);   // 黑名单同步刷新
         Mt.SetBlacklist(OldDict.BlacklistWords);
+        // F4 v2：同步刷新第四源（最低兜底词典）。开关关闭时置空，确保不会有残留源继续生效。
+        Replacement.SetDictTerms(Configuration.AutoClosureEnabled
+            ? new Dictionary<string, string>(OldDict.SnapshotEntries(), StringComparer.Ordinal)
+            : null);
         return n;
     }
 
