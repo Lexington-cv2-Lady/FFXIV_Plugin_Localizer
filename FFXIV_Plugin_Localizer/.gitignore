@@ -6,8 +6,7 @@ obj/
 # 本机私有配置（含机器相关路径，绝不入库）
 local.props
 
-# 构建时从本机生成的翻译包（来源路径只在构建机，生成物随插件分发但不进 git）
-内置翻译包.json
+# 内置翻译包：现作为发布资产常驻仓库（新用户免费用机翻）；构建机用 GenTranslationBundle 合并 FDCN 后需重新提交
 
 # 发布包（按规则输出到 D:\Fast folder\Downloads\压缩文件，不放源码目录）
 *.zip
