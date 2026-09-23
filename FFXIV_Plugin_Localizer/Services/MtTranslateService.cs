@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
@@ -166,7 +167,7 @@ public sealed class MtTranslateService
     }
 
     /// <summary> 运行中**学到的** max_tokens 上限（按端点 host 记）。被拒过一次后收敛到平台允许值。 </summary>
-    private static readonly Dictionary<string, long> _maxTokensLearned = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, long> _maxTokensLearned = new(StringComparer.OrdinalIgnoreCase);
 
     private static string HostKey(string baseUrl)
     {

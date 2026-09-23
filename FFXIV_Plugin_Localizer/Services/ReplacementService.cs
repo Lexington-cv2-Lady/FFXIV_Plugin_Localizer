@@ -174,7 +174,8 @@ public sealed unsafe class ReplacementService
         var now = Environment.TickCount64;
         if (now - _lastStampCheckMs < 3000) return false;   // 降频：3 秒一次（列目录便宜，但没必要每帧做）
         _lastStampCheckMs = now;
-        // 运行时未命中文字降频落盘（10 秒一次；钩子已持 _lock，这里同一把锁内安全）
+        // 运行时未命中文字降频落盘（10 秒一次；`_missed` 的读写现已统一在 `lock(_lock)` 内，
+        // 与渲染线程的写入端（TryReplace→RecordMissed）对称，安全）。
         CheckDueMissed();
         if (_missedDirty && now - _lastMissFlushMs > 10_000) { FlushMissed(); }
         // 2026-09-17：低频自动清理**已卸载**插件（60 秒一次；候选插件不在已装列表 → 删译文/候选/源码）
@@ -759,16 +760,21 @@ public sealed unsafe class ReplacementService
         var now = Environment.TickCount64;
         int minHits = _config.MissedMinHits;
         long minAgeMs = (long)_config.MissedMinAgeSec * 1000;
-        List<string> due = new();
-        foreach (var kv in _missed)
+        List<string> due;
+        lock (_lock)
         {
-            bool hit = kv.Value.Hits >= minHits;
-            bool aged = (now - kv.Value.FirstTick) >= minAgeMs && (now - kv.Value.LastTick) <= 90_000; // 满时长 且 最近 90 秒仍在显示（删了插件就不再更新 LastTick，自动不再翻）
-            if (hit || aged) due.Add(kv.Key);
+            due = new List<string>();
+            foreach (var kv in _missed)
+            {
+                bool hit = kv.Value.Hits >= minHits;
+                bool aged = (now - kv.Value.FirstTick) >= minAgeMs && (now - kv.Value.LastTick) <= 90_000; // 满时长 且 最近 90 秒仍在显示（删了插件就不再更新 LastTick，自动不再翻）
+                if (hit || aged) due.Add(kv.Key);
+            }
+            if (due.Count == 0) return;
+            foreach (var k in due) _missed.Remove(k);   // 删除也在锁内，与写入端对称
+            _missedDirty = true;
         }
-        if (due.Count == 0) return;
-        foreach (var k in due) _missed.Remove(k);
-        _missedDirty = true;
+        // ⚠ 事件触发放在锁外：避免在持有 `_lock` 期间回调外部逻辑（OnMissedCaptured→机翻入队），也防止重入死锁。
         foreach (var k in due)
         {
             try { MissedCaptured?.Invoke(k); } catch { }
@@ -779,13 +785,19 @@ public sealed unsafe class ReplacementService
     private void FlushMissed()
     {
         _lastMissFlushMs = Environment.TickCount64;
-        if (!_missedDirty || _missed.Count == 0) return;
-        _missedDirty = false;
+        if (!_missedDirty) return;
+        string[] keys;
+        lock (_lock)
+        {
+            if (_missed.Count == 0) return;
+            keys = _missed.Keys.OrderBy(x => x, StringComparer.Ordinal).ToArray();   // 快照在锁内取，枚举/落盘 IO 在锁外
+            _missedDirty = false;
+        }
         try
         {
             var path = Path.Combine(_configDir(), MissedFileName);
-            File.WriteAllText(path, string.Join("\n", _missed.Keys.OrderBy(x => x, StringComparer.Ordinal)), new UTF8Encoding(false));
-            _appLog.Info($"[运行时发现] 已记录 {_missed.Count} 条未翻译英文 → {MissedFileName}");
+            File.WriteAllText(path, string.Join("\n", keys), new UTF8Encoding(false));
+            _appLog.Info($"[运行时发现] 已记录 {keys.Length} 条未翻译英文 → {MissedFileName}");
         }
         catch (Exception ex) { _appLog.Error("[运行时发现] 落盘失败：" + ex.Message); }
     }

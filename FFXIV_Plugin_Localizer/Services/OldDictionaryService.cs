@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -26,11 +27,11 @@ public sealed class OldDictionaryService
     private readonly AppLog _appLog;
 
     /// <summary> 英文 → 中文（合并全部来源，后加载的不覆盖先加载的）。 </summary>
-    private readonly Dictionary<string, string> _entries = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _entries = new(StringComparer.Ordinal);
 
     /// <summary> 各来源条数（文件名 → 条数）。 </summary>
     public IReadOnlyDictionary<string, int> SourceCounts => _sourceCounts;
-    private readonly Dictionary<string, int> _sourceCounts = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _sourceCounts = new(StringComparer.Ordinal);
 
     /// <summary>
     /// **单词黑名单**（`词典目录\单词黑名单.json`）：命中词**一律保持英文**，不参与翻译。
