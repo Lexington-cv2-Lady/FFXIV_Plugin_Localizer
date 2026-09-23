@@ -110,7 +110,8 @@ public sealed unsafe class ReplacementService
         public byte[] Zh;
         public PrefixEntry(byte[] key, string text, byte[] zh) { Key = key; Text = text; Zh = zh; }
     }
-    private Dictionary<string, string>? _wikiTerms;                            // wiki 官方术语（优先级最高，可选）
+    private Dictionary<string, string>? _wikiTerms;                            // wiki 官方术语（**兜底**：窗口表 > 安装器表 > wiki；09-16 由"最高"下调，注释已随代码更正）
+    private Dictionary<string, string>? _dictTerms;                            // 第四源＝运行时词典/OldDict（**最低兜底**：窗口 > 安装器 > wiki > OldDict；F4 v2）
     // 候选文案缓存（避免每帧读磁盘 + JSON 解析；键=插件名，值=(候选, 目录指纹时间)）
     private readonly Dictionary<string, (Dictionary<string, string> Cand, DateTime Stamp)> _candCache = new(StringComparer.Ordinal);
 
@@ -197,12 +198,26 @@ public sealed unsafe class ReplacementService
     private long _lastPurgeCheckMs;
     private string _windowDirStamp = "";
 
-    /// <summary> 设置 wiki 官方术语表（null 或空 = 不启用）。优先级最高，重建生效表。 </summary>
+    /// <summary> 设置 wiki 官方术语表（null 或空 = 不启用）。**兜底**优先级（窗口表 &gt; 安装器表 &gt; wiki），重建生效表。 </summary>
     public void SetWikiTerms(Dictionary<string, string>? terms)
     {
         _wikiTerms = terms is { Count: > 0 } ? terms : null;
         RebuildMerged();
-        _appLog.Info($"[wiki] 生效术语 {_wikiTerms?.Count ?? 0} 条（优先级最高）");
+        _appLog.Info($"[wiki] 生效术语 {_wikiTerms?.Count ?? 0} 条（兜底：窗口表 > 安装器表 > wiki）");
+    }
+
+    /// <summary>
+    /// 设置**第四源**＝运行时词典 / OldDict（`我的翻译.json`；null 或空 = 不启用）。
+    /// ⚠ 优先级**最低兜底**：窗口表 &gt; 安装器表 &gt; wiki &gt; OldDict。
+    ///   依据 F4 v2 裁决 + 通用 B.22「判据宁可漏判别误杀」：过译＝用户看得见的错误，
+    ///   故让官方译名（wiki）优先，运行时词典只作**补缺**。
+    /// 语义由 `RebuildMerged` 的"最后写入 + `AddMerged` 已有键跳过"天然保证，无需额外判据。
+    /// </summary>
+    public void SetDictTerms(Dictionary<string, string>? terms)
+    {
+        _dictTerms = terms is { Count: > 0 } ? terms : null;
+        RebuildMerged();
+        _appLog.Info($"[词典兜底] 生效词条 {_dictTerms?.Count ?? 0} 条（最低优先级，仅补缺）");
     }
 
     /// <summary> 由调用方注入「单词黑名单」判定（命中则**永不替换**，保持英文）。null = 不启用。 </summary>
@@ -370,6 +385,12 @@ public sealed unsafe class ReplacementService
             {
                 foreach (var (en, zh) in _wikiTerms) AddMerged(en, zh);
             }
+            // ④ 运行时词典 / OldDict（F4 v2 第 2 步）：**最低兜底**，仅补缺——
+            //    窗口表/安装器/wiki 都没命中才用；依赖 AddMerged"已有键跳过"实现让位。
+            if (_dictTerms is { Count: > 0 })
+            {
+                foreach (var (en, zh) in _dictTerms) AddMerged(en, zh);
+            }
         }
     }
 
@@ -447,6 +468,32 @@ public sealed unsafe class ReplacementService
         _table[en] = Encoding.UTF8.GetBytes(zh);
         _hashes.Add(FnvUtf8(en));
         InvalidateDerivedCaches();   // ⚠ 审查①：清 _idPtrs/_wsPtrs，并标记 _prefixIndex 待重建
+    }
+
+    /// <summary>
+    /// **增量**并入运行时词典 / OldDict 的新译文（F4 v2 第 2 步配套）。
+    /// ⚠ 为什么要增量：每批机翻完都 `RebuildMerged()` 会把 6.2 万条 wiki 术语全量重建，
+    ///   几百批＝周期性帧卡顿（曾致「Ctrl+V 要按好几次」），安装器侧 `MergeTranslations` 早已改增量，此处同理。
+    /// ⚠ 优先级与全量 `RebuildMerged` **逐键一致**（通用 B.19 / 审查 M2）：OldDict 是最低兜底源，
+    ///   故"键已存在则跳过"——更高优先级的窗口/安装器/wiki 已占该键时让它继续生效。
+    /// ⚠ 只增不覆盖：绝不改写已有手动词条（FFXIV 母本 B.4）。
+    /// </summary>
+    public void ApplyDictEntries(IEnumerable<KeyValuePair<string, string>> entries)
+    {
+        lock (_lock)
+        {
+            var added = 0;
+            foreach (var (en, zh) in entries)
+            {
+                if (_table.ContainsKey(en)) continue;          // 高优先级已占 → 让位（与全量同语义）
+                if (_ptrs.Remove(en, out var stale)) Retire(stale);
+                _table[en] = Encoding.UTF8.GetBytes(zh);
+                _hashes.Add(FnvUtf8(en));
+                added++;
+            }
+            // 派生缓存随源失效（通用 B.19）；本源不进前缀索引（词典无动态模板），仅清指针类缓存并标记待重建
+            if (added > 0) InvalidateDerivedCaches();
+        }
     }
 
     /// <summary>
@@ -809,7 +856,21 @@ public sealed unsafe class ReplacementService
     public List<string> GetMissed() => _missed.Keys.OrderBy(x => x, StringComparer.Ordinal).ToList();
 
     /// <summary> 手动补完后从运行时列表移除该条（可选；留着也无害，下次去重不会重复记）。 </summary>
-    public void RemoveMissed(string s) { _missed.Remove(s); _missedDirty = true; }
+    /// <summary>
+    /// 从未命中队列移除指定原文（已翻译 / 已人工处理 → 不再重复送翻）。
+    /// ⚠ 2026-09-24（F4 v2 第 1 步）：**补 `lock(_lock)`**。
+    ///   原实现无锁，而 F3 修复已把 `RecordMissed`/`CheckDueMissed`/`FlushMissed` 的读写统一在同一把锁内；
+    ///   自动翻译回调在**后台线程**调用本方法，无锁会与渲染线程写 `_missed` 构成新的锁不对称
+    ///   （`Dictionary` 非线程安全）。现与 F3 保持同一把锁，读写全对称。
+    /// </summary>
+    public void RemoveMissed(string s)
+    {
+        lock (_lock)
+        {
+            _missed.Remove(s);
+            _missedDirty = true;
+        }
+    }
 
     /// <summary>
     /// 导入 FuckDalamudCN 的机翻表（installedPlugins\FuckDalamudCN\&lt;版本&gt;\Assets\translations.json，
