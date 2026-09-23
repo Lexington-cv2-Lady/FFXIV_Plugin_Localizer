@@ -247,7 +247,7 @@ public sealed class SourceExtractWindow : Window
         _lastDrawUtc = now;
 
         // ── 工具栏：计数 + 搜索 + 操作（按钮按需换行，窄窗口不会裁掉）──
-        ImGui.TextDisabled($"已装且带 GitHub 地址：{_plugins.Count} 个");
+        ImGui.TextDisabled($"已装且可提取仓库：{_plugins.Count} 个");
         if (_hiddenNoUi > 0)
         {
             ImGui.SameLine();

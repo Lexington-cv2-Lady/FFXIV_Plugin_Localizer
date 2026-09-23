@@ -449,6 +449,76 @@ public sealed class SourceExtractService
         _configDir = configDir;
     }
 
+    /// <summary>
+    /// 本插件自身的"翻译工具"系列内部名——它们本就是**中文汉化工具**，没有"把英文界面翻成中文"的意义，
+    /// 应从源码提取列表里**屏蔽**，避免占用列表与机翻配额。
+    /// ⚠ 三个都是司令官自己的汉化插件（本项目 + Penumbra 模组汉化 + MOD 选项汉化）。
+    /// </summary>
+    private static readonly HashSet<string> SelfPluginInternalNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "FFXIV_Plugin_Localizer",
+        "FFXIV_Penumbra_Mod_Chinese_Localization_Plugin",
+        "FF14-MOD-Options-Chinese-Localization-Tool",
+    };
+
+    /// <summary>
+    /// 已知「清单 RepoUrl 写的是项目主页、而非 git 地址」的插件 → 在此修正为真正的源码仓库地址。
+    /// ⚠ Heliosphere 案例（2026-09-23）：清单 RepoUrl = <c>https://heliosphere.app/</c>（主页，且有网页机器人验证），
+    ///   真仓库在自托管 Forgejo <c>https://git.sharlayan.cloud/heliosphere/plugin</c>（git clone 智能 HTTP 可绕过验证）。
+    /// </summary>
+    private static readonly Dictionary<string, string> KnownRepoUrlFix = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "heliosphere-plugin", "https://git.sharlayan.cloud/heliosphere/plugin" },
+    };
+
+    /// <summary> 受支持的 git 托管平台（清单自带地址仅当命中才采用，避免把主页 URL 当仓库）。 </summary>
+    private static readonly HashSet<string> KnownGitHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "git.sharlayan.cloud", "gitea.io",
+    };
+
+    /// <summary>
+    /// 把清单里的地址解析成**可克隆的 git 地址**：
+    ///   ① 已知插件（主页型）→ 用修正表；② 清单自带且是受支持 git 托管 → 直接用；③ 其余（主页/无地址）→ null（屏蔽）。
+    /// </summary>
+    private static string? ResolveRepoUrl(string internalName, string rawUrl)
+    {
+        if (KnownRepoUrlFix.TryGetValue(internalName, out var fixedUrl))
+            return fixedUrl;
+        if (!string.IsNullOrWhiteSpace(rawUrl)
+            && rawUrl.Contains("://", StringComparison.OrdinalIgnoreCase)
+            && KnownGitHosts.Any(h => rawUrl.Contains(h, StringComparison.OrdinalIgnoreCase)))
+        {
+            return rawUrl.TrimEnd('/');
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 由仓库地址推导克隆目录名。GitHub 保持旧的 <c>owner__repo</c> 格式（兼容已克隆目录与自动清理逻辑）；
+    /// 其它托管则用 <c>host__路径段</c>，保证唯一且合法作目录名。
+    /// </summary>
+    private static string DeriveDirName(string repoUrl)
+    {
+        var m = Regex.Match(repoUrl, @"github\.com/([^/]+)/([^/#?]+)");
+        if (m.Success) return $"{m.Groups[1].Value}__{m.Groups[2].Value}".TrimEnd('.');
+        try
+        {
+            var uri = new Uri(repoUrl);
+            var segs = uri.Segments.Select(s => s.Trim('/')).Where(s => s.Length > 0).ToArray();
+            var tail = string.Join("__", segs);
+            return $"{uri.Host}__{tail}".TrimEnd('.');
+        }
+        catch
+        {
+            return "unknown_repo";
+        }
+    }
+
+    /// <summary> 是否像一个可克隆的 git 地址（http/https）。用于 ExtractAsync 放宽 github 硬过滤。 </summary>
+    private static bool IsGitUrlLike(string url)
+        => !string.IsNullOrWhiteSpace(url) && url.Contains("://", StringComparison.OrdinalIgnoreCase);
+
     /// <summary> 已装插件（名称、GitHub 地址）；取不到地址的也列出，便于手工补。 </summary>
     /// <summary>
     /// 列出已装且带 GitHub 地址的插件：**内含显示名**（清单的 Name 字段，如 `Character Data Sync`），
@@ -457,6 +527,7 @@ public sealed class SourceExtractService
     public List<(string Name, string DisplayName, string RepoUrl)> ListPluginsWithRepo()
     {
         var result = new List<(string, string, string)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // 去重：installed/dev 双目录会重复列同一插件
         var launcherDir = Path.GetDirectoryName(Path.GetDirectoryName(_configDir()));
         foreach (var rootName in new[] { "installedPlugins", "devPlugins" })
         {
@@ -465,6 +536,10 @@ public sealed class SourceExtractService
             foreach (var pluginDir in Directory.GetDirectories(root))
             {
                 var name = Path.GetFileName(pluginDir);
+                // ① 屏蔽本插件自身的汉化工具（没有"英→中"的意义）
+                if (SelfPluginInternalNames.Contains(name)) continue;
+                // ② 去重：同一插件在 installed/dev 都出现时只留一次
+                if (!seen.Add(name)) continue;
                 string url = "";
                 var displayName = "";
                 try
@@ -480,9 +555,11 @@ public sealed class SourceExtractService
                     }
                 }
                 catch { /* 清单坏了就留空 */ }
-                if (url.Contains("github.com", StringComparison.OrdinalIgnoreCase))
+                // ③ 地址解析：仅收录可克隆的 git 地址（含 Heliosphere 等主页型修正）
+                var repoUrl = ResolveRepoUrl(name, url);
+                if (repoUrl != null)
                 {
-                    result.Add((name, displayName, url.TrimEnd('/')));
+                    result.Add((name, displayName, repoUrl));
                 }
             }
         }
@@ -500,9 +577,9 @@ public sealed class SourceExtractService
         {
             return (false, 0, new(), "未启用代理或端口为空：请勾选「启用代理」并填写端口后重试");
         }
-        if (string.IsNullOrWhiteSpace(repoUrl) || !repoUrl.Contains("github.com", StringComparison.OrdinalIgnoreCase))
+        if (!IsGitUrlLike(repoUrl))
         {
-            return (false, 0, new(), "仓库地址无效（需为 github.com 链接）");
+            return (false, 0, new(), "仓库地址无效（需为 http/https 的 git 仓库地址）");
         }
 
         // ── 判据①：**已安装的 DLL** 是否已是中文版（用户视角最准）──
@@ -518,9 +595,8 @@ public sealed class SourceExtractService
 
         var repoRoot = Path.Combine(_configDir(), RepoDirName);
         Directory.CreateDirectory(repoRoot);
-        var bare = Regex.Match(repoUrl, @"github\.com/([^/]+)/([^/#?]+)");
-        if (!bare.Success) return (false, 0, new(), "无法解析仓库地址");
-        var dirName = $"{bare.Groups[1].Value}__{bare.Groups[2].Value}".TrimEnd('.');
+        var dirName = DeriveDirName(repoUrl);
+        if (dirName == "unknown_repo") return (false, 0, new(), "无法解析仓库地址");
         var dir = Path.Combine(repoRoot, dirName);
         // 勾选代理才走代理；未勾选则直连（部分网络环境可直连 GitHub）
         var proxy = _cfg.UseProxy ? _cfg.ProxyAddress : "";
