@@ -73,7 +73,7 @@ public sealed class TranslationWindow : Window
                                  "（用于分包前提前预翻常用插件）。\n不勾：只翻已安装插件的介绍。\n" +
                                  "⚠ 仓库有几千个插件，勾选会一次性送翻大量条目，API 费用明显增加。");
             ImGui.TextColored(new Vector4(0.95f, 0.35f, 0.25f, 1f),
-                "⚠ 很花钱：会把卫月仓库里几千个【未安装】插件的介绍也送进付费 AI——仅打包分发前预翻才需要，平时别开！");
+                "⚠ 很花钱：会把您配置的仓库（主库+启用的第三方）里几百个【未安装】插件的介绍送进 AI——用付费模型费用明显（免费 glm-4-flash 则 0 元）；仅打包分发前预翻才需要，平时别开！");
             var silent = _plugin.Configuration.SilentTranslate;
             if (ImGui.Checkbox("后台静默执行", ref silent))
             {
