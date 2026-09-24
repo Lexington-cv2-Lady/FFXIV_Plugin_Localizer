@@ -160,7 +160,11 @@ public sealed class AppLog
         }
         if (FilePath != null)
         {
-            try { lock (_fileLock) { File.WriteAllText(FilePath, "", Encoding.UTF8); _fileBytes = 0; } } catch { }
+            // 审查（2026-09-24 第二道校验）：原为空 catch 静默吞异常。清空文件失败虽不致命
+            // （内存日志已清），但用户会困惑"点了清除，日志文件怎么还在/仍在涨"，故补一条警告。
+            // ⚠ 此处调 Warn 不会递归爆栈：Add → WriteToFile 内部另有 try/catch，写盘再失败也只是不落盘。
+            try { lock (_fileLock) { File.WriteAllText(FilePath, "", Encoding.UTF8); _fileBytes = 0; } }
+            catch (Exception ex) { Warn("清除日志文件失败（内存日志已清空，文件可能仍在）：" + ex.Message); }
         }
         Changed?.Invoke();
     }
