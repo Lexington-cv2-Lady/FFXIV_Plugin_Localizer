@@ -93,7 +93,7 @@ public sealed class WindowReplaceWindow : Window
             Ui.PopDanger();
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("停止翻译：不再发送新的批次请求。\n" +
-                                 "⚠ 已翻完的批次会保留并写入译文表（那些已经花掉额度了，不浪费）；\n" +
+                                 "【注意】已翻完的批次会保留并写入译文表（那些已经花掉额度了，不浪费）；\n" +
                                  "正在请求中的那一批也会被立即中断。");
         }
         else

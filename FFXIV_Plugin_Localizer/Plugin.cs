@@ -689,7 +689,9 @@ public sealed class Plugin : IDalamudPlugin
                     catch (Exception exOpen) { AppLog.Warn($"[体检] 打开 {p.Name} 失败：{exOpen.Message}"); }
                     await Task.Delay(1500);
                     var missed = Hook.DrainMissedSamples();
-                    try { AtkHook.TryClosePluginWindow(p.InternalName); } catch { /* 尽力关 */ }
+                    // 体检只开不关会留一堆窗口（很麻烦）——开完即关：Atk 原生窗 + Dalamud ImGui 窗
+                    try { AtkHook.TryClosePluginWindow(p.InternalName); } catch { /* 尽力关 Atk 原生窗 */ }
+                    try { ClosePluginUiWindow(p); } catch { /* 尽力关 ImGui 窗 */ }
                     await Task.Delay(300);
                     var real = missed.Where(IsLikelyUiText).ToList();
                     if (real.Count > 0)
@@ -759,6 +761,21 @@ public sealed class Plugin : IDalamudPlugin
                 HealthRunning = false;
             }
         });
+    }
+
+    /// <summary> 关闭体检打开的其他插件 ImGui 配置窗/主窗。官方公开 API 只有 OpenConfigUi/OpenMainUi、没有 Close，
+    /// 故反射调用插件窗口实例（ConfigWindow/MainWindow）的 Close()——避免体检后留一堆窗口。 </summary>
+    private static void ClosePluginUiWindow(object plugin)
+    {
+        foreach (var name in new[] { "ConfigWindow", "MainWindow" })
+        {
+            var prop = plugin.GetType().GetProperty(name,
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var w = prop?.GetValue(plugin);
+            if (w is null) continue;
+            var close = w.GetType().GetMethod("Close", Type.EmptyTypes);
+            if (close is not null) close.Invoke(w, null);
+        }
     }
 
     /// <summary> 体检过滤：真正值得报的界面文字（去掉 "[igButton] " 前缀、排除 ImGui ###id 与太短/纯符号串）。 </summary>
