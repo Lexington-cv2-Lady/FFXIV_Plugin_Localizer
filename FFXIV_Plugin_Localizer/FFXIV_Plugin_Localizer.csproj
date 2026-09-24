@@ -25,6 +25,11 @@
   <!-- 本机私有覆盖（不入库）：可在此设置 DevPluginDir 等机器相关属性 -->
   <Import Project="local.props" Condition="Exists('local.props')" />
 
+  <!-- 测试工程需访问内部反射关窗逻辑（ClosePluginUiWindowCore 等），授权为友元程序集 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="FFXIV_Plugin_Localizer.Tests" />
+  </ItemGroup>
+
   <!-- 内置翻译包：构建时从本机 FuckDalamudCN 表生成，并与「已提交的机翻种子」合并（FDCN 优先覆盖，机翻补缺）。
        这样新用户无需花钱：未装 FDCN 时由内置包打底，已有机翻的未安装插件介绍直接免费可用。
        来源路径只存在于构建机（本机 APPDATA），生成物 内置翻译包.json 随插件分发，不依赖该路径。 -->
