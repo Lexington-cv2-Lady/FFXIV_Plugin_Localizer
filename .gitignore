@@ -3,3 +3,13 @@ obj/
 *.user
 工作记忆.md
 local.props
+工作记忆_历史.md
+工作记忆整理说明_*.md
+.workbuddy/
+
+# 测试与构建产物
+*.trx
+TestResults/
+# 仓库卫生（审查方建议）
+*.patch
+归档_*/
