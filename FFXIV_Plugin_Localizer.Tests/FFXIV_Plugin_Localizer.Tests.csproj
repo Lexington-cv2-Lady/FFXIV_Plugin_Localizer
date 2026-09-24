@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 须与主工程一致：Dalamud.NET.Sdk 默认 TFM 为 net10.0-windows7.0 -->
+    <TargetFramework>net10.0-windows7.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <LangVersion>latest</LangVersion>
+    <!-- 主工程有 unsafe（ReplacementService 等），引用它时测试工程也要开 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- 与主工程一致（Dalamud 为 x64），避免平台不匹配 -->
+    <Platforms>x64</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 方式一：直接引用主工程（真实 API，不 mock 核心判定） -->
+    <ProjectReference Include="..\FFXIV_Plugin_Localizer\FFXIV_Plugin_Localizer.csproj" />
+  </ItemGroup>
+
+  <!-- 测试需要 Dalamud 运行时程序集以实例化 Configuration（实现 IPluginConfiguration）。
+       从本机/CI 的 Dalamud 开发目录拷贝最小托管依赖到测试输出，使 headless 测试可运行；
+       该目录由 CI 的「Download Dalamud」步骤 / 本机卫月安装提供。 -->
+  <Target Name="CopyDalamudRuntime" AfterTargets="Build">
+    <PropertyGroup>
+      <_DalamudDev Condition="Exists('$(UserProfile)\AppData\Roaming\XIVLauncherCN\addon\Hooks\dev\Dalamud.dll')">$(UserProfile)\AppData\Roaming\XIVLauncherCN\addon\Hooks\dev</_DalamudDev>
+      <_DalamudDev Condition="'$(_DalamudDev)' == '' And Exists('$(UserProfile)\AppData\Roaming\XIVLauncher\addon\Hooks\dev\Dalamud.dll')">$(UserProfile)\AppData\Roaming\XIVLauncher\addon\Hooks\dev</_DalamudDev>
+    </PropertyGroup>
+    <ItemGroup>
+      <_DalamudAsm Include="$(_DalamudDev)\Dalamud.dll" />
+      <_DalamudAsm Include="$(_DalamudDev)\Dalamud.Common.dll" />
+      <_DalamudAsm Include="$(_DalamudDev)\Newtonsoft.Json.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DalamudAsm)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'$(_DalamudDev)' != ''" />
+  </Target>
+
+</Project>
