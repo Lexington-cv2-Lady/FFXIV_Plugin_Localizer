@@ -742,7 +742,8 @@ public sealed unsafe class ReplacementService
                         {
                             // 审查⑤：原为 `break` → 会把**同首字节桶里后面的无关模板**一并跳过（拉黑一个模板
                             //   不该影响其它模板）；改 `continue` 只跳过这一条。
-                            try { if (bl(pe.Text)) continue; } catch { }
+                            try { if (bl(pe.Text)) continue; }
+                            catch (Exception ex) { WarnThrottled(ref _lastBlacklistErrMs, "[替换] 黑名单判定回调抛异常（本次不拉黑、继续替换）：" + ex.Message); }
                         }
                         var full = Encoding.UTF8.GetString(p, n);
                         if (_idPtrs.TryGetValue(full, out var cached3)) return cached3;
@@ -824,7 +825,10 @@ public sealed unsafe class ReplacementService
         // ⚠ 事件触发放在锁外：避免在持有 `_lock` 期间回调外部逻辑（OnMissedCaptured→机翻入队），也防止重入死锁。
         foreach (var k in due)
         {
-            try { MissedCaptured?.Invoke(k); } catch { }
+            // 审查（2026-09-24 第二道）：原为空 catch。订阅者（自动翻译入队）若抛异常会被完全隐藏，
+            // 表现为"英文一直没被送去翻译"却查不到原因——故补日志（降频，避免刷屏）。
+            try { MissedCaptured?.Invoke(k); }
+            catch (Exception ex) { WarnThrottled(ref _lastMissedEventErrMs, "[替换] MissedCaptured 订阅者抛异常（该条未入队）：" + ex.Message); }
         }
     }
 
@@ -870,6 +874,19 @@ public sealed unsafe class ReplacementService
             _missed.Remove(s);
             _missedDirty = true;
         }
+    }
+
+    // ── 异常日志降频（2026-09-24 审查方第二道校验：补日志，取代静默吞）──
+    // 下面两处都可能在**逐帧热路径**触发（前缀模板匹配每帧每条文字、事件回调每条未命中），
+    // 逐条记会把日志刷爆，故同类异常 60 秒最多一条。
+    private long _lastBlacklistErrMs, _lastMissedEventErrMs;
+
+    private void WarnThrottled(ref long lastMs, string msg)
+    {
+        var now = Environment.TickCount64;
+        if (now - lastMs < 60_000) return;   // 60 秒内同类只记第一条
+        lastMs = now;
+        _appLog.Warn(msg);
     }
 
     /// <summary>
@@ -1920,7 +1937,9 @@ public sealed unsafe class ReplacementService
     }
 
     /// <summary> 读扫描候选文件（文案扫描输出，仍是「英文→空值」字典格式）。 </summary>
-    private static Dictionary<string, string> ReadJsonDict(string path)
+    // ⚠ 2026-09-24：由 static 改为**实例方法**——解析失败要留日志（通用 B.7），需访问 `_appLog`。
+    //   唯一调用点（:1363 候选文件读取）本就在实例方法内，故改动无副作用。
+    private Dictionary<string, string> ReadJsonDict(string path)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         try
@@ -1952,7 +1971,12 @@ public sealed unsafe class ReplacementService
                 }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 通用 B.7：数据文件损坏 / 解析失败**必须留日志**，不能静默吞——
+            // 否则用户只会看到"译文全没了"却无从排查（此处失败会返回空表）。
+            _appLog.Warn($"[替换] 读取译文/词典文件失败（已按空处理，界面可能缺译文）：{path} —— {ex.Message}");
+        }
         return result;
     }
 

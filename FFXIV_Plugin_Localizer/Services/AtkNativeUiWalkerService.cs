@@ -190,7 +190,7 @@ public sealed unsafe class AtkNativeUiWalkerService : IDisposable
                 if (n != null) WalkTextNodes(n, 0);
             }
         }
-        catch { }
+        catch (Exception ex) { WarnThrottled(ref _lastNodeListErrMs, "[Atk遍历] NodeList 兜底遍历异常（已跳过兜底，主树遍历不受影响）：" + ex.Message); }
 
         if (isNew)
         {
@@ -229,7 +229,7 @@ public sealed unsafe class AtkNativeUiWalkerService : IDisposable
                         var s = new CStringPointer(q).ToString();
                         if (!_samples.Contains(s)) _samples.Add(s);
                     }
-                    catch { }
+                    catch (Exception ex) { WarnThrottled(ref _lastSampleErrMs, "[Atk遍历] 文本样本转换异常（仅影响日志样本收集，不中断替换）：" + ex.Message); }
                 }
 
                 var zh = _replacement.TryReplace(q, n);
@@ -263,12 +263,25 @@ public sealed unsafe class AtkNativeUiWalkerService : IDisposable
                     if (n != null) WalkTextNodes(n, depth + 1);
                 }
             }
-            catch { }
+            catch (Exception ex) { WarnThrottled(ref _lastCompNodeListErrMs, "[Atk遍历] 组件 NodeList 遍历异常（已跳过该组件兜底）：" + ex.Message); }
         }
 
     Next:
         WalkTextNodes(node->ChildNode, depth + 1);
         WalkTextNodes(node->NextSiblingNode, depth);
+    }
+
+    // ── 异常日志降频（2026-09-24 审查方第二道校验：补日志，取代静默吞）──
+    // 本服务每 100ms 轮询遍历，异常若逐条记录会把日志刷爆（反而制造新的问题）。
+    // 故**同类异常 60 秒最多记一条**：既守住通用 B.20「异常不能静默吞」，又不牺牲可读性。
+    private long _lastNodeListErrMs, _lastSampleErrMs, _lastCompNodeListErrMs;
+
+    private void WarnThrottled(ref long lastMs, string msg)
+    {
+        var now = Environment.TickCount64;
+        if (now - lastMs < 60_000) return;   // 60 秒内同类只记第一条
+        lastMs = now;
+        _appLog.Warn(msg);
     }
 
     public void Dispose()
