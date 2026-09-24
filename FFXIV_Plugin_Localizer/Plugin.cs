@@ -5,6 +5,7 @@ using System.Linq;
 using System.Numerics;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Reflection;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
@@ -763,19 +764,104 @@ public sealed class Plugin : IDalamudPlugin
         });
     }
 
-    /// <summary> 关闭体检打开的其他插件 ImGui 配置窗/主窗。官方公开 API 只有 OpenConfigUi/OpenMainUi、没有 Close，
-    /// 故反射调用插件窗口实例（ConfigWindow/MainWindow）的 Close()——避免体检后留一堆窗口。 </summary>
-    private static void ClosePluginUiWindow(object plugin)
+    /// <summary> 关闭体检打开的其他插件 ImGui 配置窗/主窗（实例包装，供体检循环调用）。核心逻辑见 ClosePluginUiWindowCore。 </summary>
+    private void ClosePluginUiWindow(object plugin) => ClosePluginUiWindowCore(AppLog, plugin);
+
+    /// <summary> 关闭体检打开的其他插件 ImGui 配置窗/主窗（核心逻辑，静态可测）。
+    /// 官方 IExposedPlugin 只有 OpenConfigUi/OpenMainUi、没有 Close（dalamud.dev API 确认，本工程 AtkNativeUiWalkerService.cs:137 亦记）；
+    /// Atk 原生窗由体检循环的 TryClosePluginWindow 处理。ImGui 窗只能反射：IExposedPlugin 接口本身不暴露插件实例，
+    /// 故反射其**具体运行时类型**取出真正的 IDalamudPlugin 实例，再关闭它身上所有带 IsOpen 的 Window 成员。
+    /// 反射目标/成员名随插件而异（ConfigWindow/MainWindow/插件自定义窗…），属尽力而为；任一步失败静默跳过，不影响体检。 </summary>
+    internal static void ClosePluginUiWindowCore(AppLog log, object plugin)
     {
-        foreach (var name in new[] { "ConfigWindow", "MainWindow" })
+        var pluginName = GetExposedName(plugin) ?? "?";
+        try
         {
-            var prop = plugin.GetType().GetProperty(name,
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            var w = prop?.GetValue(plugin);
-            if (w is null) continue;
-            var close = w.GetType().GetMethod("Close", Type.EmptyTypes);
-            if (close is not null) close.Invoke(w, null);
+            var instance = GetPluginInstance(plugin);
+            if (instance is null)
+            {
+                log.Warn($"[体检] 无法取得 {pluginName} 的插件实例（IExposedPlugin 未暴露），跳过 ImGui 窗关闭");
+                return;
+            }
+            var closed = 0;
+            foreach (var w in EnumerateWindowMembers(instance))
+            {
+                try { w.GetType().GetProperty("IsOpen")?.SetValue(w, false); closed++; }
+                catch { /* 尽力关 */ }
+            }
+            log.Info($"[体检] 已尝试关闭 {pluginName} 的 {closed} 个 ImGui 窗");
         }
+        catch (Exception ex)
+        {
+            log.Warn($"[体检] 关闭 {pluginName} 的 ImGui 窗失败：{ex.Message}");
+        }
+    }
+
+    private static string? GetExposedName(object plugin)
+    {
+        foreach (var n in new[] { "Name", "InternalName" })
+        {
+            var p = plugin.GetType().GetProperty(n, BindingFlags.Public | BindingFlags.Instance);
+            if (p != null) { var v = p.GetValue(plugin); if (v is string s && s.Length > 0) return s; }
+        }
+        return null;
+    }
+
+    /// <summary> 从 IExposedPlugin 的具体运行时类型取出真正的 IDalamudPlugin 实例（接口本身不暴露，只能反射内部字段/属性）。 </summary>
+    internal static object? GetPluginInstance(object plugin)
+    {
+        var t = plugin.GetType();
+        foreach (var n in new[] { "Plugin", "Instance", "instance", "LoadedPlugin", "State", "_plugin" })
+        {
+            var v = GetMemberValue(plugin, t, n);
+            if (IsPluginInstance(v)) return v;
+        }
+        foreach (var (_, v) in EnumerateMembers(plugin, t, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            if (IsPluginInstance(v)) return v;
+        }
+        return null;
+    }
+
+    private static bool IsPluginInstance(object? v)
+    {
+        if (v is null) return false;
+        return v.GetType().GetInterfaces().Any(i => i.Name == "IDalamudPlugin") || v.GetType().Name == "IDalamudPlugin";
+    }
+
+    /// <summary> 枚举某实例身上所有「带 IsOpen 属性」的成员（多为 ConfigWindow/MainWindow/插件自定义窗等 Dalamud 窗），取其对象。 </summary>
+    private static IEnumerable<object> EnumerateWindowMembers(object instance)
+    {
+        var t = instance.GetType();
+        foreach (var (_, v) in EnumerateMembers(instance, t, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            if (v is null) continue;
+            if (v.GetType().GetProperty("IsOpen", BindingFlags.Public | BindingFlags.Instance) != null)
+                yield return v;
+        }
+    }
+
+    private static IEnumerable<(string name, object? value)> EnumerateMembers(object target, Type t, BindingFlags flags)
+    {
+        foreach (var pr in t.GetProperties(flags))
+        {
+            object? v = null; try { v = pr.GetValue(target); } catch { v = null; }
+            yield return (pr.Name, v);
+        }
+        foreach (var f in t.GetFields(flags))
+        {
+            object? v = null; try { v = f.GetValue(target); } catch { v = null; }
+            yield return (f.Name, v);
+        }
+    }
+
+    private static object? GetMemberValue(object target, Type t, string name)
+    {
+        var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (p != null) { try { return p.GetValue(target); } catch { return null; } }
+        var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (f != null) { try { return f.GetValue(target); } catch { return null; } }
+        return null;
     }
 
     /// <summary> 体检过滤：真正值得报的界面文字（去掉 "[igButton] " 前缀、排除 ImGui ###id 与太短/纯符号串）。 </summary>
