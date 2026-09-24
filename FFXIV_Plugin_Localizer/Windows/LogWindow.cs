@@ -108,6 +108,8 @@ public class LogWindow : Window
         {
             if (list.Success)
             {
+                // 画内容前取上一帧滚动位置：用于判断是否「用户本就在顶部」，避免自动滚动每帧强制回顶
+                var wasAtTop = ImGui.GetScrollY() <= 4f;
                 var entries = _log.Snapshot();
                 foreach (var e in entries)
                 {
@@ -125,9 +127,11 @@ public class LogWindow : Window
                     };
                     ImGui.TextColored(color, $"{e.Time:HH:mm:ss} {tag} {e.Text}");
                 }
-                if (_autoScroll && entries.Count > 0)
+                // 自动滚动（列表新→旧，顶部即最新一条）：仅「开了自动滚动 且 用户本就在顶部」时吸顶。
+                // 用户手动上滑看旧日志时 wasAtTop=false，不再每帧强制回顶，可随意停在任意位置。
+                if (_autoScroll && wasAtTop)
                 {
-                    ImGui.SetScrollY(0f); // 列表新→旧：顶部即最新一条
+                    ImGui.SetScrollY(0f);
                 }
             }
         }

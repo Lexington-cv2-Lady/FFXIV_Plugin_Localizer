@@ -71,9 +71,9 @@ public sealed class TranslationWindow : Window
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("勾了：启动检查不只查已装插件，还拉卫月仓库清单，把**未安装**插件的介绍也送翻" +
                                  "（用于分包前提前预翻常用插件）。\n不勾：只翻已安装插件的介绍。\n" +
-                                 "⚠ 仓库有几千个插件，勾选会一次性送翻大量条目，API 费用明显增加。");
+                                 "【注意】仓库有几千个插件，勾选会一次性送翻大量条目，API 费用明显增加。");
             ImGui.TextColored(new Vector4(0.95f, 0.35f, 0.25f, 1f),
-                "⚠ 很花钱：会把您配置的仓库（主库+启用的第三方）里几百个【未安装】插件的介绍送进 AI——用付费模型费用明显（免费 glm-4-flash 则 0 元）；仅打包分发前预翻才需要，平时别开！");
+                "【注意】很花钱：会把您配置的仓库（主库+启用的第三方）里几百个【未安装】插件的介绍送进 AI——用付费模型费用明显（免费 glm-4-flash 则 0 元）；仅打包分发前预翻才需要，平时别开！");
             var silent = _plugin.Configuration.SilentTranslate;
             if (ImGui.Checkbox("后台静默执行", ref silent))
             {
@@ -99,7 +99,7 @@ public sealed class TranslationWindow : Window
                                  "①注入生效替换表（**最低兜底**第四源：窗口 > 安装器 > wiki > 词典）——界面才真正变中文；\n" +
                                  "②从「未命中队列」移除——不再反复送翻、不再白烧配额。\n" +
                                  "关闭：行为与以前一致，译文只写词典、不进生效表。\n" +
-                                 "⚠ 默认关；①和②由本开关统一控制、配套生效，不会只清队列而不注入。");
+                                 "【注意】默认关；①和②由本开关统一控制、配套生效，不会只清队列而不注入。");
 
             ImGui.Spacing();
             ImGui.TextUnformatted("运行时发现的英文，何时自动翻（满足任意一条）：");
