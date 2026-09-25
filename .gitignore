@@ -17,3 +17,11 @@ FFXIV_Plugin_Localizer.Tests/nul
 # 仓库卫生（审查方建议）
 *.patch
 归档_*/
+# 构建 / DalamudPackager 输出到仓库根目录的产物（每次构建都重新生成，入库只会污染 diff）
+# ⚠ 均带前导 "/" 限定仓库根目录，不误伤项目子目录内同名文件。
+# 注：FFXIV_Plugin_Localizer.json 是 packager 生成的插件 manifest（非手写源），
+#     发布走打包 zip，无需入库；若日后要改用手写 manifest，删掉下面这一行即可。
+/FFXIV_Plugin_Localizer.dll
+/FFXIV_Plugin_Localizer.deps.json
+/FFXIV_Plugin_Localizer.json
+/内置翻译包.json
