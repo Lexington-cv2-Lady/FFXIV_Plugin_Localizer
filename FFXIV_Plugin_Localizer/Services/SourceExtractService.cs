@@ -696,13 +696,13 @@ public sealed class SourceExtractService
         return (true, strings.Count, funcStats, $"提取 {strings.Count} 条 → {Path.GetFileName(outPath)}（主要绘制：{funcSummary}）");
     }
 
-    /// <summary> 扫描目录下所有 .cs，抓界面文案与绘制函数统计。 </summary>
     /// <summary> 扫描目录下所有 .cs，抓界面文案与绘制函数统计，同时统计含中文的字符串（判断是否已汉化）。 </summary>
     private (SortedSet<string> Strings, Dictionary<string, int> FuncStats, int ZhCount) ExtractFromDirectory(string dir)
     {
         var strings = new SortedSet<string>(StringComparer.Ordinal);
         var funcStats = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var zhSeen = new HashSet<string>(StringComparer.Ordinal); // 去重，避免同一句重复计数
+        var skipped = 0;                                          // 读不到的文件数（被占用 / 无权限 / 枚举后被删）
         foreach (var file in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
         {
             // 跳过构建产物与第三方库目录
@@ -710,8 +710,14 @@ public sealed class SourceExtractService
             if (lower.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") ||
                 lower.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
                 continue;
-            string text;
-            try { text = File.ReadAllText(file, Encoding.UTF8); } catch { continue; }
+            // ⚠ 不可读的文件（被独占 / 无权限 / 枚举后被删）属**预期情况**，跳过该文件继续其余，
+            //   并在循环结束后汇总一条 Warn 留痕——**不静默吞**：既不因一个坏文件毁掉整仓库提取，
+            //   也不会让"读不到"这件事无声无息。理由与捕获边界见 TryReadSourceText。
+            if (!TryReadSourceText(file, out var text))
+            {
+                skipped++;
+                continue;
+            }
             // ⚠ 先合并 `"A " + "B " + "C"`（编译期等价于一整串）再提取：否则会把半截片段当独立文案
             //   存进表（永远命不中、纯废条目），而真正的完整长句反而漏采 → 界面整段英文。
             //   2026-09-25 Heliosphere「技术信息」12 段拼接段落实证。
@@ -759,7 +765,41 @@ public sealed class SourceExtractService
                 }
             }
         }
+        if (skipped > 0)
+        {
+            _appLog.Warn($"[源码] 有 {skipped} 个 .cs 文件读不到（被其它进程占用 / 无读取权限 / 枚举后被删除），已跳过；其余文件照常提取。");
+        }
         return (strings, funcStats, zhSeen.Count);
+    }
+
+    /// <summary>
+    /// 读取单个源文件文本；读不到返回 false（不抛）。
+    /// **此处捕获属预期异常**，理由见方法体注释——这是「遗留发现项 F1」的处置落点，
+    /// 由 <see cref="FFXIVPluginLocalizer.Tests.SourceExtractReadGuardTests"/> 守着。
+    /// </summary>
+    internal static bool TryReadSourceText(string path, out string text)
+    {
+        try
+        {
+            text = File.ReadAllText(path, Encoding.UTF8);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException            // 含 FileNotFoundException / DirectoryNotFoundException：
+                                                                //   目录枚举与读取有时间差，文件可能已被清理；
+                                                                //   或被编辑器 / 杀软 / 并行构建独占（共享冲突）
+                                   or UnauthorizedAccessException // 无读取权限（系统保护目录、符号链接目标）
+                                   or System.Security.SecurityException)
+        {
+            // 此处异常属预期，理由：
+            //   ① 扫的是**第三方插件源码目录**，其中混有只读文件、被进程独占的临时文件、失效符号链接等，
+            //      「个别文件读不到」是常态而非故障；
+            //   ② 单个文件读不到**不应**让整仓库提取失败——向上抛会让一个坏文件毁掉全部结果
+            //      （用户视角：明明有 300 条文案，却因 1 个文件报"提取失败"）；
+            //   ③ 但仍要留痕：由调用方汇总一条 Warn（见 ExtractFromDirectory 末尾），不静默吞。
+            // ⚠ 只捕获上述 IO / 权限类异常：编码错误、OOM、空引用等**继续向上抛**——那才是真 bug。
+            text = string.Empty;
+            return false;
+        }
     }
 
     private static void AddCandidate(SortedSet<string> strings, Dictionary<string, int> funcStats, string func, string raw)
