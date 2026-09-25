@@ -72,6 +72,27 @@ public class Configuration : IPluginConfiguration
     /// <summary> 安装器替换开关（按对照表在绘制层把插件介绍换成中文，即时生效）。 </summary>
     public bool ReplacementEnabled { get; set; } = true;
 
+    /// <summary> 【Penumbra 专用开关】是否对 Penumbra 插件做任何翻译。
+    /// 默认**关**（2026-09-25 司令官要求）：关 = 本插件完全不翻译 Penumbra 的任何内容
+    /// （模组名、UI 标签、说明文字一律保持英文原文）；开 = 照常对 Penumbra 做全局翻译。
+    /// ⚠ 判定依据：渲染时按当前 ImGui 窗口名是否含 "Penumbra" 决定是否抑制（见 ImGuiHookService）。
+    ///   开关即时生效（运行时按窗口上下文判断），不改动任何翻译表/核心逻辑。
+    ///   代价：关掉时 Penumbra 的 UI 也不会被翻（Penumbra 目前没有专门窗口表，影响有限）。 </summary>
+    public bool TranslatePenumbra { get; set; }
+
+    /// <summary> 【联动旧项目单词黑名单】开启后，自动探测旧项目（FFXIV 模组汉化工具）的词典目录，
+    /// 把它的「单词黑名单.json」**并入**本插件黑名单（命中词保持英文，不翻译、不替换）。
+    /// 默认**开**（2026-09-25 司令官报 bug：Penumbra 里旧项目已拉黑的 MOD 专名——Lavabod/YAB/TBSE 等——
+    /// 被本插件机翻/替换成了中文）。与「翻译 Penumbra」开关正交：那个管"翻不翻 Penumbra"，
+    /// 这个管"翻了也要保住旧项目拉黑的专名"。
+    /// ⚠ ①只**读**旧项目文件，从不修改；探测不到旧项目（未装/未配词典目录）时自动跳过、无任何影响。
+    ///   ②黑名单是**整串精确匹配**（大小写不敏感），只拦"整个标签恰好等于该词"的情况，
+    ///   不会误伤含该词的长句（如拉黑 Lava 不影响 "Lava Burst"）。
+    ///   ③只联动旧项目的「单词黑名单.json」（专名保留）；**不联动**其 wiki_术语对照_黑名单.json
+    ///   （那是旧项目内部 wiki 加载逻辑，含 yes/no/play/cancel 等基础词，全局拉黑会把别的插件的
+    ///   "取消/播放/开始"也错留英文）。 </summary>
+    public bool LinkOldProjectBlacklist { get; set; } = true;
+
     /// <summary> 智谱开放平台 API Key（旧版单一字段，已迁移到按服务商分存的 AiApiKeys；保留字段仅为兼容旧配置文件）。 </summary>
     public string ZhipuApiKey { get; set; } = "";
 

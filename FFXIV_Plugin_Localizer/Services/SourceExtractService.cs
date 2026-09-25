@@ -96,6 +96,49 @@ public sealed class SourceExtractService
         RegexOptions.Compiled);
 
     /// <summary>
+    /// **相邻字符串字面量的拼接链**：`"A " + "B " + "C"`（可跨行、可带 `+` 换行）。
+    /// <b>为什么必须合并（2026-09-25 Heliosphere 实证）</b>：C# 的字面量拼接在**编译期**就合并成一整串，
+    /// 运行时传给 ImGui 的是**完整长句**。而提取器逐条捕获单个字面量 → 把每条**半截片段**当独立文案存进表，
+    /// 结果是：① 片段**永远命不中**（运行时不存在这条半截串），纯废条目占机翻额度；
+    /// ② **真正的完整长句没有译文**（因为从未被采到）→ 界面整段保持英文。
+    /// 实例：Heliosphere「技术信息」段落由 **12 段**拼接而成，表里只存了
+    /// `"One-click installs use a password system. The button"` 这类半截句，长句显示全英文。
+    /// <para/>
+    /// ⚠ 只合并**纯字面量 + 字面量**（中间仅允许空白/换行与一个 `+`）；任何插值 `$"…{x}…"`、
+    /// 变量、方法调用一律**不合并**（否则会把不可静态求值的内容错误地粘成一句）。
+    /// 合并结果写成**单个字面量**回填原文，后续所有正则看到的即"编译器看到的样子"。
+    /// </summary>
+    private static readonly Regex ConcatLiteralChainRe = new(
+        @"(?<![\w$@])""((?:[^""\\\r\n]|\\.)*)""\s*(?:\+\s*@?\$?""((?:[^""\\\r\n]|\\.)*)""\s*)+",
+        RegexOptions.Compiled);
+
+    /// <summary> 从一条拼接链里依次取出每个字面量的**原文**（已 Unescape 前的原始转义形式）。 </summary>
+    private static readonly Regex ChainPieceRe = new(
+        @"""((?:[^""\\\r\n]|\\.)*)""",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// 把源码里 `"A " + "B " + "C"` 形式的拼接链**预先合并为一个字面量**，
+    /// 使下游所有正则与"编译器最终看到的整串"一致（详见 <see cref="ConcatLiteralChainRe"/>）。
+    /// 合并后仍保持**字面量**形态（含起止引号、内部转义词原样），故下游 `Unescape` 流程不变。
+    /// </summary>
+    internal static string MergeConcatenatedLiterals(string text)
+    {
+        if (!text.Contains("+")) return text;   // 零成本预筛：绝大多数文件没有拼接
+        return ConcatLiteralChainRe.Replace(text, m =>
+        {
+            // 链里至少要有两段才有合并意义（正则本身已保证，此处防御）
+            var pieces = ChainPieceRe.Matches(m.Value);
+            if (pieces.Count < 2) return m.Value;
+            var sb = new StringBuilder(m.Value.Length);
+            sb.Append('"');
+            foreach (Match p in pieces) sb.Append(p.Groups[1].Value);   // 各段原始转义形式直接首尾相接
+            sb.Append('"');
+            return sb.ToString();
+        });
+    }
+
+    /// <summary>
     /// **自定义封装函数**的文字实参：<c>DrawOption("Enable Synthesis Helper", …)</c>、
     /// <c>TabItem("General")</c>、<c>ImGuiUtils.Tooltip("Open Settings")</c> 等。
     ///
@@ -454,7 +497,7 @@ public sealed class SourceExtractService
     /// 应从源码提取列表里**屏蔽**，避免占用列表与机翻配额。
     /// ⚠ 三个都是司令官自己的汉化插件（本项目 + Penumbra 模组汉化 + MOD 选项汉化）。
     /// </summary>
-    private static readonly HashSet<string> SelfPluginInternalNames = new(StringComparer.OrdinalIgnoreCase)
+    internal static readonly HashSet<string> SelfPluginInternalNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "FFXIV_Plugin_Localizer",
         "FFXIV_Penumbra_Mod_Chinese_Localization_Plugin",
@@ -669,6 +712,10 @@ public sealed class SourceExtractService
                 continue;
             string text;
             try { text = File.ReadAllText(file, Encoding.UTF8); } catch { continue; }
+            // ⚠ 先合并 `"A " + "B " + "C"`（编译期等价于一整串）再提取：否则会把半截片段当独立文案
+            //   存进表（永远命不中、纯废条目），而真正的完整长句反而漏采 → 界面整段英文。
+            //   2026-09-25 Heliosphere「技术信息」12 段拼接段落实证。
+            text = MergeConcatenatedLiterals(text);
             // ⚠ **整文件匹配，不逐行**：跨行调用（`DrawOption(\n  "标签",\n …)`）极常见，
             //   逐行看的话字符串在下一行、永远匹配不到（这正是 Craftimizer 漏采 500+ 条的根因之一）。
             //   正则里的 `\s*` 本身能跨行，前提是把整段文本交给它。
@@ -723,7 +770,11 @@ public sealed class SourceExtractService
         // 与替换层的「截断后匹配」呼应（ImGui 实际收到的是完整串）。
         var s = TextHeuristics.StripIdSuffix(Unescape(raw)).Trim();
 
-        if (s.Length < 2 || s.Length > 300) return;
+        // ⚠ 上限 600（原 300，2026-09-25 放宽）：拼接合并后会出现**完整长段落**——
+        //   Heliosphere「技术信息」那段由 12 段拼成、共 **577 字符**，300 上限会把它整条丢掉，
+        //   于是长句既不在候选表、也没译文 → 界面整段英文。替换层上限是 1024 **字节**，
+        //   600 字符对纯 ASCII 段落即 600 字节，仍在替换能力内（中文译文不受此限，替换层只看原文长度）。
+        if (s.Length < 2 || s.Length > 600) return;
         if (TextHeuristics.HasCjk(s)) return;           // 已是中文
         if (TextHeuristics.IsKeyName(s)) return;        // 纯键位名
         if (!TextHeuristics.HasAsciiLetter(s)) return;  // 必须含英文字母
@@ -812,7 +863,7 @@ public sealed class SourceExtractService
             //    与日志文本挤进待翻清单——它们占了额度、还让进度显示不准确。
             if (!IsLikelyUiText(s)) return;
         }
-        if (s.Length < 2 || s.Length > 300) return;
+        if (s.Length < 2 || s.Length > 600) return;   // 上限 600：与 AddCandidate 一致，容纳拼接合并后的完整长段落
         if (TextHeuristics.HasCjk(s)) return;
         if (TextHeuristics.IsKeyName(s)) return;
         if (!TextHeuristics.HasAsciiLetter(s)) return;

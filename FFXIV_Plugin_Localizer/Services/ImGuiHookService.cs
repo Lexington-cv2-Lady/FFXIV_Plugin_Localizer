@@ -50,6 +50,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte W2u(nint a, uint b);                                   // igCollapsingHeader_TreeNodeFlags / igTreeNodeEx_Str
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte W4u(nint a, uint b, nint c, nint d);                   // igTreeNodeBehavior(id, flags, label, labelEnd)
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte W2b(nint a, byte b);                                   // igBeginMenu / igRadioButton_Bool
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte W3u(nint a, nint b, uint c);                           // igBeginCombo / igCollapsingHeader_BoolPtr / igBeginTabItem / igColorEdit3/4
@@ -60,6 +62,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// 该钩子仅在 `DebugStats` 为真时安装（生产环境零开销）。 </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte BeginWDelegate(nint name, nint pOpen, uint flags);
+    private delegate void EndWDelegate();
 
     // ── 通用「标量」控件（Scalar 版）：所有 SliderXxx/DragXxx 的底层实现。
     //    绑定层把 `ref float` 传给 ImGui.SliderFloat 时，**有可能**路由到这里（而非 igSliderFloat）。
@@ -137,11 +140,27 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly ReplacementService _replacement;
     private readonly Func<bool> _hooksEnabled;
     private readonly Func<bool> _widgetHooksEnabled;
+    private readonly Func<bool> _translatePenumbra;
 
     private Hook<TextUnformattedDelegate>? _textHook;
     private Hook<TextExDelegate>? _textExHook;
     private readonly List<IDisposable> _widgetHooks = new();
-    private Hook<BeginWDelegate>? _beginDbgHook;
+    private Hook<BeginWDelegate>? _beginProdHook;
+    private Hook<EndWDelegate>? _endProdHook;
+    // ── Penumbra 专用开关：用「嵌套栈 + 深度计数」追踪当前是否处于 Penumbra 窗口上下文 ──
+    // 旧实现只在每次 igBegin 用窗口名判定、设单个 bool，导致 Penumbra 内部若嵌套了名字不含 "Penumbra" 的
+    // igBegin 窗格（如 MOD 信息面板/弹层/独立面板），会把标志重置成 false、从而漏翻
+    // （2026-09-25 司令官报 bug：MOD 作者名 Konekomods 被机翻成「小猫模组」）。
+    // 改为栈深度：只要当前嵌套链里还有任一 Penumbra 窗体未关闭，就持续抑制——子窗格的名字不再能把它清零。
+    // ⚠ 仅顶层 igBegin/igEnd 维护栈（子窗口 BeginChild 走的是 igBeginChild，不经过这两个钩，故不影响栈）。
+    private readonly Stack<bool> _penumbraStack = new();
+    private int _penumbraDepth;
+    // Penumbra 的两类顶层窗体标识（用于「翻译 Penumbra 开关关」时判定窗口归属）：
+    // ① 主窗 "Penumbra###PenumbraConfigWindow" —— 可见名含 penumbra；
+    // ② 模组编辑窗 "{mod.Name}###SubModEdit{N}" —— 以 MOD 名命名、可见名不含 Penumbra，靠 SubModEdit 标识辨认。
+    // ⚠ 二者都是独立顶层窗（兄弟关系，非嵌套），故必须都认，否则任一类窗体漏翻（2026-09-25 司令官二次报 bug：手动安装/编辑窗作者名仍被翻）。
+    private static readonly byte[] PenumbraLower = { (byte)'p', (byte)'e', (byte)'n', (byte)'u', (byte)'m', (byte)'b', (byte)'r', (byte)'a' };
+    private static readonly byte[] SubModEditLower = { (byte)'s', (byte)'u', (byte)'b', (byte)'m', (byte)'o', (byte)'d', (byte)'e', (byte)'d', (byte)'i', (byte)'t' };
     /// <summary> 实际挂接成功的控件导出名（诊断用：日志会列出，便于确认某控件是否真挂上）。 </summary>
     private readonly List<string> _hookedWidgetNames = new();
     /// <summary> 实际挂接成功的文字桩名（诊断用，与控件名一起输出调用计数）。 </summary>
@@ -150,6 +169,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly Dictionary<string, long> _dbgCalls = new();
     private readonly Dictionary<string, long> _dbgHits = new();
     private readonly List<string> _dbgMissSamples = new();
+    /// <summary> 折叠头专用诊断（2026-09-25）：igTreeNodeEx_Str 的**全部**输入原文（命中/未命中都记，不设门槛）。 </summary>
+    private readonly List<string> _dbgTreeNodeSamples = new();
     private readonly HashSet<string> _dbgWindowNames = new();   // 调试：累计出现过的窗口名（**不清空**，避免错过只在两个 tick 之间短暂渲染的窗口）
     private readonly List<string> _dbgWindowNew = new();        // 调试：本 tick 新见到的窗口名（打印后清空）
     private long _dbgFrame;
@@ -172,6 +193,20 @@ public sealed unsafe class ImGuiHookService : IDisposable
         }
     }
 
+    /// <summary> 体检：取走并清空「折叠头（igTreeNodeEx_Str）」样本（去重，含 [命中]/[未命中] 标记）。
+    /// 2026-09-25：用于定位 Heliosphere「Commands / Download speed limits / One-click install / Miscellaneous」类
+    /// 折叠头没替换的问题——看运行时它到底有没有经过该导出、查表是命中还是未命中。
+    /// 与 DrainMissedSamples 的区别：那个只记**未命中且纯 ASCII** 的文本，这个记**全部**折叠头。 </summary>
+    public List<string> DrainTreeNodeSamples()
+    {
+        lock (_dbgCalls)
+        {
+            var r = _dbgTreeNodeSamples.Distinct().ToList();
+            _dbgTreeNodeSamples.Clear();
+            return r;
+        }
+    }
+
     /// <summary> 钩子是否挂接成功（替换可用的前提）。 </summary>
     public bool Hooked { get; private set; }
 
@@ -183,13 +218,14 @@ public sealed unsafe class ImGuiHookService : IDisposable
 
     public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop,
         Func<bool> hooksEnabled, Func<bool> widgetHooksEnabled, ReplacementService replacement,
-        bool debugStats)
+        bool debugStats, Func<bool> translatePenumbra)
     {
         _appLog = appLog;
         _log = log;
         _interop = interop;
         _hooksEnabled = hooksEnabled;
         _widgetHooksEnabled = widgetHooksEnabled;
+        _translatePenumbra = translatePenumbra;
         _replacement = replacement;
         // ⚠ 必须**从构造函数传入**，不能像以前那样构造后再 `Hook.DebugStats = …` 赋值——
         //    InstallHooks 在构造期就跑完了，那时 DebugStats 还是 false，导致"按 DebugStats 才装"的
@@ -261,6 +297,19 @@ public sealed unsafe class ImGuiHookService : IDisposable
             {
                 _appLog.Info("[钩子] 控件标签桩已按配置关闭");
             }
+            // ── Penumbra 专用开关：igBegin / igEnd 常驻钩子（维护窗口嵌套栈，见 BeginDetour / EndDetour）──
+            var beginStub2 = GetExport(baseAddr, "igBegin");
+            if (beginStub2 != 0)
+            {
+                _beginProdHook = _interop.HookFromAddress<BeginWDelegate>(beginStub2, BeginDetour, IGameInteropProvider.HookBackend.Automatic);
+                _beginProdHook.Enable();
+            }
+            var endStub = GetExport(baseAddr, "igEnd");
+            if (endStub != 0)
+            {
+                _endProdHook = _interop.HookFromAddress<EndWDelegate>(endStub, EndDetour, IGameInteropProvider.HookBackend.Automatic);
+                _endProdHook.Enable();
+            }
             _appLog.Info($"[钩子] {HookStatus}");
         }
         catch (Exception ex)
@@ -273,7 +322,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// <summary> 文字绘制转发：命中对照表则换中文指针（NUL 结尾），否则原样透传。异常绝不外抛。 </summary>
     private void TextUnformattedDetour(nint textBegin, nint textEnd)
     {
-        if (textBegin != 0 && _replacement.Enabled && !SuppressReplacement)
+        if (textBegin != 0 && _replacement.Enabled && !SuppressReplacement && !SuppressForPenumbra())
         {
             var rep = TryLookup(textBegin, textEnd, "TextUnformatted");
             if (rep != 0)
@@ -288,7 +337,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// <summary> igTextEx 转发（Text/TextWrapped 等文字族的总入口，flags 原样透传）。 </summary>
     private void TextExDetour(nint text, nint textEnd, int flags)
     {
-        if (text != 0 && _replacement.Enabled && !SuppressReplacement)
+        if (text != 0 && _replacement.Enabled && !SuppressReplacement && !SuppressForPenumbra())
         {
             var rep = TryLookup(text, textEnd, "TextEx");
             if (rep != 0)
@@ -341,6 +390,19 @@ public sealed unsafe class ImGuiHookService : IDisposable
                         if (text.Length >= 3 && IsPureAscii(text))
                             _dbgMissSamples.Add($"[{source}] {text}");
                     }
+                    // ── 折叠头专用诊断（2026-09-25）──
+                    // Heliosphere 的 Commands/Download speed limits/One-click install/Miscellaneous 反复"没替换成功"，
+                    // 而钩子本体验证是通的（曾有 4940 次调用/780 命中）。为一次定位，凡经过 igTreeNodeEx_Str 的串
+                    // **无论命中/未命中、不设 ASCII/长度门槛**，都原样记下（含命中标记），便于看清运行时真实字节。
+                    // ⚠ 滚动窗口（满 400 就丢最早的 100）：采样窗口内若用户切换页面，末尾样本才是最后看的那一页，
+                    //   固定上限会让"先看的页面"占满名额、把真正要看的页面挤掉（此前 60 条上限即此问题）。
+                    // ⚠ 2026-09-25：单参 TreeNodeEx/TreeNode 走的是 **igTreeNodeBehavior**（不是 igTreeNodeEx_Str），
+                    //   故折叠头诊断必须同时覆盖这个导出，否则"采不到样本"（这正是此前排查屡屡落空的原因之一）。
+                    if (source == "igTreeNodeEx_Str" || source == "igTreeNodeBehavior")
+                    {
+                        if (_dbgTreeNodeSamples.Count >= 400) _dbgTreeNodeSamples.RemoveRange(0, 100);
+                        _dbgTreeNodeSamples.Add($"[{source}][{(hit != 0 ? "命中" : "未命中")}] {System.Text.Encoding.UTF8.GetString(q, n)}");
+                    }
                 }
             }
             return hit;
@@ -351,32 +413,91 @@ public sealed unsafe class ImGuiHookService : IDisposable
         }
     }
 
-    /// <summary> igBegin 诊断转发：只读记录窗口名（不修改任何参数）。异常绝不外抛。 </summary>
-    private byte BeginDbgDetour(nint name, nint pOpen, uint flags)
+    /// <summary> igBegin 钩子（生产常驻）：①按窗口名更新「当前是否属 Penumbra」（Penumbra 专用开关用）；
+    /// ②开启「钩子调试日志」时额外记录窗口名（诊断"窗口到底有没有被渲染"）。
+    /// 不修改任何参数、异常绝不外抛。⚠ 仅在「关闭翻译 Penumbra」时才扫描窗口名，
+    /// 开关开时几乎零开销（只置 false 透传）。 </summary>
+    private byte BeginDetour(nint name, nint pOpen, uint flags)
     {
         if (name != 0)
         {
             try
             {
-                var q = (byte*)name;
-                var n = 0;
-                while (n < 256 && q[n] != 0) n++;
-                if (n >= 2)
+                // ① Penumbra 上下文标记：开关开时恒 false（不付扫描开销）；开关关时才判定窗口名。
+                //    入栈维护嵌套深度——只要当前窗口归属 Penumbra（主窗 penumbra 或模组编辑窗 submodedit），
+                //    无论它是嵌套还是独立的顶层兄弟窗，深度都 >0，抑制持续生效（2026-09-25 修复漏翻）。
+                // ⚠ 安全阀：万一嵌套配对失衡导致栈无限增长，超阈值整栈重置（避免内存膨胀与永久误抑制）。
+                if (_penumbraStack.Count > 8192) { _penumbraStack.Clear(); _penumbraDepth = 0; }
+                bool isPen = !_translatePenumbra() && IsPenumbraWindow((byte*)name);
+                _penumbraStack.Push(isPen);
+                if (isPen) _penumbraDepth++;
+                // ② 诊断：记录窗口名（仅 DebugStats 时；**累计**，避免漏掉只在两次 tick 间短暂渲染的窗口）
+                if (DebugStats)
                 {
-                    var win = System.Text.Encoding.UTF8.GetString(q, n);
-                    lock (_dbgCalls)
+                    var q = (byte*)name;
+                    var n = 0;
+                    while (n < 256 && q[n] != 0) n++;
+                    if (n >= 2)
                     {
-                        _dbgCalls["igBegin"] = _dbgCalls.TryGetValue("igBegin", out var c) ? c + 1 : 1;
-                        // **累计**记录：一个窗口可能只在两次 tick 之间短暂渲染，
-                        // 只看「本 tick 的窗口名」会漏掉它（BigPlayerDebuffs 的配置窗口就是这么 elusive）。
-                        if (_dbgWindowNames.Add(win) && _dbgWindowNew.Count < 60) _dbgWindowNew.Add(win);
+                        var win = System.Text.Encoding.UTF8.GetString(q, n);
+                        lock (_dbgCalls)
+                        {
+                            _dbgCalls["igBegin"] = _dbgCalls.TryGetValue("igBegin", out var c) ? c + 1 : 1;
+                            if (_dbgWindowNames.Add(win) && _dbgWindowNew.Count < 60) _dbgWindowNew.Add(win);
+                        }
                     }
                 }
             }
             catch { /* 绝不外抛 */ }
         }
-        return _beginDbgHook!.Original(name, pOpen, flags);
+        return _beginProdHook!.Original(name, pOpen, flags);
     }
+
+    /// <summary> igEnd 钩子（生产常驻）：与 BeginDetour 配对，出栈维护 Penumbra 嵌套深度。
+    /// 不修改任何参数、异常绝不外抛。igBegin 返回 false（窗口折叠）时调用方仍须 igEnd，故配对平衡。 </summary>
+    private void EndDetour()
+    {
+        try
+        {
+            if (_penumbraStack.Count > 0)
+            {
+                if (_penumbraStack.Pop()) _penumbraDepth--;
+            }
+        }
+        catch { /* 绝不外抛 */ }
+        _endProdHook!.Original();
+    }
+
+    /// <summary> 在 UTF-8 字节流中查找任一 Penumbra 窗体标识（penumbra 或 submodedit，不区分大小写），
+    /// 最多扫 256 字节、遇 NUL 即停，零分配。 </summary>
+    private static bool IsPenumbraWindow(byte* p)
+        => ScanKeyword(p, PenumbraLower) || ScanKeyword(p, SubModEditLower);
+
+    /// <summary> 在字节流中查找关键字 kw（不区分大小写），KMP 式单状态扫描，零分配。 </summary>
+    private static bool ScanKeyword(byte* p, byte[] kw)
+    {
+        int state = 0;
+        for (int i = 0; i < 256; i++)
+        {
+            byte c = p[i];
+            if (c == 0) return false;
+            byte lc = c;
+            if (lc >= (byte)'A' && lc <= (byte)'Z') lc = (byte)(lc + 32);
+            if (lc == kw[state])
+            {
+                if (++state == kw.Length) return true;
+            }
+            else
+            {
+                state = lc == kw[0] ? 1 : 0;
+            }
+        }
+        return false;
+    }
+
+    /// <summary> 是否应因「Penumbra 开关关」而抑制本次替换（按当前窗口嵌套上下文）。
+    /// 开关开时恒 false（不付窗口判定开销，直接走全局翻译）；开关关时只要嵌套链里还有 Penumbra 窗体即抑制。 </summary>
+    private bool SuppressForPenumbra() => !_translatePenumbra() && _penumbraDepth > 0;
 
     /// <summary> 纯 ASCII（不含中文/日文/全角）——用于过滤"已经是中文"的噪音。 </summary>
     private static bool IsPureAscii(string s)
@@ -401,7 +522,8 @@ public sealed unsafe class ImGuiHookService : IDisposable
             var names = new List<string>(_hookedTextNames.Count + _hookedWidgetNames.Count + 1);
             names.AddRange(_hookedTextNames);
             names.AddRange(_hookedWidgetNames);
-            if (_beginDbgHook != null) names.Add("igBegin");
+            if (_beginProdHook != null) names.Add("igBegin");
+            if (_endProdHook != null) names.Add("igEnd");
 
             var sb = new System.Text.StringBuilder();
             var idle = new List<string>();
@@ -431,6 +553,14 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 var uniq = _dbgMissSamples.Distinct().Take(12).ToList();
                 report += "\n    未命中英文（可能是漏网的界面文字）: " + string.Join(" | ", uniq);
                 _dbgMissSamples.Clear();
+            }
+            // 折叠头专用诊断（2026-09-25）：igTreeNodeEx_Str 的全部输入原文（命中/未命中都列），
+            // 用于定位 Heliosphere「折叠头没替换」的根因（看清运行时真实字节、是否命中）。
+            if (_dbgTreeNodeSamples.Count > 0)
+            {
+                var uniqT = _dbgTreeNodeSamples.Distinct().Take(30).ToList();
+                report += "\n    折叠头 igTreeNodeEx_Str 输入（命中/未命中）: " + string.Join(" | ", uniqT);
+                _dbgTreeNodeSamples.Clear();
             }
             _dbgCalls.Clear();
             _dbgHits.Clear();
@@ -465,6 +595,29 @@ public sealed unsafe class ImGuiHookService : IDisposable
         Add("igTreeNode_Str", bTree, a => bTree.Hook!.Original(Label(a, "igTreeNode_Str")), _ => { });
         var bTreeEx = new HookBox<W2u>();
         Add("igTreeNodeEx_Str", bTreeEx, (a, b) => bTreeEx.Hook!.Original(Label(a, "igTreeNodeEx_Str"), b), _ => { });
+        // ⚠ 2026-09-25 补挂：**单参** `ImGui.TreeNodeEx("…")` / `ImGui.TreeNode("…")` 并不走上面的 igTreeNodeEx_Str，
+        //    而是走 Dalamud 自己实现的 `ImGuiP.TreeNodeBehavior` → `ImGuiPNative.funcTable[1212] = igTreeNodeBehavior`。
+        //    实证（ilspycmd 反编译本机 Dalamud.Bindings.ImGui.dll）：
+        //      ImGui.TreeNodeEx(ImU8String id, flags, label)  →  ImGuiP.TreeNodeBehavior(id, flags, label, labelEnd)
+        //      ImGuiP.TreeNodeBehavior(byte* …)               →  ImGuiP.funcTable[1212] "igTreeNodeBehavior"
+        //    而**两参** `TreeNodeEx(label, flags)`（byte* 重载）才走 igTreeNodeEx_Str。
+        //    后果：Heliosphere 的 `TreeNodeEx("Commands")`/`("Download speed limits")`/`("One-click install")`/`("Miscellaneous")`
+        //    四个**单参**折叠头长期全英文（而两参的 "Installs and updates"/"Penumbra" 一直是中文）——即司令官反复反馈的那条。
+        //    签名 (uint id, ImGuiTreeNodeFlags flags, const char* label, const char* labelEnd)：
+        //    id/flags 为整数、label/labelEnd 为指针，**无按值结构体、非 varargs** → 与既有控件桩同级安全。
+        // ⚠⚠ 关键（2026-09-25 实证踩坑）：这是 **「区间」语义**，不是「双指针」语义！
+        //    原实现按 `labelEnd - label` 决定画多少字节。因此**不能**把两个参数分别拿去查表替换——
+        //    那样 label 指向 9 字节的中文、labelEnd 指向 5 字节的英文副本末端，区间长度按旧串算
+        //    → 中文串被截断/读到 NUL 之后 → **界面直接显示空白**（Heliosphere 四个折叠头当时的症状）。
+        //    正确做法：只查一次表拿到**新指针 + 新长度**，再把 labelEnd 设为 `新指针 + 新长度`。
+        var bTreeBeh = new HookBox<W4u>();
+        Add("igTreeNodeBehavior", bTreeBeh, (id, flags, label, labelEnd) =>
+        {
+            var rep = LabelWithEnd(label, labelEnd, out var repEnd);
+            return rep != 0
+                ? bTreeBeh.Hook!.Original(id, flags, rep, repEnd)
+                : bTreeBeh.Hook!.Original(id, flags, label, labelEnd);
+        }, _ => { });
         var bCol = new HookBox<W3u>();
         Add("igCollapsingHeader_BoolPtr", bCol, (a, b, c) => bCol.Hook!.Original(Label(a, "igCollapsingHeader_BoolPtr"), b, c), _ => { });
         var bCol2 = new HookBox<W2u>();
@@ -552,23 +705,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
         //    **栈腐蚀** → 破坏调用方栈帧（实测表现为「Ctrl+V 要按多次才粘贴成功」等输入异常）。
         //    曾误挂过，2026-09-14 移除。
 
-        // ── 诊断用：igBegin（记录实际创建的窗口名）──
-        // ⚠ 只在开启「钩子调试日志」时安装：这是诊断设施，不做替换（窗口标题不汉化），
-        //    而 igBegin 是**极热**函数（实测每 5 秒数千次），生产环境没必要为它付一次托管往返。
-        if (DebugStats)
-        {
-            var beginStub = GetExport(baseAddr, "igBegin");
-            if (beginStub != 0)
-            {
-                _beginDbgHook = _interop.HookFromAddress<BeginWDelegate>(beginStub, BeginDbgDetour, IGameInteropProvider.HookBackend.Automatic);
-                _beginDbgHook.Enable();
-                _appLog.Info("[钩子] 已挂 igBegin（诊断：记录窗口名）");
-            }
-            else
-            {
-                missing.Add("igBegin");
-            }
-        }
+        // ── 诊断用 igBegin：已并入生产常驻的 BeginDetour（见 InstallHooks），此处不再单独安装 ──
 
         _appLog.Info($"[钩子] 控件标签桩：{_widgetHooks.Count} 个挂接成功" +
                      (missing.Count > 0 ? $"，缺导出（{string.Join("、", missing)}）" : "") +
@@ -581,9 +718,54 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// </summary>
     private nint Label(nint p, string exportName = "控件")
     {
-        if (p == 0 || !_replacement.Enabled || SuppressReplacement) return p;
-        var rep = TryLookup(p, 0, DebugStats ? exportName : "控件");
+        if (p == 0 || !_replacement.Enabled || SuppressReplacement || SuppressForPenumbra()) return p;
+        // ⚠ 2026-09-25：source **始终**传具体导出名（原来非调试时统一传"控件"），
+        //   否则单插件检查时无法按导出名筛出折叠头样本，诊断只能靠"钩子调试日志"开关——而该开关默认是关的。
+        //   传的是常量字符串引用，无分配、无额外开销（统计本身仍受 DebugStats/HealthCollecting 门槛保护）。
+        var rep = TryLookup(p, 0, exportName);
         return rep != 0 ? rep : p;
+    }
+
+    /// <summary>
+    /// 「区间式」标签控件的查表（2026-09-25 新增，供 <c>igTreeNodeBehavior</c> 用）：
+    /// 命中返回**中文指针**并把 <paramref name="repEnd"/> 设为「中文指针 + 中文 UTF-8 字节数」；
+    /// 未命中返回 0（<paramref name="repEnd"/> 置 0，调用方原样透传旧参数）。
+    /// <b>为什么必须成对返回</b>：这类 API 按 <c>labelEnd - label</c> 决定绘制字节数，
+    /// 分开替换两个指针会让区间长度与中文串长度不符 → 显示空白（详见 ReplacementService.TryReplaceWithLen 注释）。
+    /// </summary>
+    private nint LabelWithEnd(nint p, nint labelEnd, out nint repEnd)
+    {
+        repEnd = 0;
+        if (p == 0 || !_replacement.Enabled || SuppressReplacement || SuppressForPenumbra()) return 0;
+        // 区间长度：labelEnd 非 0 时按它算（尊重调用方的切片）；为 0 时扫到 NUL 兜底
+        //（正常 TreeNodeBehavior 调用 labelEnd 恒为 label+len，此处只是防御）。
+        var n = labelEnd != 0 ? (int)(labelEnd - p) : 0;
+        if (n < 0) return 0;
+        unsafe
+        {
+            if (n == 0)
+            {
+                var q = (byte*)p;
+                while (n < 1024 && q[n] != 0) n++;
+            }
+            if (n < 2) return 0;
+            var rep = _replacement.TryReplaceWithLen((byte*)p, n, out var zhLen);
+            if (rep == 0) return 0;
+            repEnd = rep + zhLen;
+            // 统计与折叠头诊断：与 TryLookup 同口径（供「钩子调试日志」与单插件检查看这个导出的命中情况）。
+            if ((DebugStats || HealthCollecting) && n >= 2)
+            {
+                lock (_dbgCalls)
+                {
+                    _dbgCalls["igTreeNodeBehavior"] = _dbgCalls.TryGetValue("igTreeNodeBehavior", out var c) ? c + 1 : 1;
+                    _dbgHits["igTreeNodeBehavior"] = _dbgHits.TryGetValue("igTreeNodeBehavior", out var h) ? h + 1 : 1;
+                    var text = System.Text.Encoding.UTF8.GetString((byte*)p, n);
+                    if (_dbgTreeNodeSamples.Count >= 400) _dbgTreeNodeSamples.RemoveRange(0, 100);
+                    _dbgTreeNodeSamples.Add($"[igTreeNodeBehavior][命中] {text}");
+                }
+            }
+            return rep;
+        }
     }
 
     /// <summary> 控件标签桩的钩子容器：detour 闭包通过它拿到自己的 Hook 实例来调 Original。 </summary>
@@ -651,8 +833,10 @@ public sealed unsafe class ImGuiHookService : IDisposable
         //   钩子释放失败必须留日志（不抛，尽最大努力卸载其余钩子）。
         TryDisposeHook(_textHook, "Text");
         TryDisposeHook(_textExHook, "TextEx");
-        TryDisposeHook(_beginDbgHook, "BeginDebug");
-        _beginDbgHook = null;
+        TryDisposeHook(_beginProdHook, "Begin");
+        TryDisposeHook(_endProdHook, "End");
+        _beginProdHook = null;
+        _endProdHook = null;
         foreach (var h in _widgetHooks) TryDisposeHook(h, "Widget");
         _widgetHooks.Clear();
         _textHook = null;

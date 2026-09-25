@@ -67,6 +67,43 @@ public sealed class WikiGlossaryService
         return null;
     }
 
+    /// <summary>
+    /// **自动探测旧项目（FFXIV 模组汉化工具）的「词典目录」根**（即其配置里的 <c>DictionaryPath</c> 本身，
+    /// **不含** wiki_术语对照 等子目录）。与 <see cref="DetectOldProjectWikiDir"/> 同一套扫描逻辑，
+    /// 但返回的是目录根——供「单词黑名单联动」定位 <c>&lt;词典目录&gt;\单词黑名单.json</c>。
+    /// 扫描 pluginConfigs 下所有插件配置，找含有效 <c>DictionaryPath</c> 且目录真实存在者。找不到返回 null。
+    /// 不依赖旧插件的具体 ID（兼容不同版本）；只读其配置，不修改任何文件。
+    /// </summary>
+    public static string? DetectOldProjectDictionaryPath(string pluginConfigRoot)
+    {
+        try
+        {
+            if (!Directory.Exists(pluginConfigRoot)) return null;
+            foreach (var cfgFile in Directory.EnumerateFiles(pluginConfigRoot, "*.json"))
+            {
+                // 跳过本插件自己的配置
+                if (Path.GetFileName(cfgFile).StartsWith("FFXIV_Plugin_Localizer", StringComparison.OrdinalIgnoreCase)) continue;
+                if (cfgFile.Contains(".bak", StringComparison.OrdinalIgnoreCase)) continue;
+                string? dictPath = null;
+                try
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(cfgFile));
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        doc.RootElement.TryGetProperty("DictionaryPath", out var dp) &&
+                        dp.ValueKind == JsonValueKind.String)
+                    {
+                        dictPath = dp.GetString();
+                    }
+                }
+                catch { continue; } // 单个配置坏了跳过
+                if (string.IsNullOrWhiteSpace(dictPath)) continue;
+                if (Directory.Exists(dictPath)) return dictPath;
+            }
+        }
+        catch { /* 探测失败返回 null */ }
+        return null;
+    }
+
     private readonly AppLog _appLog;
 
     /// <summary> 英文 → 中文（去重后的全量术语表）。 </summary>
