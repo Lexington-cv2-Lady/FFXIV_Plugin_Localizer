@@ -60,8 +60,16 @@ public sealed class DictWindow : Window
 
         // 单词黑名单（命中词永远保持英文）——搬自旧项目同名字段
         if (_plugin.OldDict.BlacklistCount > 0)
+        {
+            var linked = _plugin.OldDict.LinkedBlacklistCount;
             Ui.ColoredWrapped(new Vector4(0.7f, 0.85f, 1f, 1f),
-                $"单词黑名单 {_plugin.OldDict.BlacklistCount} 条（这些词永远保持英文，不翻译也不替换）");
+                $"单词黑名单 {_plugin.OldDict.BlacklistCount} 条（这些词永远保持英文，不翻译也不替换）" +
+                (linked > 0 ? $"——含联动旧项目 {linked} 词" : ""));
+            if (linked > 0 && ImGui.IsItemHovered())
+                ImGui.SetTooltip($"已联动旧项目（FFXIV 模组汉化工具）的单词黑名单，并入 {linked} 词。\n来源：{_plugin.OldDict.LinkedBlacklistPath}\n" +
+                                 "旧项目里拉黑保持英文的 MOD 专名，本插件同样保持英文。\n" +
+                                 "可在「设置」里用「联动旧项目单词黑名单」开关关闭。");
+        }
         else
             Ui.Hint($"没有单词黑名单（{OldDictionaryService.BlacklistFileName}）。想让某些词永远保持英文（如 URL、DPS），\n" +
                     "点「打开黑名单文件」写入即可（每行一个词）。");

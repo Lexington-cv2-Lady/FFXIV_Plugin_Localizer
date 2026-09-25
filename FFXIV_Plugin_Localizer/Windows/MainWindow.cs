@@ -42,6 +42,30 @@ public sealed class MainWindow : Window
         Ui.ColoredWrapped(new Vector4(0.9f, 0.85f, 0.55f, 1f),
             "排障：若哪个插件界面错乱/显示异常，把上面的「启用汉化」取消勾选，所有界面立刻还原英文；翻译文件不删，重新勾选即恢复。");
 
+        // ── Penumbra 专用开关（默认关）──
+        var transPen = _plugin.Configuration.TranslatePenumbra;
+        if (ImGui.Checkbox("翻译 Penumbra 插件", ref transPen))
+        {
+            _plugin.Configuration.TranslatePenumbra = transPen;
+            _plugin.Configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("默认关闭。关闭时本插件完全不翻译 Penumbra 的任何内容（模组名、UI、说明一律保持英文原文）；\n勾选后才照常对 Penumbra 做全局翻译。\n即时生效，无需重载。");
+
+        // ── 联动旧项目单词黑名单（默认开）──
+        var linkBl = _plugin.Configuration.LinkOldProjectBlacklist;
+        if (ImGui.Checkbox("联动旧项目单词黑名单", ref linkBl))
+        {
+            _plugin.Configuration.LinkOldProjectBlacklist = linkBl;
+            _plugin.Configuration.Save();
+            _plugin.ReloadOldDict();   // 立即重载词典，让联动黑名单的并入/移除即时生效
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("默认开启。自动探测旧项目（FFXIV 模组汉化工具）的词典目录，把它的「单词黑名单.json」并入本插件黑名单。\n" +
+                             "旧项目里拉黑保持英文的 MOD 专名（Lavabod/YAB/TBSE 等），本插件翻 Penumbra 时同样保持英文。\n" +
+                             "黑名单是整串精确匹配（大小写不敏感），只拦“整个标签恰好等于该词”，不误伤长句。\n" +
+                             "只读旧项目文件、不修改；探测不到旧项目时自动跳过。切换后立即重载词典生效。");
+
         // ── 彻底清空所有译文（真删，有备份；与"取消启用汉化"不重复：那个只关开关，这个连磁盘文件一起清） ──
         if (_restoreArmMs > 0 && Environment.TickCount64 - _restoreArmMs < 5000)
         {
@@ -185,7 +209,11 @@ public sealed class MainWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("打开词典窗口（预翻译词源目录、重载词典、单词黑名单）。\n译文在此沉淀、跨插件复用；黑名单词永远保持英文。");
 
-        // 2026-09-19：体检——逐个打开已装插件配置窗，自动找出"还是英文"的漏网文字
+        // ── 插件窗口工具（只针对「其它插件」，不碰本插件自身） ──
+        ImGui.Separator();
+        Ui.ColoredWrapped(new Vector4(0.8f, 0.85f, 0.9f, 1f), "插件窗口工具（针对其它插件）");
+
+        // 体检（仅清单，不开窗）
         Ui.SameLineIfFits(Ui.ButtonWidth("体检"));
         if (_plugin.HealthRunning)
         {
@@ -198,9 +226,11 @@ public sealed class MainWindow : Window
             _plugin.StartHealthCheck();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("自动逐个打开已装插件的配置窗（约 1.5 秒/个），收集"
-                           + "「对照表里没有、界面仍显示英文」的漏网文字——像你肉眼逐个窗口看一遍。\n"
-                           + "跑完在下方和日志出报告。会短暂自动开关窗口，属正常。");
+            ImGui.SetTooltip("仅清单模式：在日志列出「哪些插件有配置窗/主窗、是否已排除自身」，并顺带查安装器简介汉化覆盖率。\n不开、不关任何窗口，安全无感。");
+
+        // 单插件深度检查已合并进「体检」报告窗的可点击清单：跑完体检，点清单里的插件名即可开它的窗口。
+        // （主窗口不再放输入框，避免按钮太多；仍可用 /ptp check <插件名> 文本触发。）
+
         if (_plugin.HealthReport.Length > 0)
         {
             Ui.ColoredWrapped(new Vector4(0.7f, 0.9f, 0.75f, 1f), _plugin.HealthReport);

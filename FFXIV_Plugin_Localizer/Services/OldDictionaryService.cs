@@ -52,8 +52,29 @@ public sealed class OldDictionaryService
     /// </summary>
     private readonly object _blLock = new();
 
+    /// <summary>
+    /// 【联动旧项目单词黑名单】要**并入**本项目黑名单的外部词单文件路径
+    /// （通常是旧项目「FFXIV 模组汉化工具」词典目录下的 <c>单词黑名单.json</c>）。null = 不联动。
+    /// 由 <see cref="SetLinkedBlacklistFile"/> 设定；每次 <see cref="Load"/> 都会在本项目黑名单之外**并入**它（并集）。
+    /// </summary>
+    private string? _linkedBlacklistPath;
+
+    /// <summary> 本次 <see cref="Load"/> 从联动文件**新增**的黑名单词数（供日志/UI 区分本项目与联动来源）。 </summary>
+    public int LinkedBlacklistCount { get; private set; }
+
+    /// <summary> 当前生效的联动黑名单文件路径（null = 未联动）。供日志展示来源。 </summary>
+    public string? LinkedBlacklistPath => _linkedBlacklistPath;
+
     /// <summary> 黑名单条数（供界面显示）。 </summary>
     public int BlacklistCount { get { lock (_blLock) return _blacklist.Count; } }
+
+    /// <summary>
+    /// 设定「联动旧项目单词黑名单」的词单文件路径（null/空白 = 不联动）。
+    /// ⚠ 只**设定路径**，真正的并入发生在下次 <see cref="Load"/>（Load 会先清空黑名单再并入，
+    ///   这样「重载词典」时旧项目黑名单的增删能即时反映；本项目与旧项目黑名单是**并集**关系，两边都生效）。
+    /// </summary>
+    public void SetLinkedBlacklistFile(string? path)
+        => _linkedBlacklistPath = string.IsNullOrWhiteSpace(path) ? null : path;
 
     /// <summary> 该词是否在黑名单里（应保持英文）。 </summary>
     public bool IsBlacklisted(string word)
@@ -91,6 +112,23 @@ public sealed class OldDictionaryService
         var blWords = LoadWordList(Path.Combine(dir, BlacklistFileName));
         lock (_blLock) _blacklist.UnionWith(blWords);
 
+        // 0.1) 【联动旧项目单词黑名单】把旧项目词典目录的 单词黑名单.json 并入（并集）。
+        //      典型场景：旧项目已把 MOD 专名（Lavabod/YAB/TBSE…）拉黑保持英文，
+        //      本插件翻 Penumbra 时若不联动就会把这些专名机翻/替换掉（2026-09-25 司令官报 bug）。
+        //      黑名单匹配是**整串精确**（大小写不敏感），只拦"整个标签恰等于该词"，不误伤含该词的长句。
+        LinkedBlacklistCount = 0;
+        if (_linkedBlacklistPath != null)
+        {
+            var extra = LoadWordList(_linkedBlacklistPath);
+            var added = 0;
+            lock (_blLock)
+            {
+                foreach (var w in extra)
+                    if (_blacklist.Add(w)) added++;
+            }
+            LinkedBlacklistCount = added;
+        }
+
         foreach (var file in KnownFiles)
         {
             var path = Path.Combine(dir, file);
@@ -106,7 +144,10 @@ public sealed class OldDictionaryService
             }
         }
         _appLog.Info($"[预翻译] 已加载本项目词典：{_entries.Count} 条（{_sourceCounts.Count} 个文件），" +
-                     $"单词黑名单 {BlacklistCount} 条");
+                     $"单词黑名单 {BlacklistCount} 条" +
+                     (LinkedBlacklistCount > 0
+                         ? $"（含联动旧项目 {LinkedBlacklistCount} 词 ← {_linkedBlacklistPath}）"
+                         : ""));
         return _entries.Count;
     }
 

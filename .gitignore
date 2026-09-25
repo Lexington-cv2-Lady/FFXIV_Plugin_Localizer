@@ -10,6 +10,10 @@ local.props
 # 测试与构建产物
 *.trx
 TestResults/
+# Windows 保留设备名误建的文件（Shell 里 `2>nul` 在 Git Bash 下会被当成文件名创建，
+# 且因是 DOS 设备名而无法用常规方式删除；此处屏蔽，避免污染 git 状态）
+nul
+FFXIV_Plugin_Localizer.Tests/nul
 # 仓库卫生（审查方建议）
 *.patch
 归档_*/

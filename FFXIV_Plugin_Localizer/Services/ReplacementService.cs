@@ -445,6 +445,42 @@ public sealed unsafe class ReplacementService
         return ptr;
     }
 
+    /// <summary> 译文字节长度缓存（键＝中文指针）。仅供「需要同时知道译文长度」的钩子用（见 TryReplaceWithLen）。 </summary>
+    private readonly Dictionary<nint, int> _ptrLens = new();
+
+    /// <summary>
+    /// 同 <see cref="TryReplace"/>，但**额外给出译文的 UTF-8 字节长度**（不含结尾 NUL）。
+    /// <b>为什么需要</b>：ImGui 有一类 API 是「label 区间」式签名——`TreeNodeBehavior(id, flags, label, label_end)`，
+    /// 其实现按 `label_end - label` 决定要画多少字节。若只换 label 指针而 label_end 仍指向旧英文串的末端，
+    /// 区间就按**旧串长度**截取 → 中文串被截断或越界读到 NUL 之后 → **界面显示空白**（2026-09-25 实证：
+    /// 补挂 igTreeNodeBehavior 后 Heliosphere 四个折叠头文字全变空白）。故调用方须把 label_end 设为
+    /// `返回指针 + 本长度`。
+    /// ⚠ 与 TryReplace 走的是**同一张表、同一套优先级/黑名单**（直接复用其实现），不会产生两套结果。
+    /// </summary>
+    public nint TryReplaceWithLen(byte* p, int n, out int zhLen)
+    {
+        zhLen = 0;
+        var ptr = TryReplace(p, n);
+        if (ptr == 0) return 0;
+        lock (_lock)
+        {
+            if (_ptrLens.TryGetValue(ptr, out var cached)) { zhLen = cached; return ptr; }
+            // 兜底：指针可能来自 _ptrs/_idPtrs/_wsPtrs 三个缓存之一，统一按 NUL 结尾量一次长度再记住。
+            zhLen = Utf8ByteLen(ptr);
+            _ptrLens[ptr] = zhLen;
+        }
+        return ptr;
+    }
+
+    /// <summary> 量 UTF-8 C 串的字节长度（不含 NUL）。上限保护 4096，防异常指针把界面拖死。 </summary>
+    private static unsafe int Utf8ByteLen(nint p)
+    {
+        var q = (byte*)p;
+        var i = 0;
+        while (i < 4096 && q[i] != 0) i++;
+        return i;
+    }
+
     /// <summary>
     /// 增量更新单条窗口译文（避免写入时全量重建）。调用方须持有 _lock。
     /// ⚠ 语义必须与全量重建的 <see cref="AddMerged"/> 一致（2026-09-15 代码审查 M2）：
@@ -502,7 +538,11 @@ public sealed unsafe class ReplacementService
     /// </summary>
     private void Retire(nint ptr)
     {
-        if (ptr != 0) _graveyard.Add((ptr, Environment.TickCount64));
+        if (ptr == 0) return;
+        _graveyard.Add((ptr, Environment.TickCount64));
+        // ⚠ 同步丢掉长度缓存：指针释放回系统后可能被下次分配复用，若长度缓存残留旧值，
+        //   区间式控件（igTreeNodeBehavior）会拿到错误长度 → 截断或越读（2026-09-25）。
+        _ptrLens.Remove(ptr);
     }
 
     /// <summary>
@@ -517,7 +557,7 @@ public sealed unsafe class ReplacementService
     /// ⚠⚠ **地雷（切勿踩）**：ImGui 里 **`ImGui::Begin(name)` 会把 name 指针直接存进
     ///   `ImGuiWindow::Name`（不做拷贝）**，要求其**静态生命周期**——一旦释放就是 use-after-free。
     ///   同理 `BeginChild`/`PushID` 这类「名字进 ID 栈或窗口结构」的函数也要当心。
-    ///   所以我们**只把 igBegin 用作只读诊断钩子、绝不替换它的 name**（见 ImGuiHookService.BeginDbgDetour）。
+    ///   所以我们**只把 igBegin 用作只读诊断钩子、绝不替换它的 name**（见 ImGuiHookService.BeginDetour）。
     ///   若将来真要替换窗口名，那条指针**必须转成「永不释放」**（例如缓存进一个只增列表），不能走这套回收。
     /// </summary>
     private void ReclaimGraveyard()

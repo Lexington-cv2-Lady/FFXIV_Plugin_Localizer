@@ -22,11 +22,39 @@ public sealed class HealthReportWindow : Window
 
     public override void Draw()
     {
+        // ── 可点击插件清单（体检仅清单模式产出）：点名字→打开该插件窗口做「窗内漏网英文」检测 ──
+        // 这就是把「体检清单」与「检查这个插件」合并：不用再手敲插件名，直接点清单里的名字即可。
+        if (_plugin.HealthPluginList.Count > 0)
+        {
+            ImGui.TextWrapped("点插件名可打开它的窗口，做「窗内漏网英文」检测：");
+            ImGui.BeginChild("##pluginlist");
+            foreach (var (name, internalName, hasConfig, hasMain, isSelf) in _plugin.HealthPluginList)
+            {
+                if (isSelf)
+                {
+                    ImGui.TextDisabled($"• {name}（{internalName}）〔自身，已跳过〕");
+                }
+                else
+                {
+                    var label = hasConfig ? $"{name}  〔配置窗〕"
+                                : hasMain ? $"{name}  〔主窗〕"
+                                : name;
+                    if (ImGui.Button(label))
+                        _plugin.CheckSinglePlugin(internalName);
+                    if (ImGui.IsItemHovered())
+                        ImGui.SetTooltip($"打开 {name}（{internalName}）的配置窗，采样漏网英文后保留窗口供你查看；\n关窗请手动关，或 /ptp close 一次性收起其它插件窗口。");
+                }
+            }
+            ImGui.EndChild();
+            ImGui.Separator();
+        }
+
+        // ── 漏网英文结果（安装器简介/描述覆盖率 + 单插件检查） ──
         if (_plugin.HealthResults.Count == 0)
         {
             ImGui.TextWrapped(_plugin.HealthReport.Length > 0
                 ? _plugin.HealthReport
-                : "尚未体检。点主窗口「体检」开始。");
+                : "尚未体检。点主窗口「体检」开始（仅清单，不开窗）。");
             return;
         }
 

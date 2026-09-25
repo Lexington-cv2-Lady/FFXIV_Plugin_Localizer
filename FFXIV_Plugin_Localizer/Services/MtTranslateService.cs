@@ -609,6 +609,28 @@ public sealed class MtTranslateService
             }
         }
 
+        // 【方案② · 2026-09-25】黑名单专名提示：这些词是 MOD 作者名 / 品牌名 / 固定标识符，
+        // 应**永远保持英文**。整串精确匹配（IsBlacklisted）只能拦住"整标签恰等于该词"的情况，
+        // 拦不住夹在更长短语/括号里的内嵌词（如 "Rue-YAB"、"Lavabod Omoi Rue"），
+        // 故在机翻侧把整份黑名单作为"保持英文"提示注入，让模型对内嵌专名也按英文保留。
+        if (_blacklist is { Count: > 0 })
+        {
+            var terms = _blacklist
+                .Where(t => t.Length is > 0 and <= 40)
+                .OrderBy(t => t, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (terms.Count > 0)
+            {
+                system += "\n\n以下单词/缩写是 MOD 作者名、品牌名或固定标识符（如 Rue、Lavabod、YAB、TBSE、Uranus、Bibo 等），" +
+                          "出现时请一律保持**英文原样**、不要翻译——即使它们夹在更长的短语、括号或句子里也要保留英文：\n" +
+                          string.Join("、", terms);
+            }
+        }
+        // 语境免责：游戏/MOD 语境里某些普通英文词有专门含义，不能按字面死译（司令官 2026-09-25 提示）。
+        system += "\n\n语境提示：本批文案来自《最终幻想14》插件与 MOD 界面。" +
+                  "① \"vanilla\" 在游戏/MOD 语境指「原版 / 无 mod」而非植物「香草」，遇到请译为「原版」或直接保留 vanilla；" +
+                  "② 某些看似普通英文单词实为创作者专名（例如 rue 可能是作者名而非芸香草），请结合上下文判断，不确定时保留英文。";
+
         // 组装并发送；若平台拒了 max_tokens，**自动学习其上限后重试一次**（见下方自愈逻辑）
         var attempt = 0;
         JsonDocument json;

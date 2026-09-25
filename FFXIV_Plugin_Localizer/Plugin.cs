@@ -99,7 +99,8 @@ public sealed class Plugin : IDalamudPlugin
         OldDict = new OldDictionaryService(AppLog);
         EnsureDictDir();
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
-            () => Configuration.WidgetHooks, Replacement, Configuration.DebugHookLog);
+            () => Configuration.WidgetHooks, Replacement, Configuration.DebugHookLog,
+            () => Configuration.TranslatePenumbra);
         // 原生 UI（AtkAddon）文字汉化：与 ImGui 钩子互补，覆盖 KamiToolKit 系插件的游戏原生配置窗口
         //（SetText 钩子曾被 Reloaded.Hooks 拒编，2026-09-18 改为 500ms 轮询遍历 AtkStage 组件树 + 官方 SetText）
         AtkHook = new AtkNativeUiWalkerService(AppLog, Log, Framework, Replacement);
@@ -135,7 +136,7 @@ public sealed class Plugin : IDalamudPlugin
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "打开翻译插件的插件窗口"
+            HelpMessage = "打开翻译插件的插件主窗口。/ptp close（或 关窗）：一键关闭其它所有插件的配置窗/主窗（不卸载插件，只收起界面）。"
         });
 
         PluginInterface.UiBuilder.Draw += DrawAll;
@@ -263,7 +264,28 @@ public sealed class Plugin : IDalamudPlugin
         _mtWasRunning = Mt.Running;
     }
 
-    private void OnCommand(string command, string args) => ToggleMain();
+    private void OnCommand(string command, string args)
+    {
+        var a = (args ?? "").Trim().ToLowerInvariant();
+        if (a is "close" or "cleanup" or "关窗" or "关" or "c")
+            CloseAllOtherPluginWindows();
+        else if (a.StartsWith("check") || a.StartsWith("检查") || a.StartsWith("单检") || a.StartsWith("体检单个"))
+        {
+            // 取关键字之后的插件名（保留原大小写；匹配本身不区分大小写）
+            var ident = (args ?? "").Trim();
+            foreach (var kw in new[] { "check", "检查", "单检", "体检单个" })
+                if (ident.StartsWith(kw, StringComparison.OrdinalIgnoreCase)) { ident = ident[kw.Length..].Trim(); break; }
+            CheckSinglePlugin(ident);
+        }
+        else if (a is "health" or "体检")
+            StartHealthCheck();
+        else if (a is "help" or "?" or "h" or "帮助")
+            AppLog.Info("/ptp：打开本插件主窗口。  /ptp close（关窗）：一键关闭其它所有插件的配置窗/主窗。"
+                      + "  /ptp check <插件名>（检查）：对单个指定插件做窗内漏网英文检测。"
+                      + "  /ptp health（体检）：仅输出已装插件清单（不开窗）。");
+        else
+            ToggleMain();
+    }
 
     private void ToggleMain() => MainWindow.Toggle();
 
@@ -454,6 +476,7 @@ public sealed class Plugin : IDalamudPlugin
             }
             Directory.CreateDirectory(Configuration.DictDir);
             CreateDefaultDictIfMissing(Configuration.DictDir);   // 首次自动生成模板文件
+            UpdateLinkedBlacklistPath();   // 联动旧项目黑名单：先设好路径，Load 时并入（见下）
             var n = OldDict.Load(Configuration.DictDir);
             Replacement.SetBlacklist(OldDict.IsBlacklisted);   // 单词黑名单交给替换层（黑名单优先级最高）
             // F4 v2：把本项目词典交给替换层作**最低兜底第四源**（窗口 > 安装器 > wiki > 词典）。
@@ -467,6 +490,38 @@ public sealed class Plugin : IDalamudPlugin
         catch (Exception ex)
         {
             Log.Warning($"[预翻译] 词典目录准备失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 【联动旧项目单词黑名单】按开关 <see cref="Configuration.LinkOldProjectBlacklist"/> 探测旧项目
+    /// （FFXIV 模组汉化工具）的词典目录，把它的「单词黑名单.json」设为本插件黑名单的联动源。
+    /// 只**设定路径**——真正的并入发生在随后的 <c>OldDict.Load(...)</c>（Load 先清空再并入，
+    /// 故重载词典时旧项目黑名单的增删能即时生效）。
+    /// ⚠ 只读旧项目配置与词单、从不修改；探测不到（未装旧项目/未配词典目录）或开关关闭时置 null（不联动）。
+    /// </summary>
+    private void UpdateLinkedBlacklistPath()
+    {
+        try
+        {
+            if (!Configuration.LinkOldProjectBlacklist)
+            {
+                OldDict.SetLinkedBlacklistFile(null);
+                return;
+            }
+            var root = Path.GetDirectoryName(PluginInterface.GetPluginConfigDirectory()) ?? "";
+            var dictPath = WikiGlossaryService.DetectOldProjectDictionaryPath(root);
+            if (string.IsNullOrWhiteSpace(dictPath))
+            {
+                OldDict.SetLinkedBlacklistFile(null);   // 未装旧项目/未配置词典目录 → 不联动
+                return;
+            }
+            OldDict.SetLinkedBlacklistFile(Path.Combine(dictPath, OldDictionaryService.BlacklistFileName));
+        }
+        catch (Exception ex)
+        {
+            Log.Warning($"[预翻译] 联动旧项目黑名单探测失败（已跳过）：{ex.Message}");
+            OldDict.SetLinkedBlacklistFile(null);
         }
     }
 
@@ -660,52 +715,51 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary> 最近一次体检的完整结果：(插件名, 漏网英文列表)——报告窗口据此逐项画出。 </summary>
     public List<(string Name, List<string> Items)> HealthResults { get; } = new();
 
+    /// <summary> 体检（仅清单模式）列出的已装插件清单，供报告窗口渲染成可点击项：点名字→单插件检查/开窗口。
+    /// 元素：(显示名, InternalName, 有配置窗, 有主窗, 是否自身)。</summary>
+    public List<(string Name, string InternalName, bool HasConfig, bool HasMain, bool IsSelf)> HealthPluginList { get; } = new();
+
     /// <summary>
     /// 逐个打开已装插件的配置窗（OpenConfigUi），等 ~1.5 秒让它画出来，
     /// 收集这期间"未命中译文表的纯英文"（≈ 肉眼看着还是英文的），再关掉窗口，最后出报告。
     /// 原理：钩子在绘制那一刻查表，命中的已换成中文指针——所以未命中的英文就是真漏网。
     /// 会短暂自动开关窗口，故做成手动按钮，不在后台自动跑。
     /// </summary>
+    /// <summary> 体检（2026-09-24 改：默认「仅清单模式」，不开窗）。
+    /// 遍历已装插件，在日志输出「检查了哪些插件 / 是否有配置窗或主窗 / 是否已排除自身」，并保留安装器简介覆盖率的静态检查。
+    /// 不开、不关任何窗口——彻底绕开「后台线程调 ImGui 关窗」的崩溃路径（见 ClosePluginWindowOnFrameworkThread）。
+    /// 若要对某插件做「窗内漏网英文」深度检测，请用 <c>/ptp check &lt;插件名&gt;</c> 或体检报告窗点插件名。 </summary>
     public void StartHealthCheck()
     {
         if (_healthRunning) return;
         _healthRunning = true;
         HealthRunning = true;
         HealthReport = "";
-        Task.Run(async () =>
+        Task.Run(() =>
         {
             try
-            {
-                Hook.HealthCollecting = true;
-                var targets = PluginInterface.InstalledPlugins
-                    .Where(p => p.IsLoaded && (p.HasConfigUi || p.HasMainUi)
-                             && !string.Equals(p.InternalName, "FFXIV_Plugin_Localizer", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                AppLog.Info($"[体检] 开始：共 {targets.Count} 个插件待检查");
+                {
+                    var targets = PluginInterface.InstalledPlugins
+                        .Where(p => p.IsLoaded && (p.HasConfigUi || p.HasMainUi))
+                        .ToList();
+                    AppLog.Info($"[体检] 开始（仅清单模式，不开窗）：共 {targets.Count} 个插件待检查");
                 HealthResults.Clear();
+                HealthPluginList.Clear();
                 foreach (var p in targets)
                 {
-                    Hook.ResetMissedSamples();
-                    try { if (p.HasConfigUi) p.OpenConfigUi(); else p.OpenMainUi(); }
-                    catch (Exception exOpen) { AppLog.Warn($"[体检] 打开 {p.Name} 失败：{exOpen.Message}"); }
-                    await Task.Delay(1500);
-                    var missed = Hook.DrainMissedSamples();
-                    // 体检只开不关会留一堆窗口（很麻烦）——开完即关：Atk 原生窗 + Dalamud ImGui 窗
-                    try { AtkHook.TryClosePluginWindow(p.InternalName); } catch { /* 尽力关 Atk 原生窗 */ }
-                    try { ClosePluginUiWindow(p); } catch { /* 尽力关 ImGui 窗 */ }
-                    await Task.Delay(300);
-                    var real = missed.Where(IsLikelyUiText).ToList();
-                    if (real.Count > 0)
+                    // 排除「汉化工具系列」（本项目 + Penumbra 汉化 + MOD 选项汉化）：都是司令官自己的翻译工具，无"英→中"意义，且属其他项目，不该出现在体检清单。
+                    if (SourceExtractService.SelfPluginInternalNames.Contains(p.InternalName))
                     {
-                        AppLog.Info($"[体检] {p.Name}（{p.InternalName}）：{real.Count} 条漏网英文");
-                        foreach (var m in real.Take(15)) AppLog.Info("      " + m);
-                        HealthResults.Add((p.Name, real));
+                        AppLog.Info($"[体检] （已排除汉化工具系列，非翻译目标）{p.Name}（{p.InternalName}）");
+                        continue;
                     }
-                    else
-                    {
-                        AppLog.Info($"[体检] {p.Name}：无漏网英文");
-                    }
+                    var flags = (p.HasConfigUi ? "配置窗" : "") + (p.HasMainUi ? "主窗" : "");
+                    AppLog.Info($"[体检] {p.Name}（{p.InternalName}）：{flags}");
+                    HealthPluginList.Add((p.Name, p.InternalName, p.HasConfigUi, p.HasMainUi, false));
                 }
+                // 按字母排序（2026-09-25 司令官要求）：插件清单按显示名字母序，不区分大小写（"a" 与 "A" 相邻，而不是大写全排在前）。
+                // 用 List.Sort 原地排，不用 Clear+Add：避免排序中途出现"空列表中间态"被渲染线程读到。
+                HealthPluginList.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Name, b.Name));
                 // ── 安装器介绍覆盖率（未安装插件的简介/描述，静态对比仓库清单 vs 译文表）──
                 // 未安装的插件开不了配置窗，它们的介绍在仓库清单里——直接对比即可，不用开窗。
                 var cachePath = Path.Combine(PluginInterface.GetPluginConfigDirectory(), "pluginmaster_cache.json");
@@ -744,11 +798,14 @@ public sealed class Plugin : IDalamudPlugin
                     AppLog.Info("[体检] 无仓库清单缓存（pluginmaster_cache.json），跳过安装器介绍覆盖率检查");
                 }
 
+                // 漏网英文清单同样按插件名字母序（与插件清单一口径）。
+                HealthResults.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Name, b.Name));
+
                 HealthReport = HealthResults.Count == 0
-                    ? "体检完成：所有插件配置窗未发现漏网英文。"
-                    : $"体检完成：{HealthResults.Count} 个插件仍有漏网英文（详见报告窗口/日志）。";
-                AppLog.Info("[体检] 完成。\n" + HealthReport);
-                HealthReportWindow.Toggle();   // 跑完自动弹报告窗给用户看
+                    ? "体检完成（仅清单模式）：已列出所有插件配置窗/主窗情况，详见日志。"
+                    : $"体检完成（仅清单模式）：{HealthResults.Count} 个插件简介/描述仍有漏网英文（详见报告窗口/日志）。";
+                AppLog.Info("[体检] 完成（仅清单模式）。\n" + HealthReport);
+                HealthReportWindow.IsOpen = true;   // 跑完确保报告窗打开（用 IsOpen=true 而非 Toggle，避免报告窗已开着时被误关）
             }
             catch (Exception ex)
             {
@@ -757,43 +814,169 @@ public sealed class Plugin : IDalamudPlugin
             }
             finally
             {
-                Hook.HealthCollecting = false;
                 _healthRunning = false;
                 HealthRunning = false;
             }
         });
     }
 
-    /// <summary> 关闭体检打开的其他插件 ImGui 配置窗/主窗（实例包装，供体检循环调用）。核心逻辑见 ClosePluginUiWindowCore。 </summary>
-    private void ClosePluginUiWindow(object plugin) => ClosePluginUiWindowCore(AppLog, plugin);
+    /// <summary> 指定单个插件做「窗内漏网英文」深度检查（2026-09-24 指令：清单模式为主，按需对单个插件开窗检测）。
+    /// 按名字/InternalName（不区分大小写、子串匹配）定位；排除自身；打开其配置窗/主窗 → 采样漏网英文 → 出报告。
+    /// 不自动关窗：保留刚打开的插件窗口，供司令官当场核对漏网英文（关窗由司令官手动关闭或 /ptp close 处理）。
+    /// 采样期间临时屏蔽自身窗口避免污染；开/等仅后台线程、无原生关窗调用，故不会重演体检崩溃。
+    /// 供 <c>/ptp check &lt;插件名&gt;</c> 与体检报告窗「点插件名」调用。 </summary>
+    public void CheckSinglePlugin(string identifier)
+    {
+        var id = (identifier ?? "").Trim();
+        if (id.Length == 0) { AppLog.Warn("[体检] 请指定插件名：/ptp check <插件名>，或在主窗口输入插件名后点「检查单个插件窗口」"); return; }
+        if (_healthRunning) { AppLog.Warn("[体检] 体检进行中，请稍后再试单插件检查"); return; }
+        Task.Run(async () =>
+        {
+            bool ownMainWasOpen = false, ownLogWasOpen = false;
+            try
+            {
+                var selfName = PluginInterface.InternalName;
+                var p = PluginInterface.InstalledPlugins.FirstOrDefault(x => x.IsLoaded &&
+                    (x.Name.Contains(id, StringComparison.OrdinalIgnoreCase) || x.InternalName.Contains(id, StringComparison.OrdinalIgnoreCase)));
+                if (p is null) { AppLog.Warn($"[体检] 找不到匹配「{id}」的已加载插件"); return; }
+                if (string.Equals(p.InternalName, selfName, StringComparison.OrdinalIgnoreCase)) { AppLog.Warn("[体检] 不检查自身插件"); return; }
+                Hook.HealthCollecting = true;
+                // 检查期间藏起自身窗口，避免全局采样把自家 UI 英文收进该插件报告
+                ownMainWasOpen = MainWindow.IsOpen; ownLogWasOpen = LogWindow.IsOpen;
+                MainWindow.IsOpen = false; LogWindow.IsOpen = false;
+                Hook.ResetMissedSamples();
+                Hook.DrainTreeNodeSamples();   // 清掉上一轮残留，本轮只看这次采样窗口内的折叠头
+                try { if (p.HasConfigUi) p.OpenConfigUi(); else p.OpenMainUi(); }
+                catch (Exception exOpen) { AppLog.Warn($"[体检] 打开 {p.Name} 失败：{exOpen.Message}"); }
+                // 2026-09-25：留 6 秒给司令官切到要检查的页面。多数插件打开后停在首页/模组列表，
+                // 而要看的折叠头在「设置」页——采样只有 1.5 秒时，采到的永远是首页（这正是此前反复定位失败的原因）。
+                AppLog.Info($"[体检] 已打开 {p.Name}：请在这 6 秒内切到你要检查的页面（如「设置」）；采样结束后窗口保留供你核对。");
+                await Task.Delay(6000);
+                var missed = Hook.DrainMissedSamples();
+                var treeSamples = Hook.DrainTreeNodeSamples();
+                // 不自动关窗：保留刚打开的插件窗口，供司令官当场查看漏网英文（关窗由司令官手动或 /ptp close 处理）。
+                var real = missed.Where(IsLikelyUiText).ToList();
+                if (real.Count > 0)
+                {
+                    AppLog.Info($"[体检] {p.Name}（{p.InternalName}）：{real.Count} 条漏网英文");
+                    foreach (var m in real.Take(15)) AppLog.Info("      " + m);
+                    HealthResults.Add((p.Name, real));
+                    // 连点多个插件时，结果列表也保持字母序（原地排序，不产生空列表中间态）
+                    HealthResults.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Name, b.Name));
+                }
+                else
+                {
+                    AppLog.Info($"[体检] {p.Name}：无漏网英文");
+                }
+                // 折叠头专项：Heliosphere 的 Commands/Download speed limits/One-click install/Miscellaneous
+                // 反复报"没替换"。这里把采样窗口内**所有**经过 igTreeNodeEx_Str 的串原样列出（含命中标记），
+                // 一次看清：它们到底有没有走到这个钩子、查表是命中还是未命中。
+                if (treeSamples.Count > 0)
+                {
+                    AppLog.Info($"[体检] 折叠头（igTreeNodeEx_Str）样本 {treeSamples.Count} 条 —— [命中]=已替换，[未命中]=表里没查到：");
+                    foreach (var s in treeSamples.Take(40)) AppLog.Info("      " + s);
+                }
+                else
+                {
+                    AppLog.Info("[体检] 折叠头（igTreeNodeEx_Str）无任何调用：该窗口当前页面没有 TreeNode 折叠头，或该页面在采样期间未渲染。");
+                }
+                HealthReport = $"{p.Name}：{(real.Count > 0 ? real.Count + " 条漏网英文" : "无漏网英文")}";
+                HealthReportWindow.IsOpen = true;   // 确保报告窗开着：点名字时本就开着，Toggle 会误把它关掉
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("[体检] 单插件检查失败：" + ex.Message);
+            }
+            finally
+            {
+                Hook.HealthCollecting = false;
+                if (ownMainWasOpen) MainWindow.IsOpen = true;   // 恢复被屏蔽的自身窗口
+                if (ownLogWasOpen) LogWindow.IsOpen = true;
+            }
+        });
+    }
 
-    /// <summary> 关闭体检打开的其他插件 ImGui 配置窗/主窗（核心逻辑，静态可测）。
+    /// <summary> 在 framework（渲染）线程上安全关闭某插件的窗口：先关 Atk 原生窗，再反射关 ImGui 窗。
+    /// <b>为什么必须封送到 framework 线程</b>：ImGui 上下文与 Atk 原生指针仅 framework 线程有效；在后台线程
+    /// 调用会因 ImGui getter 触发 cimgui 访问违例（C0000005）而整进程崩溃——
+    /// 2026-09-24 实锤：体检关窗用反射读了 Penumbra <c>ModTab.MaximumWidth</c> 的 getter，其内调
+    /// <c>igGetWindowWidth</c>，而后台线程（.NET TP Worker）无 ImGui 上下文 → 崩。原生异常无法被 try/catch 捕获，
+    /// 故只能从线程归属上根治（用 <c>IFramework.RunOnFrameworkThread</c> 把关窗整段挪到渲染线程）。
+    /// 实例包装，供体检循环与一键关窗调用；核心反射逻辑见 ClosePluginUiWindowCore。 </summary>
+    private void ClosePluginWindowOnFrameworkThread(object plugin, string internalName, string tag)
+    {
+        Framework.RunOnFrameworkThread(() =>
+        {
+            try { if (!string.IsNullOrEmpty(internalName)) AtkHook.TryClosePluginWindow(internalName); } catch { /* 尽力关 Atk 原生窗 */ }
+            ClosePluginUiWindowCore(AppLog, plugin, tag);
+        });
+    }
+
+    /// <summary> 一键关闭其它所有插件的配置窗/主窗（ImGui 窗 + Atk 原生窗），不卸载任何插件，只收起界面。
+    /// 复用体检同款反射关窗逻辑（ClosePluginUiWindowCore，已修「深度 2 下钻」）。司令官在游戏里用 <c>/ptp close</c>
+    /// （或中文 <c>关窗</c>）即可触发，免去挨个点关闭；主窗口也有同款按钮。自身（按运行期 InternalName 排除）窗口不动。 </summary>
+    public void CloseAllOtherPluginWindows()
+    {
+        Task.Run(async () =>
+        {
+            try
+            {
+                // 排除「汉化工具系列」（本项目 + Penumbra 汉化 + MOD 选项汉化）：都是司令官自己的翻译工具，关窗时不动它们。
+                var targets = PluginInterface.InstalledPlugins
+                    .Where(p => p.IsLoaded && !SourceExtractService.SelfPluginInternalNames.Contains(p.InternalName))
+                    .ToList();
+                foreach (var p in targets)
+                {
+                    try { ClosePluginWindowOnFrameworkThread(p, p.InternalName, "[关窗]"); } catch { /* 尽力关窗（Atk+ImGui） */ }
+                    await Task.Delay(40);
+                }
+                AppLog.Info($"[关窗] 已对 {targets.Count} 个其它插件执行关闭窗口（ImGui 窗 + Atk 原生窗）。"
+                           + "若仍有个别窗口留驻，多为插件自绘窗无 IsOpen、或 OpenConfigUi 每次新建窗，需手动关。");
+            }
+            catch (Exception ex)
+            {
+                AppLog.Error("[关窗] 失败：" + ex.Message);
+            }
+        });
+    }
+
+    /// <summary> 关闭其他插件 ImGui 配置窗/主窗（核心反射逻辑，静态可测；由 ClosePluginWindowOnFrameworkThread 在 framework 线程调用）。
     /// 官方 IExposedPlugin 只有 OpenConfigUi/OpenMainUi、没有 Close（dalamud.dev API 确认，本工程 AtkNativeUiWalkerService.cs:137 亦记）；
-    /// Atk 原生窗由体检循环的 TryClosePluginWindow 处理。ImGui 窗只能反射：IExposedPlugin 接口本身不暴露插件实例，
-    /// 故反射其**具体运行时类型**取出真正的 IDalamudPlugin 实例，再关闭它身上所有带 IsOpen 的 Window 成员。
-    /// 反射目标/成员名随插件而异（ConfigWindow/MainWindow/插件自定义窗…），属尽力而为；任一步失败静默跳过，不影响体检。 </summary>
-    internal static void ClosePluginUiWindowCore(AppLog log, object plugin)
+    /// Atk 原生窗与 ImGui 窗的关闭都封送在 framework（渲染）线程里执行（见 ClosePluginWindowOnFrameworkThread，2026-09-24 崩溃修复）。ImGui 窗只能反射：IExposedPlugin 接口本身不暴露插件实例，
+    /// 故反射其**具体运行时类型**取出真正的 IDalamudPlugin 实例——注意新 Dalamud 下要**下钻两层**
+    /// （InstalledPlugins 元素＝ExposedPlugin → 包着内部类 LocalPlugin → 其 Instance 才是 IDalamudPlugin，
+    /// 见 GetPluginInstance），再关闭它身上所有带 IsOpen 的 Window 成员（直连或装在 WindowSystem 里）。
+    /// 反射目标/成员名随插件而异（ConfigWindow/MainWindow/插件自定义窗…），属尽力而为；任一步失败静默跳过，不影响调用方。
+    /// <param name="tag">日志前缀，默认"[体检]"；手动一键关窗传"[关窗]"以区分来源。</param> </summary>
+    internal static void ClosePluginUiWindowCore(AppLog log, object plugin, string tag = "[体检]")
     {
         var pluginName = GetExposedName(plugin) ?? "?";
         try
         {
             var instance = GetPluginInstance(plugin);
+            // 取不到 IDalamudPlugin 实例时，退而直接递归扫描包装本身（ExposedPlugin → LocalPlugin → …），
+            // 递归找窗仍能命中藏在更深/非标准位置的窗；仅当整个图都找不到任何窗才跳过。
+            var scanned = instance ?? plugin;
             if (instance is null)
-            {
-                log.Warn($"[体检] 无法取得 {pluginName} 的插件实例（IExposedPlugin 未暴露），跳过 ImGui 窗关闭");
-                return;
-            }
+                log.Warn($"{tag} 无法取得 {pluginName} 的插件实例（退回扫描包装本身）");
             var closed = 0;
-            foreach (var w in EnumerateWindowMembers(instance))
+            foreach (var w in EnumerateWindowMembers(scanned))
             {
-                try { w.GetType().GetProperty("IsOpen")?.SetValue(w, false); closed++; }
+                try
+                {
+                    var wt = w.GetType();
+                    // 优先写 bool 字段（Dalamud Window.IsOpen 多为自动属性，字段最稳；避开任何非平凡 setter）
+                    var fld = wt.GetField("IsOpen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (fld != null && fld.FieldType == typeof(bool)) { fld.SetValue(w, false); closed++; }
+                    else { wt.GetProperty("IsOpen", BindingFlags.Public | BindingFlags.Instance)?.SetValue(w, false); closed++; }
+                }
                 catch { /* 尽力关 */ }
             }
-            log.Info($"[体检] 已尝试关闭 {pluginName} 的 {closed} 个 ImGui 窗");
+            log.Info($"{tag} 已尝试关闭 {pluginName} 的 {closed} 个 ImGui 窗");
         }
         catch (Exception ex)
         {
-            log.Warn($"[体检] 关闭 {pluginName} 的 ImGui 窗失败：{ex.Message}");
+            log.Warn($"{tag} 关闭 {pluginName} 的 ImGui 窗失败：{ex.Message}");
         }
     }
 
@@ -807,20 +990,39 @@ public sealed class Plugin : IDalamudPlugin
         return null;
     }
 
-    /// <summary> 从 IExposedPlugin 的具体运行时类型取出真正的 IDalamudPlugin 实例（接口本身不暴露，只能反射内部字段/属性）。 </summary>
+    /// <summary> 从 IExposedPlugin 的具体运行时类型取出真正的 IDalamudPlugin 实例。
+    /// 接口本身不暴露实例，只能反射——且要**下钻两层**：新 Dalamud 的 InstalledPlugins 元素是
+    /// 公开类 <c>Dalamud.Plugin.ExposedPlugin</c>，它包着内部类 <c>Dalamud.Plugin.Internal.Types.LocalPlugin</c>，
+    /// 真正的 IDalamudPlugin 在 <c>LocalPlugin.Instance</c>（ExposedPlugin 与 LocalPlugin **本身都不是** IDalamudPlugin）。
+    /// 故先找深度 1，再沿 Dalamud 内部包装类型下钻（类名 LocalPlugin / 命名空间 Dalamud.Plugin.Internal）。 </summary>
     internal static object? GetPluginInstance(object plugin)
     {
-        var t = plugin.GetType();
-        foreach (var n in new[] { "Plugin", "Instance", "instance", "LoadedPlugin", "State", "_plugin" })
-        {
-            var v = GetMemberValue(plugin, t, n);
+        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        // 深度 1：直接成员里就有实例（老式包装 / 自定义包装）
+        foreach (var (_, v) in EnumerateMembers(plugin, plugin.GetType(), flags))
             if (IsPluginInstance(v)) return v;
-        }
-        foreach (var (_, v) in EnumerateMembers(plugin, t, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        // 深度 2~3：沿 Dalamud 内部包装（ExposedPlugin → LocalPlugin → Instance）下钻
+        foreach (var (_, wrapper) in EnumerateMembers(plugin, plugin.GetType(), flags))
         {
-            if (IsPluginInstance(v)) return v;
+            if (wrapper is null || !IsDalamudInternalWrapper(wrapper)) continue;
+            foreach (var (_, inner) in EnumerateMembers(wrapper, wrapper.GetType(), flags))
+            {
+                if (IsPluginInstance(inner)) return inner;
+                if (inner is null || !IsDalamudInternalWrapper(inner)) continue;
+                foreach (var (_, deep) in EnumerateMembers(inner, inner.GetType(), flags))
+                    if (IsPluginInstance(deep)) return deep;
+            }
         }
         return null;
+    }
+
+    /// <summary> 是否为 Dalamud 内部包装类型（只对这类成员继续下钻找插件实例，避免误入插件业务对象）。
+    /// 命中：类名 LocalPlugin，或命名空间以 Dalamud.Plugin.Internal 开头。 </summary>
+    private static bool IsDalamudInternalWrapper(object v)
+    {
+        var ty = v.GetType();
+        return ty.Name == "LocalPlugin"
+            || (ty.Namespace ?? "").StartsWith("Dalamud.Plugin.Internal", StringComparison.Ordinal);
     }
 
     private static bool IsPluginInstance(object? v)
@@ -829,25 +1031,63 @@ public sealed class Plugin : IDalamudPlugin
         return v.GetType().GetInterfaces().Any(i => i.Name == "IDalamudPlugin") || v.GetType().Name == "IDalamudPlugin";
     }
 
-    /// <summary> 枚举某实例身上所有「带 IsOpen 属性」的成员（多为 ConfigWindow/MainWindow/插件自定义窗等 Dalamud 窗），取其对象。 </summary>
+    /// <summary> 递归枚举某插件实例图里所有「可关闭的 Dalamud 窗」对象。
+    /// 覆盖各种存法：① 直接字段/属性（ConfigWindow / MainWindow / _configWindow …）；
+    /// ② 装在 Dalamud <c>WindowSystem.Windows</c> 集合；③ 装在 <c>List&lt;Window&gt;</c> / 数组等集合里；
+    /// ④ 嵌套在子对象里（如某配置持有窗引用）。用引用去重 + 深度上限避免死循环/爆栈。
+    /// 仅取值，不改内容；成员读取异常由 EnumerateMembers 内部吞掉。 </summary>
+    private const int WindowScanMaxDepth = 8;
+
     private static IEnumerable<object> EnumerateWindowMembers(object instance)
     {
-        var t = instance.GetType();
-        foreach (var (_, v) in EnumerateMembers(instance, t, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        var stack = new Stack<(object obj, int depth)>();
+        stack.Push((instance, 0));
+        while (stack.Count > 0)
         {
-            if (v is null) continue;
-            if (v.GetType().GetProperty("IsOpen", BindingFlags.Public | BindingFlags.Instance) != null)
-                yield return v;
+            var (cur, depth) = stack.Pop();
+            if (cur is null || cur is string) continue;
+            if (!visited.Add(cur)) continue;
+            var t = cur.GetType();
+            if (t.IsPrimitive || t.IsValueType) continue;            // 基元/值类型不入图
+            if (IsCloseableWindow(cur)) yield return cur;
+            if (depth >= WindowScanMaxDepth) continue;
+            foreach (var (_, v) in EnumerateMembers(cur, t, flags))
+            {
+                if (v is null || v is string) continue;
+                if (v is System.Collections.IEnumerable en)
+                {
+                    foreach (var e in en)
+                        if (e is not null && e is not string) stack.Push((e, depth + 1));
+                }
+                else
+                {
+                    stack.Push((v, depth + 1));
+                }
+            }
         }
+    }
+
+    /// <summary> 该对象是否为一个可关闭的 Dalamud 窗：精确匹配 <c>Dalamud.Interface.Windowing.Window</c>
+    /// （含其子类）；兜底：带公开 IsOpen 且带 WindowName（自定义/老式窗，避免误伤普通 IsOpen 字段）。 </summary>
+    private static bool IsCloseableWindow(object o)
+    {
+        for (var c = o.GetType(); c is not null; c = c.BaseType)
+            if (c.FullName == "Dalamud.Interface.Windowing.Window") return true;
+        var hasIsOpen = o.GetType().GetProperty("IsOpen", BindingFlags.Public | BindingFlags.Instance) != null;
+        var hasName = o.GetType().GetProperty("WindowName", BindingFlags.Public | BindingFlags.Instance) != null;
+        return hasIsOpen && hasName;
     }
 
     private static IEnumerable<(string name, object? value)> EnumerateMembers(object target, Type t, BindingFlags flags)
     {
-        foreach (var pr in t.GetProperties(flags))
-        {
-            object? v = null; try { v = pr.GetValue(target); } catch { v = null; }
-            yield return (pr.Name, v);
-        }
+        // ⚠ 只枚举字段、绝不调属性 getter（2026-09-24 崩溃根治）：插件的属性 getter 可能内部调 ImGui 原生函数
+        // （如 Penumbra ModTab.MaximumWidth → igGetWindowWidth）。即便封送到 framework 线程，RunOnFrameworkThread
+        // 的动作也不在「活动 ImGui 窗口绘制」上下文中，igGetWindowWidth 取不到当前窗口 → cimgui 空指针（C0000005）整进程崩；
+        // 原生违例 try/catch 抓不住。只读字段永不触发 getter 副作用，故任何线程都安全。
+        // 覆盖率不降：窗口引用通常是字段；即便写成自动属性 public Xxx Window { get; }，其编译器生成后备字段
+        // <Xxx>k__BackingField 也是 NonPublic 字段，已被 flags 覆盖。
         foreach (var f in t.GetFields(flags))
         {
             object? v = null; try { v = f.GetValue(target); } catch { v = null; }
