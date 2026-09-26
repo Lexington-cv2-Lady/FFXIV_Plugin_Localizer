@@ -252,7 +252,12 @@ public sealed class OldDictionaryService
     {
         var k = (en ?? "").Trim();
         var v = (zh ?? "").Trim();
-        if (k.Length < 2 || v.Length == 0 || k == v) return false;
+        // ⚠ 2026-09-26 修复：不再丢弃「译文==原文」的条目。
+        //   这类条目是专名 / 固定标识符的「保持原样」锚点（如 [HS] Rue+、Konekomods），
+        //   丢弃会导致它们被当成「未命中」反复送机翻 → 专名被错翻（rue→芸香）。
+        //   保留后它们进入替换表，命中即返回原文（no-op），永不送翻，专名永久保持英文。
+        //   与 ReplacementService（2026-09-18 审查明确「不能排除 k==v」）口径一致。
+        if (k.Length < 2 || v.Length == 0) return false;
         if (TextHeuristics.HasCjk(k)) return false;      // 原文不该含中文（旧数据偶有脏值）
         if (IsBlacklisted(k)) return false;               // ⚠ 黑名单词一律不进词表（永远保持英文）
         if (_entries.ContainsKey(k)) return false;        // 先到先得
@@ -266,7 +271,7 @@ public sealed class OldDictionaryService
     /// 写入位置：<c>&lt;词典目录&gt;\我的翻译.json</c> 的 <c>terms</c> 数组（本项目的通用词源）。
     /// 规则：
     ///   · **已存在的键不覆盖**（先到先得：词典是用户资产，不应被一次汇总悄悄改掉）；
-    ///   · 值为空、键含中文、键值相同、键长 &lt;2 的条目跳过（与读取口径一致）；
+    ///   · 值为空、键含中文、键长 &lt;2 的条目跳过（**刻意保留**「译文==原文」的专名固定项，与读取口径一致）；
     ///   · 同一次调用内去重；
     ///   · **保留原有文件的 _说明 / mods 等字段**（用 JsonNode 局部改，不整个重写用户的文件结构）。
     /// 返回（新增条数, 跳过条数）。
@@ -322,7 +327,7 @@ public sealed class OldDictionaryService
             {
                 var k = (rawEn ?? "").Trim();
                 var v = (rawZh ?? "").Trim();
-                if (k.Length < 2 || v.Length == 0 || k == v) { skipped++; continue; }
+                if (k.Length < 2 || v.Length == 0) { skipped++; continue; }
                 if (TextHeuristics.HasCjk(k)) { skipped++; continue; }
                 // ⚠ 机翻结果有效性校验：模型返回英文推理/元评论/空值/原文照抄时不写入（2026-09-23 起因：混入英文独白）
                 if (!TextHeuristics.IsValidMachineTranslation(k, v)) { invalid++; continue; }
