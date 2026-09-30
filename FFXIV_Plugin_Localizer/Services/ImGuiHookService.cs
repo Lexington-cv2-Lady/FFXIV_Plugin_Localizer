@@ -141,7 +141,6 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly Func<bool> _hooksEnabled;
     private readonly Func<bool> _widgetHooksEnabled;
     private readonly Func<bool> _translatePenumbra;
-    private readonly Func<bool> _suppressFileDialogs;
 
     private Hook<TextUnformattedDelegate>? _textHook;
     private Hook<TextExDelegate>? _textExHook;
@@ -156,9 +155,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
     // ⚠ 仅顶层 igBegin/igEnd 维护栈（子窗口 BeginChild 走的是 igBeginChild，不经过这两个钩，故不影响栈）。
     private readonly Stack<bool> _penumbraStack = new();
     private int _penumbraDepth;
-    // ── 文件对话框（ImGuiFileDialog）专用开关：与 Penumbra 同构的「嵌套栈 + 深度计数」──
-    // 2026-09-30 司令官需求（B 档）：Penumbra 的「导出角色包 / 导入模组包」等文件选择框保持英文，
-    // 不干涉模组列表等其它窗口的翻译。文件对话框是**独立顶层窗**（与 Penumbra 主窗为兄弟关系），
+    // ── 文件对话框（ImGuiFileDialog）：与 Penumbra 同构的「嵌套栈 + 深度计数」──
+    // 2026-09-30 司令官需求：Penumbra 的「导出角色包 / 导入模组包」等文件选择框保持英文，
+    // 不干涉模组列表等其它窗口的翻译。该功能**已并入「翻译 Penumbra 插件」开关**（不设独立配置项）：
+    // 开关开 → 翻译 Penumbra 内容、文件对话框保持英文；开关关 → Penumbra 整体不翻。
+    // 文件对话框是**独立顶层窗**（与 Penumbra 主窗为兄弟关系），
     // 窗口名形如 "导出角色包...###SaveFileDialog" / "导入模组包###OpenFileDialog"（**不含 penumbra**），
     // 故既落不进 Penumbra 栈、也不受「翻译 Penumbra」总开关管辖——必须单列一套栈来识别。
     // 子窗格名形如 "...###SaveFileDialog/##FileDialog_ColumnChild_xxx"（带前缀），同样命中关键字。
@@ -231,7 +232,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
 
     public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop,
         Func<bool> hooksEnabled, Func<bool> widgetHooksEnabled, ReplacementService replacement,
-        bool debugStats, Func<bool> translatePenumbra, Func<bool> suppressFileDialogs)
+        bool debugStats, Func<bool> translatePenumbra)
     {
         _appLog = appLog;
         _log = log;
@@ -239,7 +240,6 @@ public sealed unsafe class ImGuiHookService : IDisposable
         _hooksEnabled = hooksEnabled;
         _widgetHooksEnabled = widgetHooksEnabled;
         _translatePenumbra = translatePenumbra;
-        _suppressFileDialogs = suppressFileDialogs;
         _replacement = replacement;
         // ⚠ 必须**从构造函数传入**，不能像以前那样构造后再 `Hook.DebugStats = …` 赋值——
         //    InstallHooks 在构造期就跑完了，那时 DebugStats 还是 false，导致"按 DebugStats 才装"的
@@ -445,10 +445,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 bool isPen = !_translatePenumbra() && IsPenumbraWindow((byte*)name);
                 _penumbraStack.Push(isPen);
                 if (isPen) _penumbraDepth++;
-                // ①-b 文件对话框上下文标记：与上面同构。开关关时恒 false（短路后不付扫描开销）；
-                //     必须**无条件 push** 以保持与 igEnd 的出栈配对平衡。
+                // ①-b 文件对话框上下文标记：与上面同构，**随「翻译 Penumbra」开关启停**
+                //     （2026-09-30 司令官指令：该功能并入「翻译 Penumbra 插件」，不设独立开关）。
+                //     开关关时恒 false（短路后不付扫描开销）；必须**无条件 push** 以保持与 igEnd 的配对平衡。
                 if (_fileDialogStack.Count > 8192) { _fileDialogStack.Clear(); _fileDialogDepth = 0; }
-                bool isFd = _suppressFileDialogs() && IsFileDialogWindow((byte*)name);
+                bool isFd = _translatePenumbra() && IsFileDialogWindow((byte*)name);
                 _fileDialogStack.Push(isFd);
                 if (isFd) _fileDialogDepth++;
                 // ② 诊断：记录窗口名（仅 DebugStats 时；**累计**，避免漏掉只在两次 tick 间短暂渲染的窗口）
@@ -530,10 +531,11 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private bool SuppressForPenumbra() => !_translatePenumbra() && _penumbraDepth > 0;
 
     /// <summary> 本次替换是否应被「按窗口」规则抑制——**所有替换入口的统一闸门**。
-    /// 现有两类规则：①「翻译 Penumbra」关且处于 Penumbra 窗体；②「文件对话框保持英文」开且处于文件选择框
-    /// （2026-09-30 司令官需求 B 档）。两者正交、可同时生效。
+    /// 现有两类规则：①「翻译 Penumbra」**关**且处于 Penumbra 窗体 ⇒ 抑制（Penumbra 整体不翻）；
+    /// ②「翻译 Penumbra」**开**且处于文件选择框 ⇒ 抑制（2026-09-30 司令官指令：翻译 Penumbra 时
+    /// 只翻模组列表等内容，导入/导出对话框保持英文；该规则已并入本开关，无独立配置项）。
     /// ⚠ 今后新增「按窗口抑制」规则时**只改本方法**，各 Detour 一律调用它，避免遗漏入口。 </summary>
-    private bool ShouldSuppress() => SuppressForPenumbra() || (_suppressFileDialogs() && _fileDialogDepth > 0);
+    private bool ShouldSuppress() => SuppressForPenumbra() || (_translatePenumbra() && _fileDialogDepth > 0);
 
     /// <summary> 纯 ASCII（不含中文/日文/全角）——用于过滤"已经是中文"的噪音。 </summary>
     private static bool IsPureAscii(string s)
