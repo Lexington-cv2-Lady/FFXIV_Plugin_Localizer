@@ -141,6 +141,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private readonly Func<bool> _hooksEnabled;
     private readonly Func<bool> _widgetHooksEnabled;
     private readonly Func<bool> _translatePenumbra;
+    private readonly Func<bool> _suppressFileDialogs;
 
     private Hook<TextUnformattedDelegate>? _textHook;
     private Hook<TextExDelegate>? _textExHook;
@@ -155,12 +156,24 @@ public sealed unsafe class ImGuiHookService : IDisposable
     // ⚠ 仅顶层 igBegin/igEnd 维护栈（子窗口 BeginChild 走的是 igBeginChild，不经过这两个钩，故不影响栈）。
     private readonly Stack<bool> _penumbraStack = new();
     private int _penumbraDepth;
+    // ── 文件对话框（ImGuiFileDialog）专用开关：与 Penumbra 同构的「嵌套栈 + 深度计数」──
+    // 2026-09-30 司令官需求（B 档）：Penumbra 的「导出角色包 / 导入模组包」等文件选择框保持英文，
+    // 不干涉模组列表等其它窗口的翻译。文件对话框是**独立顶层窗**（与 Penumbra 主窗为兄弟关系），
+    // 窗口名形如 "导出角色包...###SaveFileDialog" / "导入模组包###OpenFileDialog"（**不含 penumbra**），
+    // 故既落不进 Penumbra 栈、也不受「翻译 Penumbra」总开关管辖——必须单列一套栈来识别。
+    // 子窗格名形如 "...###SaveFileDialog/##FileDialog_ColumnChild_xxx"（带前缀），同样命中关键字。
+    private readonly Stack<bool> _fileDialogStack = new();
+    private int _fileDialogDepth;
     // Penumbra 的两类顶层窗体标识（用于「翻译 Penumbra 开关关」时判定窗口归属）：
     // ① 主窗 "Penumbra###PenumbraConfigWindow" —— 可见名含 penumbra；
     // ② 模组编辑窗 "{mod.Name}###SubModEdit{N}" —— 以 MOD 名命名、可见名不含 Penumbra，靠 SubModEdit 标识辨认。
     // ⚠ 二者都是独立顶层窗（兄弟关系，非嵌套），故必须都认，否则任一类窗体漏翻（2026-09-25 司令官二次报 bug：手动安装/编辑窗作者名仍被翻）。
     private static readonly byte[] PenumbraLower = { (byte)'p', (byte)'e', (byte)'n', (byte)'u', (byte)'m', (byte)'b', (byte)'r', (byte)'a' };
     private static readonly byte[] SubModEditLower = { (byte)'s', (byte)'u', (byte)'b', (byte)'m', (byte)'o', (byte)'d', (byte)'e', (byte)'d', (byte)'i', (byte)'t' };
+    // 文件对话框（ImGuiFileDialog）的两类窗体标识：保存框 "###SaveFileDialog" / 打开框 "###OpenFileDialog"
+    // —— ImGuiFileDialog 内部写死的窗口 ID，不随语言 / 路径变化，稳定可作识别标志。
+    private static readonly byte[] SaveFileDialogLower = { (byte)'s', (byte)'a', (byte)'v', (byte)'e', (byte)'f', (byte)'i', (byte)'l', (byte)'e', (byte)'d', (byte)'i', (byte)'a', (byte)'l', (byte)'o', (byte)'g' };
+    private static readonly byte[] OpenFileDialogLower = { (byte)'o', (byte)'p', (byte)'e', (byte)'n', (byte)'f', (byte)'i', (byte)'l', (byte)'e', (byte)'d', (byte)'i', (byte)'a', (byte)'l', (byte)'o', (byte)'g' };
     /// <summary> 实际挂接成功的控件导出名（诊断用：日志会列出，便于确认某控件是否真挂上）。 </summary>
     private readonly List<string> _hookedWidgetNames = new();
     /// <summary> 实际挂接成功的文字桩名（诊断用，与控件名一起输出调用计数）。 </summary>
@@ -218,7 +231,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
 
     public ImGuiHookService(AppLog appLog, IPluginLog log, IGameInteropProvider interop,
         Func<bool> hooksEnabled, Func<bool> widgetHooksEnabled, ReplacementService replacement,
-        bool debugStats, Func<bool> translatePenumbra)
+        bool debugStats, Func<bool> translatePenumbra, Func<bool> suppressFileDialogs)
     {
         _appLog = appLog;
         _log = log;
@@ -226,6 +239,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
         _hooksEnabled = hooksEnabled;
         _widgetHooksEnabled = widgetHooksEnabled;
         _translatePenumbra = translatePenumbra;
+        _suppressFileDialogs = suppressFileDialogs;
         _replacement = replacement;
         // ⚠ 必须**从构造函数传入**，不能像以前那样构造后再 `Hook.DebugStats = …` 赋值——
         //    InstallHooks 在构造期就跑完了，那时 DebugStats 还是 false，导致"按 DebugStats 才装"的
@@ -322,7 +336,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// <summary> 文字绘制转发：命中对照表则换中文指针（NUL 结尾），否则原样透传。异常绝不外抛。 </summary>
     private void TextUnformattedDetour(nint textBegin, nint textEnd)
     {
-        if (textBegin != 0 && _replacement.Enabled && !SuppressReplacement && !SuppressForPenumbra())
+        if (textBegin != 0 && _replacement.Enabled && !SuppressReplacement && !ShouldSuppress())
         {
             var rep = TryLookup(textBegin, textEnd, "TextUnformatted");
             if (rep != 0)
@@ -337,7 +351,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// <summary> igTextEx 转发（Text/TextWrapped 等文字族的总入口，flags 原样透传）。 </summary>
     private void TextExDetour(nint text, nint textEnd, int flags)
     {
-        if (text != 0 && _replacement.Enabled && !SuppressReplacement && !SuppressForPenumbra())
+        if (text != 0 && _replacement.Enabled && !SuppressReplacement && !ShouldSuppress())
         {
             var rep = TryLookup(text, textEnd, "TextEx");
             if (rep != 0)
@@ -431,6 +445,12 @@ public sealed unsafe class ImGuiHookService : IDisposable
                 bool isPen = !_translatePenumbra() && IsPenumbraWindow((byte*)name);
                 _penumbraStack.Push(isPen);
                 if (isPen) _penumbraDepth++;
+                // ①-b 文件对话框上下文标记：与上面同构。开关关时恒 false（短路后不付扫描开销）；
+                //     必须**无条件 push** 以保持与 igEnd 的出栈配对平衡。
+                if (_fileDialogStack.Count > 8192) { _fileDialogStack.Clear(); _fileDialogDepth = 0; }
+                bool isFd = _suppressFileDialogs() && IsFileDialogWindow((byte*)name);
+                _fileDialogStack.Push(isFd);
+                if (isFd) _fileDialogDepth++;
                 // ② 诊断：记录窗口名（仅 DebugStats 时；**累计**，避免漏掉只在两次 tick 间短暂渲染的窗口）
                 if (DebugStats)
                 {
@@ -463,6 +483,10 @@ public sealed unsafe class ImGuiHookService : IDisposable
             {
                 if (_penumbraStack.Pop()) _penumbraDepth--;
             }
+            if (_fileDialogStack.Count > 0)
+            {
+                if (_fileDialogStack.Pop()) _fileDialogDepth--;
+            }
         }
         catch { /* 绝不外抛 */ }
         _endProdHook!.Original();
@@ -472,6 +496,12 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// 最多扫 256 字节、遇 NUL 即停，零分配。 </summary>
     private static bool IsPenumbraWindow(byte* p)
         => ScanKeyword(p, PenumbraLower) || ScanKeyword(p, SubModEditLower);
+
+    /// <summary> 在 UTF-8 字节流中查找文件对话框窗体标识（savefiledialog 或 openfiledialog，不区分大小写）。
+    /// 2026-09-30 B 档新增：ImGuiFileDialog 的窗口名形如 "导出角色包...###SaveFileDialog"，
+    /// 嵌套子窗格带该前缀，故同样命中。 </summary>
+    private static bool IsFileDialogWindow(byte* p)
+        => ScanKeyword(p, SaveFileDialogLower) || ScanKeyword(p, OpenFileDialogLower);
 
     /// <summary> 在字节流中查找关键字 kw（不区分大小写），KMP 式单状态扫描，零分配。 </summary>
     private static bool ScanKeyword(byte* p, byte[] kw)
@@ -498,6 +528,12 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// <summary> 是否应因「Penumbra 开关关」而抑制本次替换（按当前窗口嵌套上下文）。
     /// 开关开时恒 false（不付窗口判定开销，直接走全局翻译）；开关关时只要嵌套链里还有 Penumbra 窗体即抑制。 </summary>
     private bool SuppressForPenumbra() => !_translatePenumbra() && _penumbraDepth > 0;
+
+    /// <summary> 本次替换是否应被「按窗口」规则抑制——**所有替换入口的统一闸门**。
+    /// 现有两类规则：①「翻译 Penumbra」关且处于 Penumbra 窗体；②「文件对话框保持英文」开且处于文件选择框
+    /// （2026-09-30 司令官需求 B 档）。两者正交、可同时生效。
+    /// ⚠ 今后新增「按窗口抑制」规则时**只改本方法**，各 Detour 一律调用它，避免遗漏入口。 </summary>
+    private bool ShouldSuppress() => SuppressForPenumbra() || (_suppressFileDialogs() && _fileDialogDepth > 0);
 
     /// <summary> 纯 ASCII（不含中文/日文/全角）——用于过滤"已经是中文"的噪音。 </summary>
     private static bool IsPureAscii(string s)
@@ -718,7 +754,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     /// </summary>
     private nint Label(nint p, string exportName = "控件")
     {
-        if (p == 0 || !_replacement.Enabled || SuppressReplacement || SuppressForPenumbra()) return p;
+        if (p == 0 || !_replacement.Enabled || SuppressReplacement || ShouldSuppress()) return p;
         // ⚠ 2026-09-25：source **始终**传具体导出名（原来非调试时统一传"控件"），
         //   否则单插件检查时无法按导出名筛出折叠头样本，诊断只能靠"钩子调试日志"开关——而该开关默认是关的。
         //   传的是常量字符串引用，无分配、无额外开销（统计本身仍受 DebugStats/HealthCollecting 门槛保护）。
@@ -736,7 +772,7 @@ public sealed unsafe class ImGuiHookService : IDisposable
     private nint LabelWithEnd(nint p, nint labelEnd, out nint repEnd)
     {
         repEnd = 0;
-        if (p == 0 || !_replacement.Enabled || SuppressReplacement || SuppressForPenumbra()) return 0;
+        if (p == 0 || !_replacement.Enabled || SuppressReplacement || ShouldSuppress()) return 0;
         // 区间长度：labelEnd 非 0 时按它算（尊重调用方的切片）；为 0 时扫到 NUL 兜底
         //（正常 TreeNodeBehavior 调用 labelEnd 恒为 label+len，此处只是防御）。
         var n = labelEnd != 0 ? (int)(labelEnd - p) : 0;

@@ -52,6 +52,18 @@ public sealed class MainWindow : Window
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("默认关闭。关闭时本插件完全不翻译 Penumbra 的任何内容（模组名、UI、说明一律保持英文原文）；\n勾选后才照常对 Penumbra 做全局翻译。\n即时生效，无需重载。");
 
+        // ── 文件对话框保持英文（默认开；2026-09-30 司令官需求 B 档）──
+        var supFd = _plugin.Configuration.SuppressFileDialogs;
+        if (ImGui.Checkbox("文件对话框保持英文（导出/另存为等）", ref supFd))
+        {
+            _plugin.Configuration.SuppressFileDialogs = supFd;
+            _plugin.Configuration.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("默认开启。开启时，各类「文件选择框」（导入模组包 / 导出角色包等）内的文字保持英文原文——\n" +
+                             "文件类型下拉里的模组包格式名（如 Penumbra Mod Packs）本就是给您辨认格式用的，译成中文反而妨碍识别。\n" +
+                             "取消勾选则照常翻译。即时生效，无需重载。");
+
         // ── 联动旧项目单词黑名单（默认开）──
         var linkBl = _plugin.Configuration.LinkOldProjectBlacklist;
         if (ImGui.Checkbox("联动旧项目单词黑名单", ref linkBl))
