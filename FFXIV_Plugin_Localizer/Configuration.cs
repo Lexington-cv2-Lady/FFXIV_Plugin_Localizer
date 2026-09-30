@@ -80,6 +80,16 @@ public class Configuration : IPluginConfiguration
     ///   代价：关掉时 Penumbra 的 UI 也不会被翻（Penumbra 目前没有专门窗口表，影响有限）。 </summary>
     public bool TranslatePenumbra { get; set; }
 
+    /// <summary> 【文件对话框专用开关】是否抑制「文件选择框」（ImGuiFileDialog：导入模组包 / 导出角色包等）的翻译。
+    /// 默认**开**（2026-09-30 司令官要求「仅保留模组列表的翻译，不干涉其他窗口的翻译」，选 B 档落地）：
+    /// 开 = 文件对话框内的文字一律保持英文原文（含文件类型下拉的 "Penumbra Mod Packs"、"Any File" 等
+    /// ——这些标签是给用户辨认文件格式用的，译成中文反而妨碍识别）；
+    /// 关 = 照常翻译（恢复 2026-09-30 之前的行为）。
+    /// ⚠ 判定依据：渲染时按当前 ImGui 窗口名是否含 "SaveFileDialog" / "OpenFileDialog" 决定是否抑制
+    ///   （见 ImGuiHookService.IsFileDialogWindow），与「翻译 Penumbra」开关正交、互不影响。
+    ///   开关即时生效（运行时按窗口上下文判断），不改动任何翻译表/核心逻辑。 </summary>
+    public bool SuppressFileDialogs { get; set; } = true;
+
     /// <summary> 【联动旧项目单词黑名单】开启后，自动探测旧项目（FFXIV 模组汉化工具）的词典目录，
     /// 把它的「单词黑名单.json」**并入**本插件黑名单（命中词保持英文，不翻译、不替换）。
     /// 默认**开**（2026-09-25 司令官报 bug：Penumbra 里旧项目已拉黑的 MOD 专名——Lavabod/YAB/TBSE 等——
