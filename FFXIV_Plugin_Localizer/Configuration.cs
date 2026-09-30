@@ -77,18 +77,12 @@ public class Configuration : IPluginConfiguration
     /// （模组名、UI 标签、说明文字一律保持英文原文）；开 = 照常对 Penumbra 做全局翻译。
     /// ⚠ 判定依据：渲染时按当前 ImGui 窗口名是否含 "Penumbra" 决定是否抑制（见 ImGuiHookService）。
     ///   开关即时生效（运行时按窗口上下文判断），不改动任何翻译表/核心逻辑。
-    ///   代价：关掉时 Penumbra 的 UI 也不会被翻（Penumbra 目前没有专门窗口表，影响有限）。 </summary>
+    ///   代价：关掉时 Penumbra 的 UI 也不会被翻（Penumbra 目前没有专门窗口表，影响有限）。
+    /// ⚠ 2026-09-30 并入：本开关**开启**时，附带「文件选择框保持英文」行为——文件对话框
+    ///   （导入模组包 / 导出角色包等）内的文字不翻译，因文件类型下拉里的格式名（如 Penumbra Mod Packs）
+    ///   本是给用户辨认格式用的，译成中文反而妨碍识别。该行为**无独立开关**，随本开关一同启停，
+    ///   判定见 ImGuiHookService.IsFileDialogWindow / ShouldSuppress。 </summary>
     public bool TranslatePenumbra { get; set; }
-
-    /// <summary> 【文件对话框专用开关】是否抑制「文件选择框」（ImGuiFileDialog：导入模组包 / 导出角色包等）的翻译。
-    /// 默认**开**（2026-09-30 司令官要求「仅保留模组列表的翻译，不干涉其他窗口的翻译」，选 B 档落地）：
-    /// 开 = 文件对话框内的文字一律保持英文原文（含文件类型下拉的 "Penumbra Mod Packs"、"Any File" 等
-    /// ——这些标签是给用户辨认文件格式用的，译成中文反而妨碍识别）；
-    /// 关 = 照常翻译（恢复 2026-09-30 之前的行为）。
-    /// ⚠ 判定依据：渲染时按当前 ImGui 窗口名是否含 "SaveFileDialog" / "OpenFileDialog" 决定是否抑制
-    ///   （见 ImGuiHookService.IsFileDialogWindow），与「翻译 Penumbra」开关正交、互不影响。
-    ///   开关即时生效（运行时按窗口上下文判断），不改动任何翻译表/核心逻辑。 </summary>
-    public bool SuppressFileDialogs { get; set; } = true;
 
     /// <summary> 【联动旧项目单词黑名单】开启后，自动探测旧项目（FFXIV 模组汉化工具）的词典目录，
     /// 把它的「单词黑名单.json」**并入**本插件黑名单（命中词保持英文，不翻译、不替换）。

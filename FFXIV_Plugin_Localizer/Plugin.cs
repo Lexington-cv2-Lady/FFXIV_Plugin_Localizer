@@ -100,7 +100,7 @@ public sealed class Plugin : IDalamudPlugin
         EnsureDictDir();
         Hook = new ImGuiHookService(AppLog, Log, Interop, () => Configuration.HooksEnabled,
             () => Configuration.WidgetHooks, Replacement, Configuration.DebugHookLog,
-            () => Configuration.TranslatePenumbra, () => Configuration.SuppressFileDialogs);
+            () => Configuration.TranslatePenumbra);
         // 原生 UI（AtkAddon）文字汉化：与 ImGui 钩子互补，覆盖 KamiToolKit 系插件的游戏原生配置窗口
         //（SetText 钩子曾被 Reloaded.Hooks 拒编，2026-09-18 改为 500ms 轮询遍历 AtkStage 组件树 + 官方 SetText）
         AtkHook = new AtkNativeUiWalkerService(AppLog, Log, Framework, Replacement);

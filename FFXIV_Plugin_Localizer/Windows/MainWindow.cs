@@ -42,7 +42,7 @@ public sealed class MainWindow : Window
         Ui.ColoredWrapped(new Vector4(0.9f, 0.85f, 0.55f, 1f),
             "排障：若哪个插件界面错乱/显示异常，把上面的「启用汉化」取消勾选，所有界面立刻还原英文；翻译文件不删，重新勾选即恢复。");
 
-        // ── Penumbra 专用开关（默认关）──
+        // ── Penumbra 专用开关（默认关；2026-09-30 起并入「文件选择框保持英文」行为）──
         var transPen = _plugin.Configuration.TranslatePenumbra;
         if (ImGui.Checkbox("翻译 Penumbra 插件", ref transPen))
         {
@@ -50,19 +50,10 @@ public sealed class MainWindow : Window
             _plugin.Configuration.Save();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("默认关闭。关闭时本插件完全不翻译 Penumbra 的任何内容（模组名、UI、说明一律保持英文原文）；\n勾选后才照常对 Penumbra 做全局翻译。\n即时生效，无需重载。");
-
-        // ── 文件对话框保持英文（默认开；2026-09-30 司令官需求 B 档）──
-        var supFd = _plugin.Configuration.SuppressFileDialogs;
-        if (ImGui.Checkbox("文件对话框保持英文（导出/另存为等）", ref supFd))
-        {
-            _plugin.Configuration.SuppressFileDialogs = supFd;
-            _plugin.Configuration.Save();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("默认开启。开启时，各类「文件选择框」（导入模组包 / 导出角色包等）内的文字保持英文原文——\n" +
-                             "文件类型下拉里的模组包格式名（如 Penumbra Mod Packs）本就是给您辨认格式用的，译成中文反而妨碍识别。\n" +
-                             "取消勾选则照常翻译。即时生效，无需重载。");
+            ImGui.SetTooltip("默认关闭。关闭时本插件完全不翻译 Penumbra 的任何内容（模组名、UI、说明一律保持英文原文）。\n" +
+                             "勾选后翻译 Penumbra 的界面内容（模组列表等）；但「文件选择框」（导入模组包 / 导出角色包等）\n" +
+                             "内的文字保持英文原文——文件类型下拉里的格式名（如 Penumbra Mod Packs）本是给您辨认格式用的，\n" +
+                             "译成中文反而妨碍识别。\n即时生效，无需重载。");
 
         // ── 联动旧项目单词黑名单（默认开）──
         var linkBl = _plugin.Configuration.LinkOldProjectBlacklist;
