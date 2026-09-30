@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <!-- 未正式发布不设版号（P0）：程序集用默认 1.0.0.0，发布时再定版本 -->
+    <!-- 正式发布的版本号（2026-09-30 起启用）。
+         1.0.0 = 首次发布（2026-09-20）；1.1.0 = 新增「文件选择框保持英文」功能（并入「翻译 Penumbra 插件」开关），
+         向后兼容的功能新增，按语义化版本升 minor。 -->
+    <Version>1.1.0</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- 插件 ID（InternalName）= 程序集名，必须为 ASCII；显示名（Name）用中文。 -->
     <AssemblyName>FFXIV_Plugin_Localizer</AssemblyName>
